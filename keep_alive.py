@@ -59,7 +59,7 @@ WEBSITE_BANS = {}
 
 def get_base_url() -> str:
     """
-    Dynamically determines the host URL (e.g., https://kumo-server-builder.vercel.app).
+    Dynamically determines the host URL.
     Checks DASHBOARD_URL first, then Vercel system env vars, then the request host.
     """
     dashboard = os.getenv("DASHBOARD_URL")
@@ -285,7 +285,7 @@ def api_generate():
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     system_instruction = (
-        "You are Kumo, an expert Discord architect for Static Studio. Output ONLY valid JSON representing a Discord server layout."
+        "You are an expert Discord Infrastructure Architect for Static Studio. Output ONLY valid JSON representing a Discord server layout."
         " Required structure:\n"
         "{\n"
         '  "server_name": "String",\n'
@@ -435,4 +435,3 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
