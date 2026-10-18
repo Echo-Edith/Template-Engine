@@ -8,7 +8,7 @@ from discord.ext import commands
 
 # 1. Initialize Flask Web Dashboard & API
 app = Flask(__name__, template_folder="templates")
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "kumo-super-secret-key-change-me").strip()
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super-secret-key-change-me").strip()
 
 # Session cookie configuration for modern HTTPS proxies (Vercel & Render)
 app.config["SESSION_COOKIE_SECURE"] = True
@@ -54,16 +54,16 @@ FALLBACK_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kumo Dashboard</title>
+    <title>Discord Infrastructure Architect</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center justify-center p-6">
     <div class="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl text-center space-y-6">
         <div class="w-20 h-20 mx-auto bg-indigo-600/20 rounded-full flex items-center justify-center border border-indigo-500/30 text-indigo-400 text-3xl font-bold">
-            ☁️
+            🛡️
         </div>
         <div>
-            <h1 class="text-2xl font-black tracking-tight text-white">Kumo Architecture</h1>
+            <h1 class="text-2xl font-black tracking-tight text-white">Discord Architecture</h1>
             <p class="text-slate-400 text-sm mt-1">Discord Bot & Web Portal Online</p>
         </div>
 
@@ -266,11 +266,11 @@ async def on_ready():
     print("-----------------------------------------")
 
     try:
-        if "cogs.kumo" not in bot.extensions:
-            await bot.load_extension("cogs.kumo")
-            print("Successfully loaded cog: cogs.kumo")
+        if "cogs.bot" not in bot.extensions:
+            await bot.load_extension("cogs.bot")
+            print("Successfully loaded cog: cogs.bot")
     except Exception as e:
-        print(f"Failed to load cogs.kumo: {e}")
+        print(f"Failed to load cogs.bot: {e}")
 
     try:
         synced = await bot.tree.sync()
@@ -295,4 +295,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
