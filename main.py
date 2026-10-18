@@ -51,10 +51,19 @@ async def on_ready():
     except Exception as e:
         print(f"CRITICAL ERROR loading cog cogs.bot: {e}")
 
-    # 2. Sync Slash Commands Globally across Discord
+    # 2. INSTANT GUILD SYNC: Copies commands directly to joined guilds for instant availability
+    for guild in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=guild)
+            synced_guild = await bot.tree.sync(guild=guild)
+            print(f"⚡ Instant Synced {len(synced_guild)} command(s) to guild: '{guild.name}' ({guild.id})")
+        except Exception as e:
+            print(f"Failed to instant sync guild '{guild.name}': {e}")
+
+    # 3. Global Sync Across Discord (for new guilds)
     try:
-        synced = await bot.tree.sync()
-        print(f"Successfully registered & synced {len(synced)} global slash command(s) with Discord.")
+        synced_global = await bot.tree.sync()
+        print(f"🌐 Global Sync Completed: {len(synced_global)} global slash command(s) registered.")
     except Exception as e:
         print(f"Failed to sync global slash commands: {e}")
 
