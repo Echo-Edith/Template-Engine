@@ -51,16 +51,16 @@ async def on_ready():
     except Exception as e:
         print(f"CRITICAL ERROR loading cog cogs.bot: {e}")
 
-    # 2. INSTANT GUILD SYNC: Copies commands directly to joined guilds for instant availability
+    # 2. Clear duplicate Guild overrides to prevent duplicate commands in Discord UI
     for guild in bot.guilds:
         try:
-            bot.tree.copy_global_to(guild=guild)
-            synced_guild = await bot.tree.sync(guild=guild)
-            print(f"⚡ Instant Synced {len(synced_guild)} command(s) to guild: '{guild.name}' ({guild.id})")
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print(f"🧹 Cleared local guild command overrides for: '{guild.name}' ({guild.id})")
         except Exception as e:
-            print(f"Failed to instant sync guild '{guild.name}': {e}")
+            print(f"Failed to clear local guild commands for '{guild.name}': {e}")
 
-    # 3. Global Sync Across Discord (for new guilds)
+    # 3. Global Sync Across Discord (clean single command instances)
     try:
         synced_global = await bot.tree.sync()
         print(f"🌐 Global Sync Completed: {len(synced_global)} global slash command(s) registered.")
