@@ -6,7 +6,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-class KumoCog(commands.Cog):
+
+class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
@@ -25,13 +26,13 @@ class KumoCog(commands.Cog):
             flags=re.UNICODE
         )
         clean_name = emoji_pattern.sub('', name)
-        
+
         clean_name = re.sub(r'[^a-zA-Z0-9\s\-_]', '', clean_name).strip().lower()
         clean_name = re.sub(r'[\s_]+', '-', clean_name)
-        
+
         prefix = f"{emoji.strip()}-" if emoji and not name.startswith(emoji) else ""
         formatted = f"{prefix}{clean_name}".strip("-")
-        
+
         if not clean_name and emoji:
             return emoji
         return formatted or "unnamed-channel"
@@ -60,13 +61,27 @@ class KumoCog(commands.Cog):
             except Exception as e:
                 print(f"Failed to create fallback channel: {e}")
 
+    # --- OWNER SYNC COMMAND ---
+    @commands.command(name="sync")
+    @commands.is_owner()
+    async def sync_commands(self, ctx: commands.Context):
+        """Manual prefix command (!sync) to instantly sync slash commands to current guild."""
+        msg = await ctx.send("🔄 Syncing slash commands...")
+        try:
+            self.bot.tree.copy_global_to(guild=ctx.guild)
+            synced = await self.bot.tree.sync(guild=ctx.guild)
+            await msg.edit(content=f"✅ Instant synced **{len(synced)}** slash command(s) to this server!")
+        except Exception as e:
+            await msg.edit(content=f"❌ Failed to sync slash commands: `{e}`")
+
+    # --- PING COMMAND ---
     @app_commands.command(
         name="ping",
         description="Check the bot's response latency."
     )
     async def ping(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        
+
         latency = round(self.bot.latency * 1000)
         embed = discord.Embed(
             title="🏓 Pong!",
@@ -76,6 +91,7 @@ class KumoCog(commands.Cog):
         embed.set_footer(text="Echo Studio Infrastructure")
         await interaction.followup.send(embed=embed)
 
+    # --- WEBSITE COMMAND ---
     @app_commands.command(
         name="website",
         description="Get the link to the dashboard and website."
@@ -84,10 +100,10 @@ class KumoCog(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://echo-dashboard-qn39.onrender.com"))
-        
+
         embed = discord.Embed(
             title="🌐 Echo Studio Portal",
-            description=f"Click the button below to access the dashboard",
+            description="Click the button below to access the dashboard",
             color=0x8b5cf6
         )
         embed.set_footer(text="Echo Studio Dashboard")
@@ -97,6 +113,7 @@ class KumoCog(commands.Cog):
 
         await interaction.followup.send(embed=embed, view=view)
 
+    # --- BUILD COMMAND ---
     @app_commands.command(
         name="build",
         description="Nukes the server completely and rebuilds layout from a JSON blueprint file or URL."
@@ -196,14 +213,14 @@ class KumoCog(commands.Cog):
             try:
                 cat_name = f"{cat_cfg.get('emoji', '')} {cat_cfg.get('name', 'CATEGORY')}".strip()
                 category = await guild.create_category(name=cat_name)
-                
+
                 for chan_cfg in cat_cfg.get("channels", []):
                     c_raw_name = chan_cfg.get("name", "channel")
                     c_emoji = chan_cfg.get("emoji", "")
                     c_name = self.slugify_channel_name(c_raw_name, c_emoji)
                     c_type = chan_cfg.get("type", "text")
                     c_topic = chan_cfg.get("topic", "")
-                    
+
                     perms_dict = chan_cfg.get("permissions", {})
                     read_only = chan_cfg.get("read_only", False)
 
@@ -246,13 +263,14 @@ class KumoCog(commands.Cog):
             color=0x2ecc71
         )
         embed.set_footer(text="Echo Studio Infrastructure")
-        
+
         try:
             await interaction.followup.send(embed=embed)
         except Exception:
             if interaction.user:
                 await interaction.user.send(embed=embed)
 
+    # --- OWNER-ONLY NUKE COMMAND ---
     @app_commands.command(
         name="nuke",
         description="[OWNER ONLY] Deletes channels and roles. Leaves 1 channel unless optional server_id is specified."
