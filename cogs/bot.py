@@ -15,7 +15,6 @@ class KumoCog(commands.Cog):
         if not name:
             name = ""
 
-        # Safely match and remove emojis from text string
         emoji_pattern = re.compile(
             r'[\U00010000-\U0010ffff'
             r'\u2600-\u27BF'
@@ -61,7 +60,6 @@ class KumoCog(commands.Cog):
             except Exception as e:
                 print(f"Failed to create fallback channel: {e}")
 
-    # --- PING COMMAND ---
     @app_commands.command(
         name="ping",
         description="Check the bot's response latency."
@@ -78,7 +76,6 @@ class KumoCog(commands.Cog):
         embed.set_footer(text="Echo Studio Infrastructure")
         await interaction.followup.send(embed=embed)
 
-    # --- WEBSITE COMMAND ---
     @app_commands.command(
         name="website",
         description="Get the link to the dashboard and website."
@@ -100,7 +97,6 @@ class KumoCog(commands.Cog):
 
         await interaction.followup.send(embed=embed, view=view)
 
-    # --- BUILD COMMAND ---
     @app_commands.command(
         name="build",
         description="Nukes the server completely and rebuilds layout from a JSON blueprint file or URL."
@@ -257,7 +253,6 @@ class KumoCog(commands.Cog):
             if interaction.user:
                 await interaction.user.send(embed=embed)
 
-    # --- OWNER-ONLY NUKE COMMAND ---
     @app_commands.command(
         name="nuke",
         description="[OWNER ONLY] Deletes channels and roles. Leaves 1 channel unless optional server_id is specified."
@@ -322,4 +317,4 @@ class KumoCog(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(KumoCog(bot))
+    await bot.add_cog(BotCog(bot))
