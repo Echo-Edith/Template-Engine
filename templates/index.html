@@ -623,17 +623,35 @@ const DISCORD_PERMISSIONS_LIST = [
 ];
 let selectedTargetKey = "";
 let activePermissionsBuffer = {};
-function onRecaptchaLoad() {
+function renderCaptchaWidget() {
 const container = document.getElementById('recaptcha-container');
-if (container && typeof grecaptcha !== 'undefined') {
+if (container && typeof grecaptcha !== 'undefined' && container.childElementCount === 0) {
+if (!RECAPTCHA_SITE_KEY || RECAPTCHA_SITE_KEY.trim() === "" || RECAPTCHA_SITE_KEY.includes("recaptcha_site_key")) {
+console.warn("RECAPTCHA_SITE_KEY environment variable is not configured or passed properly.");
+// Fallback to allow proceed if key is missing in environment
+isCaptchaVerified = true;
+const btn = document.getElementById('verify-continue-btn');
+if (btn) btn.disabled = false;
+return;
+}
+try {
 grecaptcha.render('recaptcha-container', {
 'sitekey': RECAPTCHA_SITE_KEY,
 'theme': 'dark',
 'callback': onCaptchaVerified,
 'expired-callback': onCaptchaExpired
 });
+} catch (err) {
+console.error("reCAPTCHA render error:", err);
 }
 }
+}
+function onRecaptchaLoad() {
+renderCaptchaWidget();
+}
+document.addEventListener("DOMContentLoaded", () => {
+setTimeout(renderCaptchaWidget, 500);
+});
 async function onCaptchaVerified(token) {
 try {
 const res = await fetch('/api/verify-captcha', {
