@@ -478,7 +478,7 @@
         <div id="page-landing" class="page active">
             <div class="brand-header">
                 <h1>Discord Architect</h1>
-                <p>Verify to begin generating your Discord layout.</p>
+                <p>Login with Discord and complete verification to begin.</p>
             </div>
 
             {% if user %}
@@ -511,7 +511,7 @@
             </div>
 
             <button id="verify-continue-btn" class="btn-glass" onclick="proceedToGenerator()" disabled>
-                Verify & Continue <i class="fa-solid fa-arrow-right"></i>
+                <span id="continue-btn-label">Log In & Verify to Continue</span> <i class="fa-solid fa-arrow-right"></i>
             </button>
         </div>
 
@@ -687,15 +687,34 @@
     <script>
         const RECAPTCHA_SITE_KEY = "{{ recaptcha_site_key or '' }}".trim();
         const DISCORD_CLIENT_ID = "{{ discord_client_id or '' }}".trim();
+        const IS_USER_LOGGED_IN = {{ 'true' if user else 'false' }};
         let isCaptchaVerified = false;
 
-        // Auto unlock button if no site key configured
+        function checkAuthAndCaptchaStatus() {
+            const btn = document.getElementById('verify-continue-btn');
+            const label = document.getElementById('continue-btn-label');
+            
+            if (!IS_USER_LOGGED_IN) {
+                if (btn) btn.disabled = true;
+                if (label) label.innerText = "Log In with Discord First";
+                return;
+            }
+
+            if (!isCaptchaVerified) {
+                if (btn) btn.disabled = true;
+                if (label) label.innerText = "Complete Verification Below";
+                return;
+            }
+
+            if (btn) btn.disabled = false;
+            if (label) label.innerText = "Verify & Continue";
+        }
+
         document.addEventListener("DOMContentLoaded", () => {
             if (!RECAPTCHA_SITE_KEY || RECAPTCHA_SITE_KEY.length < 5) {
                 isCaptchaVerified = true;
-                const btn = document.getElementById('verify-continue-btn');
-                if (btn) btn.disabled = false;
             }
+            checkAuthAndCaptchaStatus();
         });
 
         let currentLayout = { 
@@ -744,20 +763,24 @@
                 const data = await res.json();
                 if (data.success) {
                     isCaptchaVerified = true;
-                    document.getElementById('verify-continue-btn').disabled = false;
                 }
             } catch (e) {
                 isCaptchaVerified = true;
-                document.getElementById('verify-continue-btn').disabled = false;
+            } finally {
+                checkAuthAndCaptchaStatus();
             }
         }
 
         function onCaptchaExpired() {
             isCaptchaVerified = false;
-            document.getElementById('verify-continue-btn').disabled = true;
+            checkAuthAndCaptchaStatus();
         }
 
         function proceedToGenerator() {
+            if (!IS_USER_LOGGED_IN) {
+                window.location.href = "/login";
+                return;
+            }
             if (!isCaptchaVerified) return;
             navigateTo('page-generator');
         }
@@ -1144,8 +1167,19 @@
         }
 
         function updateBotInviteLink() {
-            const targetServerId = document.getElementById('gen-server-id')?.value.trim() || "";
-            const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&permissions=8&scope=bot%20applications.commands${targetServerId ? `&guild_id=${targetServerId}` : ''}`;
+            const rawServerId = document.getElementById('gen-server-id')?.value.trim() || "";
+            const sanitizedServerId = rawServerId.replace(/[^0-9]/g, '');
+            
+            if (!DISCORD_CLIENT_ID) {
+                console.warn("DISCORD_CLIENT_ID missing; invite link cannot be generated.");
+                return;
+            }
+
+            let inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(DISCORD_CLIENT_ID)}&permissions=8&scope=bot%20applications.commands`;
+            if (sanitizedServerId) {
+                inviteUrl += `&guild_id=${sanitizedServerId}`;
+            }
+
             const btn = document.getElementById('bot-invite-btn');
             if (btn) btn.href = inviteUrl;
         }
