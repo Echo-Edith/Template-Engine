@@ -1,9 +1,32 @@
 import os
 import asyncio
+import threading
+from flask import Flask, jsonify
 import discord
 from discord.ext import commands
 
-# Configure Bot Gateway Intents
+# Render Web Services require an open HTTP port. This lightweight server satisfies port scanning.
+web_app = Flask(__name__)
+
+
+@web_app.route("/")
+@web_app.route("/health")
+def health_check():
+    return jsonify({
+        "status": "online",
+        "bot": str(bot.user) if bot.user else "initializing"
+    }), 200
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    # Suppress verbose Flask logging in bot console
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+    web_app.run(host="0.0.0.0", port=port)
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -20,7 +43,7 @@ async def on_ready():
     print(f"Logged in as: {bot.user} (ID: {bot.user.id})")
     print("-----------------------------------------")
 
-    # 1. Load Slash Command Extension Cog
+    # 1. Load Extension Cog
     try:
         if "cogs.bot" not in bot.extensions:
             await bot.load_extension("cogs.bot")
@@ -47,6 +70,11 @@ async def runner():
 
 
 def main():
+    # Start HTTP health server thread so Render detects open port 10000
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    print("Background health server started on port 10000.")
+
     try:
         asyncio.run(runner())
     except KeyboardInterrupt:
