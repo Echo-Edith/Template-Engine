@@ -140,10 +140,13 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
             val_str = str(v)
             if k == "Invite Link":
                 field_val = val_str
+            elif k == "Build Command":
+                field_val = f"`{val_str}`"
             elif k.startswith("[Key]") or k.startswith("Key"):
                 field_val = f"`{val_str}`"
             elif len(val_str) > 80:
-                field_val = f"```json\n{val_str[:1000]}\n```"
+                field_val = f"
+```json\n{val_str[:1000]}\n```"
             else:
                 field_val = f"`{val_str}`"
 
