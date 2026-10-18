@@ -11,8 +11,8 @@ class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    def slugify_channel_name(self, name: str, emoji: str = "") -> str:
-        """Converts raw name input into a Discord-compliant slug (kebab-case)."""
+    def slugify_channel_name(self, name: str) -> str:
+        """Converts raw name input into a Discord-compliant slug (kebab-case) without emojis."""
         if not name:
             name = ""
 
@@ -26,16 +26,10 @@ class BotCog(commands.Cog):
             flags=re.UNICODE
         )
         clean_name = emoji_pattern.sub('', name)
-
         clean_name = re.sub(r'[^a-zA-Z0-9\s\-_]', '', clean_name).strip().lower()
         clean_name = re.sub(r'[\s_]+', '-', clean_name)
 
-        prefix = f"{emoji.strip()}-" if emoji and not name.startswith(emoji) else ""
-        formatted = f"{prefix}{clean_name}".strip("-")
-
-        if not clean_name and emoji:
-            return emoji
-        return formatted or "unnamed-channel"
+        return clean_name.strip("-") or "unnamed-channel"
 
     async def wipe_guild_infrastructure(self, guild: discord.Guild, leave_fallback_channel: bool = False):
         """Helper method to completely purge channels, categories, and roles from a server."""
@@ -65,31 +59,50 @@ class BotCog(commands.Cog):
     @commands.command(name="sync")
     @commands.is_owner()
     async def sync_commands(self, ctx: commands.Context):
-        """Manual prefix command (!sync) to instantly sync slash commands to current guild."""
-        msg = await ctx.send("🔄 Syncing slash commands...")
+        """Manual prefix command (!sync) to purge duplicate guild overrides and sync global commands."""
+        embed = discord.Embed(
+            title="[Syncing Commands]",
+            description="Cleaning guild command overrides and syncing global commands...",
+            color=0x3b82f6
+        )
+        embed.set_footer(text="Echo Studio Infrastructure")
+        msg = await ctx.send(embed=embed)
+
         try:
-            self.bot.tree.copy_global_to(guild=ctx.guild)
-            synced = await self.bot.tree.sync(guild=ctx.guild)
-            await msg.edit(content=f"✅ Instant synced **{len(synced)}** slash command(s) to this server!")
+            self.bot.tree.clear_commands(guild=ctx.guild)
+            await self.bot.tree.sync(guild=ctx.guild)
+            synced = await self.bot.tree.sync()
+
+            success_embed = discord.Embed(
+                title="[Sync Complete]",
+                description=f"Successfully cleaned duplicate guild commands and globally synced {len(synced)} command(s).",
+                color=0x2ecc71
+            )
+            success_embed.set_footer(text="Echo Studio Infrastructure")
+            await msg.edit(embed=success_embed)
         except Exception as e:
-            await msg.edit(content=f"❌ Failed to sync slash commands: `{e}`")
+            err_embed = discord.Embed(
+                title="[Sync Error]",
+                description=f"Failed to sync commands: {e}",
+                color=0xf43f5e
+            )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
+            await msg.edit(embed=err_embed)
 
     # --- PING COMMAND ---
     @app_commands.command(
         name="ping",
-        description="Check the bot's response latency."
+        description="Check the bot response latency."
     )
     async def ping(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
-
         latency = round(self.bot.latency * 1000)
         embed = discord.Embed(
-            title="🏓 Pong!",
-            description=f"Bot Latency: `{latency}ms`",
+            title="[Pong]",
+            description=f"Bot Latency: {latency}ms",
             color=0x3b82f6
         )
         embed.set_footer(text="Echo Studio Infrastructure")
-        await interaction.followup.send(embed=embed)
+        await interaction.response.send_message(embed=embed)
 
     # --- WEBSITE COMMAND ---
     @app_commands.command(
@@ -97,12 +110,10 @@ class BotCog(commands.Cog):
         description="Get the link to the dashboard and website."
     )
     async def website(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
-
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://echo-dashboard-qn39.onrender.com"))
 
         embed = discord.Embed(
-            title="🌐 Echo Studio Portal",
+            title="[Echo Studio Portal]",
             description="Click the button below to access the dashboard",
             color=0x8b5cf6
         )
@@ -111,7 +122,7 @@ class BotCog(commands.Cog):
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="Visit Website", url=website_url, style=discord.ButtonStyle.link))
 
-        await interaction.followup.send(embed=embed, view=view)
+        await interaction.response.send_message(embed=embed, view=view)
 
     # --- BUILD COMMAND ---
     @app_commands.command(
@@ -130,7 +141,13 @@ class BotCog(commands.Cog):
         file: discord.Attachment = None,
         server_id: str = None
     ):
-        await interaction.response.defer(thinking=True)
+        init_embed = discord.Embed(
+            title="[Building...]",
+            description="Initiating infrastructure wipe and deploying blueprint...",
+            color=0xeab308
+        )
+        init_embed.set_footer(text="Echo Studio Infrastructure")
+        await interaction.response.send_message(embed=init_embed)
 
         blueprint_data = None
 
@@ -146,19 +163,21 @@ class BotCog(commands.Cog):
                             blueprint_data = await resp.json()
         except Exception as e:
             err_embed = discord.Embed(
-                title="❌ Fetch Error",
-                description=f"Failed to fetch blueprint data: `{e}`",
+                title="[Fetch Error]",
+                description=f"Failed to fetch blueprint data: {e}",
                 color=0xf43f5e
             )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
             await interaction.followup.send(embed=err_embed)
             return
 
         if not blueprint_data:
             err_embed = discord.Embed(
-                title="❌ Invalid Input",
-                description="Please provide a valid `url:` link or upload a `file:` attachment.",
+                title="[Invalid Input]",
+                description="Please provide a valid url link or upload a file attachment.",
                 color=0xf43f5e
             )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
             await interaction.followup.send(embed=err_embed)
             return
 
@@ -180,19 +199,14 @@ class BotCog(commands.Cog):
 
         if not guild:
             err_embed = discord.Embed(
-                title="❌ Target Guild Not Found",
-                description=f"Bot is not in target server (`{target_guild_id}`). Please invite the bot to the server first!",
+                title="[Target Guild Not Found]",
+                description=f"Bot is not in target server ({target_guild_id}). Please invite the bot to the server first.",
                 color=0xf43f5e
             )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
             await interaction.followup.send(embed=err_embed)
             return
 
-        progress_embed = discord.Embed(
-            title="💥 Infrastructure Wipe Initiated",
-            description=f"Nuking **{guild.name}** before deploying blueprint...",
-            color=0xeab308
-        )
-        await interaction.followup.send(embed=progress_embed)
         await self.wipe_guild_infrastructure(guild, leave_fallback_channel=False)
 
         created_roles = {}
@@ -211,13 +225,12 @@ class BotCog(commands.Cog):
 
         for cat_cfg in blueprint_data.get("categories", []):
             try:
-                cat_name = f"{cat_cfg.get('emoji', '')} {cat_cfg.get('name', 'CATEGORY')}".strip()
+                cat_name = str(cat_cfg.get("name", "CATEGORY")).strip()
                 category = await guild.create_category(name=cat_name)
 
                 for chan_cfg in cat_cfg.get("channels", []):
                     c_raw_name = chan_cfg.get("name", "channel")
-                    c_emoji = chan_cfg.get("emoji", "")
-                    c_name = self.slugify_channel_name(c_raw_name, c_emoji)
+                    c_name = self.slugify_channel_name(c_raw_name)
                     c_type = chan_cfg.get("type", "text")
                     c_topic = chan_cfg.get("topic", "")
 
@@ -258,8 +271,8 @@ class BotCog(commands.Cog):
                 print(f"Error creating category/channel: {e}")
 
         embed = discord.Embed(
-            title="🏗 Server Rebuilt & Cleaned!",
-            description=f"Successfully nuked previous layout and deployed new blueprint to **{guild.name}** (`{guild.id}`).",
+            title="[Server Rebuilt]",
+            description=f"Successfully nuked previous layout and deployed new blueprint to {guild.name} ({guild.id}).",
             color=0x2ecc71
         )
         embed.set_footer(text="Echo Studio Infrastructure")
@@ -285,14 +298,13 @@ class BotCog(commands.Cog):
     ):
         if not await self.bot.is_owner(interaction.user):
             err_embed = discord.Embed(
-                title="❌ Access Denied",
-                description="Only the Bot Owner can execute `/nuke`.",
+                title="[Access Denied]",
+                description="Only the Bot Owner can execute /nuke.",
                 color=0xf43f5e
             )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
             await interaction.response.send_message(embed=err_embed, ephemeral=True)
             return
-
-        await interaction.response.defer(thinking=True)
 
         target_guild_id = int(server_id.strip()) if server_id else interaction.guild_id
         guild = self.bot.get_guild(target_guild_id)
@@ -305,30 +317,33 @@ class BotCog(commands.Cog):
 
         if not guild:
             err_embed = discord.Embed(
-                title="❌ Guild Not Found",
-                description=f"Guild ID `{target_guild_id}` not found or bot is not present.",
+                title="[Guild Not Found]",
+                description=f"Guild ID {target_guild_id} not found or bot is not present.",
                 color=0xf43f5e
             )
-            await interaction.followup.send(embed=err_embed)
+            err_embed.set_footer(text="Echo Studio Infrastructure")
+            await interaction.response.send_message(embed=err_embed, ephemeral=True)
             return
 
-        leave_channel = False if server_id else True
-
         init_embed = discord.Embed(
-            title="⚠️ Server Nuke Initiated",
-            description=f"Initiating complete server nuke on **{guild.name}** (`{guild.id}`)...",
+            title="[Nuking...]",
+            description=f"Initiating complete server nuke on {guild.name} ({guild.id})...",
             color=0xeab308
         )
-        await interaction.followup.send(embed=init_embed)
+        init_embed.set_footer(text="Echo Studio Infrastructure")
+        await interaction.response.send_message(embed=init_embed)
+
+        leave_channel = False if server_id else True
         await self.wipe_guild_infrastructure(guild, leave_fallback_channel=leave_channel)
 
         if server_id:
             try:
                 dm_embed = discord.Embed(
-                    title="💥 Server Nuked",
-                    description=f"Complete server nuke executed on **{guild.name}** (`{guild.id}`). All channels & roles deleted.",
+                    title="[Server Nuked]",
+                    description=f"Complete server nuke executed on {guild.name} ({guild.id}). All channels and roles deleted.",
                     color=0x2ecc71
                 )
+                dm_embed.set_footer(text="Echo Studio Infrastructure")
                 await interaction.user.send(embed=dm_embed)
             except Exception:
                 pass
