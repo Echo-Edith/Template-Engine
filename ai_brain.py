@@ -113,7 +113,7 @@ async def send_webhook_log(
             }
         ],
         "footer": {
-            "text": "Static Studio Logging System"
+            "text": "Studio Logging System"
         },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
@@ -126,7 +126,7 @@ async def send_webhook_log(
         })
 
     payload = {
-        "username": "Static Studio Logger",
+        "username": "Studio Logger",
         "avatar_url": "https://cdn.discordapp.com/embed/avatars/0.png",
         "embeds": [embed]
     }
@@ -156,7 +156,7 @@ async def generate_server_layout(
     client = genai.Client(api_key=api_key)
 
     system_instruction = (
-        "You are Kumo, an expert Discord Community Architect developed for Static Studio. Your goal is to design a clean, logical, "
+        "You are an expert Discord Community Infrastructure Architect. Your goal is to design a clean, logical, "
         "and well-structured Discord server based on the user's requirements.\n"
         "Guidelines:\n"
         "1. Organize the server into clear, functional categories (e.g., WELCOME, GENERAL, GAMING, VOICE).\n"
@@ -164,7 +164,7 @@ async def generate_server_layout(
         "3. Define default roles with realistic hex colors (e.g., Owner, Admin, Mod, VIP, Member).\n"
         "4. Keep channel names lower-case, concise, and WITHOUT emojis in the name field (e.g. 'general', 'rules').\n"
         "5. Provide a single representative emoji in the emoji field for each channel.\n"
-        "6. Mark announcement, rules, or info channels as read_only=True and set send=False in permissions for read-only channels."
+        "6. Mark announcement, rules, or info channels as read_only=True and set set=False in permissions for read-only channels."
     )
 
     user_query = f"""
