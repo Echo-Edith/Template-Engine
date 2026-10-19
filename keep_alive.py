@@ -41,10 +41,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 
+# Updated Gemini Model endpoints (resolves 404 NOT_FOUND errors)
 GEMINI_MODELS = [
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro"
 ]
 
 db_bans = None
@@ -63,6 +64,10 @@ WEBSITE_BANS = {}
 
 
 def get_base_url() -> str:
+    """
+    Dynamically determines host base URL.
+    Checks DASHBOARD_URL first, then Vercel system env vars, then the request host.
+    """
     dashboard = os.getenv("DASHBOARD_URL") or os.getenv("DISCORD_REDIRECT_URI")
     if dashboard and "your-vercel-domain" not in dashboard:
         if dashboard.endswith("/callback"):
@@ -137,13 +142,12 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
             if k == "Invite Link":
                 field_val = val_str
             elif k == "Build Command":
-                # Wraps command explicitly in single backticks for tap-to-copy on mobile
+                # Explicit single backticks for tap-to-copy on mobile Discord
                 field_val = f"`{val_str}`"
             elif k.startswith("[Key]") or k.startswith("Key"):
                 field_val = f"`{val_str}`"
             elif len(val_str) > 80:
-                field_val = f"
-```json\n{val_str[:1000]}\n```"
+                field_val = f"```json\n{val_str[:1000]}\n```"
             else:
                 field_val = f"`{val_str}`"
 
