@@ -63,10 +63,6 @@ WEBSITE_BANS = {}
 
 
 def get_base_url() -> str:
-    """
-    Dynamically determines host base URL.
-    Checks DASHBOARD_URL first, then Vercel system env vars, then the request host.
-    """
     dashboard = os.getenv("DASHBOARD_URL") or os.getenv("DISCORD_REDIRECT_URI")
     if dashboard and "your-vercel-domain" not in dashboard:
         if dashboard.endswith("/callback"):
@@ -141,6 +137,7 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
             if k == "Invite Link":
                 field_val = val_str
             elif k == "Build Command":
+                # Wraps command explicitly in single backticks for tap-to-copy on mobile
                 field_val = f"`{val_str}`"
             elif k.startswith("[Key]") or k.startswith("Key"):
                 field_val = f"`{val_str}`"
