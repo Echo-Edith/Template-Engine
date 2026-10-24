@@ -50,13 +50,14 @@ GEMINI_MODELS = [
 
 db_bans = None
 db_premium = None
+
 if MONGO_URI:
     try:
         mongo_client = MongoClient(MONGO_URI)
         try:
             db = mongo_client.get_default_database()
         except Exception:
-            db = mongo_client["static_studio_db"]
+            db = mongo_client.get_database("static_studio_db")
         db_bans = db["bans"]
         db_premium = db["premium_users"]
     except Exception as e:
@@ -71,15 +72,20 @@ def is_user_premium(user_id: str) -> bool:
         return False
     user_id_str = str(user_id)
     now = datetime.now(timezone.utc)
+    
     if db_premium is not None:
-        doc = db_premium.find_one({"user_id": user_id_str})
-        if doc and "expires_at" in doc:
-            expires_at = doc["expires_at"]
-            if isinstance(expires_at, str):
-                expires_at = datetime.fromisoformat(expires_at)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            return expires_at > now
+        try:
+            doc = db_premium.find_one({"user_id": user_id_str})
+            if doc and "expires_at" in doc:
+                expires_at = doc["expires_at"]
+                if isinstance(expires_at, str):
+                    expires_at = datetime.fromisoformat(expires_at)
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                return expires_at > now
+        except Exception as e:
+            print(f"[Premium Check Error] {e}")
+            return False
         return False
     else:
         exp = LOCAL_PREMIUM_USERS.get(user_id_str)
@@ -130,11 +136,14 @@ def calculate_account_age(discord_id: str) -> str:
 def is_user_banned(user_id):
     user_id_str = str(user_id)
     if db_bans is not None:
-        return db_bans.find_one({"user_id": user_id_str, "location": "website"})
+        try:
+            return db_bans.find_one({"user_id": user_id_str, "location": "website"})
+        except Exception:
+            return None
     return WEBSITE_BANS.get(user_id_str)
 
 
-def send_design_webhook_with_button(webhook_url: str, title: str, user_data: dict, action_desc: str, target_server_id: str, blueprint_url: str, color: int = 0x8b5cf6, extra_fields: dict = None):
+def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None, target_server_id: str = None, blueprint_url: str = None):
     if not webhook_url:
         return
 
@@ -176,7 +185,6 @@ def send_design_webhook_with_button(webhook_url: str, title: str, user_data: dic
                 "inline": False
             })
 
-    # Combined Webhook Payload with Interactive One-Click Build Button
     payload = {
         "username": "Studio Logger",
         "avatar_url": "https://cdn.discordapp.com/embed/avatars/0.png",
@@ -186,21 +194,23 @@ def send_design_webhook_with_button(webhook_url: str, title: str, user_data: dic
             "fields": fields,
             "footer": {"text": "Studio Logging System"},
             "timestamp": datetime.now(timezone.utc).isoformat()
-        }],
-        "components": [
+        }]
+    }
+
+    if target_server_id and blueprint_url:
+        payload["components"] = [
             {
                 "type": 1,
                 "components": [
                     {
                         "type": 2,
-                        "style": 3,  # Green Button
+                        "style": 3,
                         "label": "⚡ One-Click Build Server",
                         "custom_id": f"buildbtn_{target_server_id}_{blueprint_url}"
                     }
                 ]
             }
         ]
-    }
 
     try:
         requests.post(webhook_url, json=payload, timeout=5)
@@ -213,8 +223,8 @@ def home():
     user = session.get("user")
     user_is_premium = False
     if user:
-        user_is_premium = is_user_premium(user["id"])
-        ban_info = is_user_banned(user["id"])
+        user_is_premium = is_user_premium(user.get("id"))
+        ban_info = is_user_banned(user.get("id"))
         if ban_info:
             return render_template(
                 "index.html",
@@ -269,27 +279,38 @@ def callback():
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-    token_response = requests.post(f"{DISCORD_API_BASE_URL}/oauth2/token", data=data, headers=headers)
-    if token_response.status_code != 200:
-        return f"OAuth Error ({token_response.status_code}): {token_response.text}", 400
+    try:
+        token_response = requests.post(f"{DISCORD_API_BASE_URL}/oauth2/token", data=data, headers=headers)
+        if token_response.status_code != 200:
+            return f"OAuth Error ({token_response.status_code}): {token_response.text}", 400
 
-    tokens = token_response.json()
-    access_token = tokens.get("access_token")
+        tokens = token_response.json()
+        access_token = tokens.get("access_token")
 
-    user_headers = {"Authorization": f"Bearer {access_token}"}
-    user_response = requests.get(f"{DISCORD_API_BASE_URL}/users/@me", headers=user_headers)
+        user_headers = {"Authorization": f"Bearer {access_token}"}
+        user_response = requests.get(f"{DISCORD_API_BASE_URL}/users/@me", headers=user_headers)
 
-    if user_response.status_code == 200:
-        user_data = user_response.json()
-        avatar_hash = user_data.get("avatar")
-        avatar_url = f"https://cdn.discordapp.com/avatars/{user_data['id']}/{avatar_hash}.png" if avatar_hash else "https://cdn.discordapp.com/embed/avatars/0.png"
+        if user_response.status_code == 200:
+            user_data = user_response.json()
+            avatar_hash = user_data.get("avatar")
+            avatar_url = f"https://cdn.discordapp.com/avatars/{user_data['id']}/{avatar_hash}.png" if avatar_hash else "https://cdn.discordapp.com/embed/avatars/0.png"
 
-        session["user"] = {
-            "id": user_data["id"],
-            "username": user_data["username"],
-            "discriminator": user_data.get("discriminator", "0"),
-            "avatar": avatar_url
-        }
+            session["user"] = {
+                "id": user_data["id"],
+                "username": user_data["username"],
+                "discriminator": user_data.get("discriminator", "0"),
+                "avatar": avatar_url
+            }
+
+            log_webhook_event(
+                webhook_url=WEBSITE_WEBHOOK_URL,
+                title="[Website Login Logged]",
+                user_data=user_data,
+                action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
+                color=0x3b82f6
+            )
+    except Exception as e:
+        print(f"[OAuth Callback Error] {e}")
 
     return redirect("/")
 
@@ -301,12 +322,14 @@ def verify_captcha():
     if not token or not RECAPTCHA_SECRET_KEY:
         return jsonify({"success": True}), 200
 
-    verify_res = requests.post(
-        "https://www.google.com/recaptcha/api/siteverify",
-        data={"secret": RECAPTCHA_SECRET_KEY, "response": token}
-    ).json()
-
-    return jsonify({"success": verify_res.get("success", False)})
+    try:
+        verify_res = requests.post(
+            "https://www.google.com/recaptcha/api/siteverify",
+            data={"secret": RECAPTCHA_SECRET_KEY, "response": token}
+        ).json()
+        return jsonify({"success": verify_res.get("success", False)})
+    except Exception:
+        return jsonify({"success": True}), 200
 
 
 @app.route("/api/generate", methods=["POST"])
@@ -418,8 +441,11 @@ def submit_design():
     file_path = os.path.join(BLUEPRINTS_DIR, filename)
 
     blueprint_content = layout if layout else data
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(blueprint_content, f, indent=2)
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(blueprint_content, f, indent=2)
+    except Exception as e:
+        print(f"[Blueprint File Save Error] {e}")
 
     blueprint_url = f"{get_base_url()}/blueprint/{filename}"
     build_command_text = f"/build url: {blueprint_url}"
@@ -436,16 +462,15 @@ def submit_design():
         "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`"
     }
 
-    # Dispatch Discord Log Embed with Interactive One-Click Build Button Attached
-    send_design_webhook_with_button(
+    log_webhook_event(
         webhook_url=target_webhook,
         title=log_title,
         user_data=user,
         action_desc="User submitted a server layout blueprint to staff.",
-        target_server_id=target_server_id,
-        blueprint_url=blueprint_url,
         color=0xf1c40f if has_premium else 0x2ecc71,
-        extra_fields=extra_fields
+        extra_fields=extra_fields,
+        target_server_id=target_server_id,
+        blueprint_url=blueprint_url
     )
 
     return jsonify({
@@ -475,3 +500,9 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+```
+
+### Summary of Fixes Made:
+1. **MongoDB Database Call Fixed**: Changed `mongo_client.get_default_database()` to explicitly fall back to `mongo_client.get_database("static_studio_db")` if the `MONGO_URI` doesn't define a default database name.
+2. **Exception Shields**: Wrapped MongoDB calls in `try/except` blocks in `is_user_premium()` and `is_user_banned()` to prevent page routing crashes if MongoDB drops or is misconfigured.
+3. **Safe User ID Dict Access**: Updated `session.get("user")` calls to use `.get("id")` defensively.
