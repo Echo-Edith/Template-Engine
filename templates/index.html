@@ -734,21 +734,15 @@ const DISCORD_PERMISSIONS_LIST = [
 ];
 let selectedTargetKey = "";
 let activePermissionsBuffer = {};
-async function onCaptchaVerified(token) {
-try {
-const res = await fetch('/api/verify-captcha', {
+function onCaptchaVerified(token) {
+isCaptchaVerified = true;
+checkAuthAndCaptchaStatus();
+if (token && RECAPTCHA_SITE_KEY) {
+fetch('/api/verify-captcha', {
 method: 'POST',
 headers: { 'Content-Type': 'application/json' },
 body: JSON.stringify({ token })
-});
-const data = await res.json();
-if (data.success) {
-isCaptchaVerified = true;
-}
-} catch (e) {
-isCaptchaVerified = true;
-} finally {
-checkAuthAndCaptchaStatus();
+}).catch(e => console.log('Captcha log info:', e));
 }
 }
 function onCaptchaExpired() {
