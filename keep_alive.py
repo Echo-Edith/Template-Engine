@@ -7,18 +7,23 @@ from pymongo import MongoClient
 from google import genai
 from google.genai import types
 
+# Set absolute directory paths for Vercel Serverless runtime
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 
+# Initialize Flask application instance
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-key-fallback").strip()
 
+# Expose WSGI application entry points for Vercel Serverless Builder
 application = app
 handler = app
 
+# Session cookie configuration for modern HTTPS proxies (Vercel & Render)
 app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
+# Serverless environments (like Vercel) only allow writing to /tmp
 BLUEPRINTS_DIR = "/tmp/blueprints" if os.getenv("VERCEL") else os.path.join(os.getcwd(), "blueprints")
 os.makedirs(BLUEPRINTS_DIR, exist_ok=True)
 
@@ -62,6 +67,7 @@ LOCAL_PREMIUM_USERS = {}
 
 
 def is_user_premium(user_id: str) -> bool:
+    """Checks MongoDB (or local memory) to verify if a user holds active TE Premium status."""
     if not user_id:
         return False
     user_id_str = str(user_id)
@@ -195,6 +201,7 @@ def home():
     user = session.get("user")
     user_is_premium = False
     if user:
+        # Check MongoDB DB directly for active TE Premium status
         user_is_premium = is_user_premium(user["id"])
         ban_info = is_user_banned(user["id"])
         if ban_info:
@@ -287,12 +294,15 @@ def callback():
             "avatar": avatar_url
         }
 
+        # Check DB for Premium upon login callback
+        has_prem = is_user_premium(user_data["id"])
+
         log_webhook_event(
             webhook_url=WEBSITE_WEBHOOK_URL,
             title="[Website Login Logged]",
             user_data=user_data,
-            action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
-            color=0x3b82f6
+            action_desc=f"Authenticated via Discord OAuth2 and accessed dashboard. TE Premium Status: `{'ACTIVE 👑' if has_prem else 'STANDARD'}`.",
+            color=0xf1c40f if has_prem else 0x3b82f6
         )
 
     return redirect("/")
