@@ -1,13 +1,15 @@
 import os
 import asyncio
 import threading
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import discord
 from discord.ext import commands
 
-# Render Web Services require an open HTTP port. This lightweight server satisfies port scanning.
+# Render Web Services require an open HTTP port.
 web_app = Flask(__name__)
 
+# Shared global event loop for thread-safe bot execution
+bot_loop = None
 
 @web_app.route("/")
 @web_app.route("/health")
@@ -18,9 +20,59 @@ def health_check():
     }), 200
 
 
+@web_app.route("/api/bot-autobuild", methods=["POST"])
+def trigger_autobuild():
+    """Endpoint called by keep_alive.py (Vercel) to trigger instant server builds for TE Premium users."""
+    data = request.get_json() or {}
+    secret = data.get("secret", "")
+    expected_secret = os.getenv("FLASK_SECRET_KEY", "super-secret-key-fallback").strip()
+
+    if secret != expected_secret:
+        return jsonify({"success": False, "error": "Unauthorized internal request."}), 401
+
+    target_server_id = data.get("target_server_id")
+    layout = data.get("layout")
+    user_id = data.get("user_id")
+
+    if not target_server_id or not layout:
+        return jsonify({"success": False, "error": "Missing target_server_id or layout."}), 400
+
+    try:
+        guild_id = int(target_server_id)
+        guild = bot.get_guild(guild_id)
+    except Exception:
+        guild = None
+
+    if not guild:
+        return jsonify({
+            "success": False,
+            "error": f"Bot is not in the target server (ID: {target_server_id}). Please invite the bot first!"
+        }), 404
+
+    # Fetch BotCog instance and execute build thread-safely
+    bot_cog = bot.get_cog("BotCog")
+    if not bot_cog:
+        return jsonify({"success": False, "error": "BotCog is not loaded on bot runner."}), 500
+
+    if bot_loop and bot_loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(
+            bot_cog.execute_blueprint_build(guild, layout),
+            bot_loop
+        )
+        try:
+            future.result(timeout=60) # Wait up to 60s for build completion
+            return jsonify({
+                "success": True,
+                "message": f"Successfully auto-built server '{guild.name}' ({guild.id})!"
+            }), 200
+        except Exception as e:
+            return jsonify({"success": False, "error": f"Build execution failed: {str(e)}"}), 500
+    else:
+        return jsonify({"success": False, "error": "Bot loop is not running."}), 500
+
+
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
-    # Suppress verbose Flask logging in bot console
     import logging
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
@@ -39,11 +91,13 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
+    global bot_loop
+    bot_loop = asyncio.get_running_loop()
+
     print("-----------------------------------------")
     print(f"Logged in as: {bot.user} (ID: {bot.user.id})")
     print("-----------------------------------------")
 
-    # 1. Load Extension Cog
     try:
         if "cogs.bot" not in bot.extensions:
             await bot.load_extension("cogs.bot")
@@ -51,19 +105,9 @@ async def on_ready():
     except Exception as e:
         print(f"CRITICAL ERROR loading cog cogs.bot: {e}")
 
-    # 2. Clear duplicate Guild overrides to prevent duplicate commands in Discord UI
-    for guild in bot.guilds:
-        try:
-            bot.tree.clear_commands(guild=guild)
-            await bot.tree.sync(guild=guild)
-            print(f"🧹 Cleared local guild command overrides for: '{guild.name}' ({guild.id})")
-        except Exception as e:
-            print(f"Failed to clear local guild commands for '{guild.name}': {e}")
-
-    # 3. Global Sync Across Discord (clean single command instances)
     try:
-        synced_global = await bot.tree.sync()
-        print(f"🌐 Global Sync Completed: {len(synced_global)} global slash command(s) registered.")
+        synced = await bot.tree.sync()
+        print(f"Successfully registered & synced {len(synced)} global slash command(s).")
     except Exception as e:
         print(f"Failed to sync global slash commands: {e}")
 
@@ -79,7 +123,6 @@ async def runner():
 
 
 def main():
-    # Start HTTP health server thread so Render detects open port 10000
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     print("Background health server started on port 10000.")
