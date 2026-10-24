@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 import aiohttp
 import discord
 from discord.ext import commands
@@ -35,6 +36,36 @@ class BotCog(commands.Cog):
         if not clean_name and emoji:
             return emoji
         return formatted or "unnamed-channel"
+
+    def parse_duration_seconds(self, duration_str: str) -> int:
+        """Parses a duration string like '10m', '2h', '1d', '30s' into seconds."""
+        duration_str = duration_str.strip().lower()
+        match = re.match(r'^(\d+)\s*([s|m|h|d])?$', duration_str)
+        if not match:
+            return None
+
+        value = int(match.group(1))
+        unit = match.group(2) or 'm'  # Default to minutes if no unit provided
+
+        if unit == 's':
+            return value
+        elif unit == 'm':
+            return value * 60
+        elif unit == 'h':
+            return value * 3600
+        elif unit == 'd':
+            return value * 86400
+        return None
+
+    async def schedule_channel_deletion(self, channel: discord.abc.GuildChannel, delay_seconds: int):
+        """Helper task to automatically delete a channel after specified delay in seconds."""
+        await asyncio.sleep(delay_seconds)
+        try:
+            await channel.delete(reason="Temporary Channel Expiration Auto-Delete")
+        except discord.NotFound:
+            pass  # Channel was already deleted manually
+        except Exception as e:
+            print(f"Failed to auto-delete temp channel {channel.id}: {e}")
 
     async def wipe_guild_infrastructure(self, guild: discord.Guild, leave_fallback_channel: bool = False):
         """Helper method to completely purge channels, categories, and roles from a server."""
@@ -178,6 +209,158 @@ class BotCog(commands.Cog):
             err_embed = discord.Embed(
                 title="[Channel Creation Failed]",
                 description=f"An error occurred while creating channel: `{e}`",
+                color=0xf43f5e
+            )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
+            await interaction.followup.send(embed=err_embed, ephemeral=True)
+
+    # --- ADMIN TEMPORARY CHANNEL COMMAND ---
+    @app_commands.command(
+        name="temp_channel",
+        description="[ADMIN ONLY] Create a temporary channel that is automatically deleted after a set duration."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        name="Name of the temporary channel",
+        duration="Duration before auto-deletion (e.g., 30s, 15m, 2h, 1d)",
+        type="Channel type: text, voice, or announcement",
+        category="Target category to place this channel under",
+        emoji="Optional emoji prefix (e.g. ⏳)",
+        topic="Optional topic/description for the channel",
+        target_role="Role to apply permission overrides to (defaults to @everyone)",
+        view_channel="Allow viewing channel",
+        send_messages="Allow sending messages",
+        embed_links="Allow embedding links",
+        attach_files="Allow attaching files/media",
+        read_message_history="Allow viewing past messages",
+        mention_everyone="Allow mentioning @everyone and @here",
+        manage_messages="Allow deleting/pinning messages",
+        manage_channel="Allow editing channel settings",
+        connect="Allow connecting to voice",
+        speak="Allow speaking in voice",
+        stream="Allow sharing video/screen stream",
+        use_voice_activation="Allow voice activation vs push-to-talk"
+    )
+    @app_commands.choices(type=[
+        app_commands.Choice(name="Text Channel", value="text"),
+        app_commands.Choice(name="Voice Channel", value="voice"),
+        app_commands.Choice(name="Announcement Channel", value="announcement")
+    ])
+    async def temp_channel(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        duration: str,
+        type: str,
+        category: discord.CategoryChannel = None,
+        emoji: str = "⏳",
+        topic: str = "",
+        target_role: discord.Role = None,
+        view_channel: bool = None,
+        send_messages: bool = None,
+        embed_links: bool = None,
+        attach_files: bool = None,
+        read_message_history: bool = None,
+        mention_everyone: bool = None,
+        manage_messages: bool = None,
+        manage_channel: bool = None,
+        connect: bool = None,
+        speak: bool = None,
+        stream: bool = None,
+        use_voice_activation: bool = None
+    ):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        delay_seconds = self.parse_duration_seconds(duration)
+        if not delay_seconds or delay_seconds <= 0:
+            err_embed = discord.Embed(
+                title="[Invalid Duration]",
+                description="Please enter a valid time format, e.g. `30s` (30 sec), `15m` (15 min), `2h` (2 hours), or `1d` (1 day).",
+                color=0xf43f5e
+            )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
+            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            return
+
+        if delay_seconds > 604800:  # Cap at 7 days
+            err_embed = discord.Embed(
+                title="[Duration Exceeded]",
+                description="Temporary channel duration cannot exceed 7 days (`7d`).",
+                color=0xf43f5e
+            )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
+            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            return
+
+        clean_name = self.slugify_channel_name(name, emoji)
+        role = target_role or interaction.guild.default_role
+
+        perm_kwargs = {}
+        if view_channel is not None: perm_kwargs["view_channel"] = view_channel
+        if send_messages is not None: perm_kwargs["send_messages"] = send_messages
+        if embed_links is not None: perm_kwargs["embed_links"] = embed_links
+        if attach_files is not None: perm_kwargs["attach_files"] = attach_files
+        if read_message_history is not None: perm_kwargs["read_message_history"] = read_message_history
+        if mention_everyone is not None: perm_kwargs["mention_everyone"] = mention_everyone
+        if manage_messages is not None: perm_kwargs["manage_messages"] = manage_messages
+        if manage_channel is not None: perm_kwargs["manage_channels"] = manage_channel
+        if connect is not None: perm_kwargs["connect"] = connect
+        if speak is not None: perm_kwargs["speak"] = speak
+        if stream is not None: perm_kwargs["stream"] = stream
+        if use_voice_activation is not None: perm_kwargs["use_voice_activation"] = use_voice_activation
+
+        overwrites = {}
+        if perm_kwargs:
+            overwrites[role] = discord.PermissionOverwrite(**perm_kwargs)
+
+        try:
+            auto_delete_topic = f"⏱️ Temporary channel. Self-destructs after {duration}."
+            full_topic = f"{topic}\n\n{auto_delete_topic}".strip() if topic else auto_delete_topic
+
+            if type == "voice":
+                new_chan = await interaction.guild.create_voice_channel(
+                    name=clean_name,
+                    category=category,
+                    overwrites=overwrites,
+                    reason=f"Admin temp channel creation by {interaction.user} (expires in {duration})"
+                )
+            elif type == "announcement":
+                new_chan = await interaction.guild.create_text_channel(
+                    name=clean_name,
+                    category=category,
+                    topic=full_topic,
+                    news=True,
+                    overwrites=overwrites,
+                    reason=f"Admin temp channel creation by {interaction.user} (expires in {duration})"
+                )
+            else:
+                new_chan = await interaction.guild.create_text_channel(
+                    name=clean_name,
+                    category=category,
+                    topic=full_topic,
+                    overwrites=overwrites,
+                    reason=f"Admin temp channel creation by {interaction.user} (expires in {duration})"
+                )
+
+            # Schedule background deletion task
+            asyncio.create_task(self.schedule_channel_deletion(new_chan, delay_seconds))
+
+            embed = discord.Embed(
+                title="[Temporary Channel Created]",
+                description=f"Successfully created temporary channel {new_chan.mention} in **{interaction.guild.name}**.",
+                color=0xeab308
+            )
+            embed.add_field(name="Auto-Delete Duration", value=f"`{duration}` ({delay_seconds} seconds)", inline=True)
+            embed.add_field(name="Category", value=category.name if category else "None", inline=True)
+            embed.add_field(name="Type", value=type.capitalize(), inline=True)
+            embed.set_footer(text="Echo Studio Infrastructure")
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            err_embed = discord.Embed(
+                title="[Temp Channel Creation Failed]",
+                description=f"An error occurred while creating temporary channel: `{e}`",
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
