@@ -1,29 +1,24 @@
 import os
 import json
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, redirect, request, session, render_template, jsonify, send_from_directory
 from pymongo import MongoClient
 from google import genai
 from google.genai import types
 
-# Set absolute directory paths for Vercel Serverless runtime
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 
-# Initialize Flask application instance
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-key-fallback").strip()
 
-# Expose WSGI application entry points for Vercel Serverless Builder
 application = app
 handler = app
 
-# Session cookie configuration for modern HTTPS proxies (Vercel & Render)
 app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
-# Serverless environments (like Vercel) only allow writing to /tmp
 BLUEPRINTS_DIR = "/tmp/blueprints" if os.getenv("VERCEL") else os.path.join(os.getcwd(), "blueprints")
 os.makedirs(BLUEPRINTS_DIR, exist_ok=True)
 
@@ -35,13 +30,13 @@ RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 SYSTEM_LOG_WEBHOOK_URL = os.getenv("SYSTEM_LOG_WEBHOOK_URL")
 WEBSITE_WEBHOOK_URL = os.getenv("WEBSITE_WEBHOOK_URL", SYSTEM_LOG_WEBHOOK_URL)
 DESIGN_WEBHOOK_URL = os.getenv("DESIGN_WEBHOOK_URL", SYSTEM_LOG_WEBHOOK_URL)
+PREMIUM_DESIGN_WEBHOOK_URL = os.getenv("PREMIUM_DESIGN_WEBHOOK_URL", DESIGN_WEBHOOK_URL)
 
 MONGO_URI = os.getenv("MONGO_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 
-# Updated Gemini Model endpoints (resolves 404 NOT_FOUND errors)
 GEMINI_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
@@ -49,6 +44,7 @@ GEMINI_MODELS = [
 ]
 
 db_bans = None
+db_premium = None
 if MONGO_URI:
     try:
         mongo_client = MongoClient(MONGO_URI)
@@ -57,17 +53,35 @@ if MONGO_URI:
         except Exception:
             db = mongo_client["static_studio_db"]
         db_bans = db["bans"]
+        db_premium = db["premium_users"]
     except Exception as e:
         print(f"[MongoDB Warning] Could not connect to Mongo: {e}")
 
 WEBSITE_BANS = {}
+LOCAL_PREMIUM_USERS = {}
+
+
+def is_user_premium(user_id: str) -> bool:
+    if not user_id:
+        return False
+    user_id_str = str(user_id)
+    now = datetime.now(timezone.utc)
+    if db_premium is not None:
+        doc = db_premium.find_one({"user_id": user_id_str})
+        if doc and "expires_at" in doc:
+            expires_at = doc["expires_at"]
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            return expires_at > now
+        return False
+    else:
+        exp = LOCAL_PREMIUM_USERS.get(user_id_str)
+        return exp > now if exp else False
 
 
 def get_base_url() -> str:
-    """
-    Dynamically determines host base URL.
-    Checks DASHBOARD_URL first, then Vercel system env vars, then the request host.
-    """
     dashboard = os.getenv("DASHBOARD_URL") or os.getenv("DISCORD_REDIRECT_URI")
     if dashboard and "your-vercel-domain" not in dashboard:
         if dashboard.endswith("/callback"):
@@ -124,8 +138,11 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
     username = user_data.get("username", "Anonymous / Unauthenticated")
     account_age = calculate_account_age(user_id) if user_id != "0" else "Unknown"
 
+    has_premium = is_user_premium(user_id)
+    premium_tag = "👑 **[TE PREMIUM MEMBER]**" if has_premium else " Standard User"
+
     user_info_block = (
-        f"**User:** <@{user_id}>\n"
+        f"**User:** <@{user_id}> ({premium_tag})\n"
         f"**Username:** `{username}`\n"
         f"**User ID:** `{user_id}`\n"
         f"**Account Age:** `{account_age}`"
@@ -142,7 +159,6 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
             if k == "Invite Link":
                 field_val = val_str
             elif k == "Build Command":
-                # Explicit single backticks for tap-to-copy on mobile Discord
                 field_val = f"`{val_str}`"
             elif k.startswith("[Key]") or k.startswith("Key"):
                 field_val = f"`{val_str}`"
@@ -177,13 +193,16 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
 @app.route("/")
 def home():
     user = session.get("user")
+    user_is_premium = False
     if user:
+        user_is_premium = is_user_premium(user["id"])
         ban_info = is_user_banned(user["id"])
         if ban_info:
             return render_template(
                 "index.html",
                 is_banned=True,
                 user=user,
+                is_premium=user_is_premium,
                 dev_message=ban_info.get("message_from_dev", "Suspended by developer."),
                 recaptcha_site_key=RECAPTCHA_SITE_KEY,
                 discord_client_id=CLIENT_ID
@@ -193,9 +212,24 @@ def home():
         "index.html",
         is_banned=False,
         user=user,
+        is_premium=user_is_premium,
         recaptcha_site_key=RECAPTCHA_SITE_KEY,
         discord_client_id=CLIENT_ID
     )
+
+
+@app.route("/api/user-status")
+def user_status():
+    user = session.get("user")
+    if not user:
+        return jsonify({"authenticated": False, "is_premium": False})
+    
+    return jsonify({
+        "authenticated": True,
+        "user_id": user["id"],
+        "username": user["username"],
+        "is_premium": is_user_premium(user["id"])
+    })
 
 
 @app.route("/login")
@@ -257,7 +291,7 @@ def callback():
             webhook_url=WEBSITE_WEBHOOK_URL,
             title="[Website Login Logged]",
             user_data=user_data,
-            action_desc="Authenticated via Discord OAuth2 and accessed the dashboard.",
+            action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
             color=0x3b82f6
         )
 
@@ -398,6 +432,7 @@ def submit_design():
     roles_count = data.get("roles_count", 0)
 
     layout = data.get("layout") or data.get("build_file") or data.get("file")
+    has_premium = is_user_premium(user["id"])
 
     file_id = f"blueprint_{int(datetime.now().timestamp() * 1000)}"
     filename = f"{file_id}.json"
@@ -416,19 +451,28 @@ def submit_design():
         "Invite Link": invite_link,
         "Prompt Description": prompt,
         "Build Command": build_command_text,
-        "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`"
+        "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`",
+        "TE Premium Auto-Build": "👑 ACTIVE AUTO-BUILD DISPATCH" if has_premium else "❌ Standard Manual Dispatch"
     }
 
+    target_webhook = PREMIUM_DESIGN_WEBHOOK_URL if has_premium else DESIGN_WEBHOOK_URL
+    log_title = "👑 [TE PREMIUM] Server Blueprint Auto-Build Dispatched" if has_premium else "[New Server Blueprint Submitted]"
+
     log_webhook_event(
-        webhook_url=DESIGN_WEBHOOK_URL,
-        title="[New Server Blueprint Submitted]",
+        webhook_url=target_webhook,
+        title=log_title,
         user_data=user,
         action_desc="User submitted a server blueprint for deployment.",
-        color=0x2ecc71,
+        color=0xf1c40f if has_premium else 0x2ecc71,
         extra_fields=extra_fields
     )
 
-    return jsonify({"success": True, "message": "Blueprint successfully dispatched!", "url": blueprint_url})
+    return jsonify({
+        "success": True,
+        "message": "Blueprint successfully dispatched!",
+        "url": blueprint_url,
+        "is_premium": has_premium
+    })
 
 
 @app.route("/blueprint/<path:filename>")
