@@ -262,6 +262,14 @@
             text-decoration: none;
         }
 
+        .btn-glass.btn-premium {
+            background: linear-gradient(135deg, rgba(241, 196, 15, 0.9) 0%, rgba(243, 156, 18, 0.9) 100%);
+            color: #000000;
+            font-weight: 800;
+            box-shadow: 0 8px 20px rgba(241, 196, 15, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.4);
+        }
+
         .btn-glass:hover:not(:disabled) {
             transform: translateY(-1px);
             box-shadow: 0 12px 25px rgba(139, 92, 246, 0.5);
@@ -664,7 +672,7 @@
             </div>
 
             <button id="submit-design-btn" class="btn-glass" onclick="handleSubmitDesign()">
-                <i class="fa-solid fa-paper-plane"></i> <span>Submit Server Design</span>
+                <i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit Server Design</span>
             </button>
         </div>
 
@@ -737,7 +745,18 @@
                 isCaptchaVerified = true;
             }
             checkAuthAndCaptchaStatus();
+            updateSubmitButtonForPremium();
         });
+
+        function updateSubmitButtonForPremium() {
+            const btn = document.getElementById('submit-design-btn');
+            const label = document.getElementById('submit-btn-label');
+
+            if (IS_TE_PREMIUM && btn && label) {
+                btn.classList.add('btn-premium');
+                label.innerText = "Auto-Build Server Now (TE Premium)";
+            }
+        }
 
         let currentLayout = { 
             server_name: "New Server", 
@@ -820,6 +839,10 @@
 
             if (pageId === 'page-generator' || pageId === 'page-final') {
                 updateBotInviteLink();
+            }
+
+            if (pageId === 'page-permissions') {
+                updateSubmitButtonForPremium();
             }
 
             window.scrollTo({ top: 0, behavior: 'smooth' });
