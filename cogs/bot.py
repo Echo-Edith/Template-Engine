@@ -28,44 +28,69 @@ class BotCog(commands.Cog):
         )
         clean_name = emoji_pattern.sub('', name)
         clean_name = re.sub(r'[^a-zA-Z0-9\s\-_]', '', clean_name).strip().lower()
-        clean_name = re.sub(r'[\s_]+', '-', clean_name)
+        clean_name = re.sub(r'[\s_]+', '-', clean_name).strip("-") or "unnamed-channel"
 
-        prefix = f"{emoji.strip()}-" if emoji and not name.startswith(emoji) else ""
-        formatted = f"{prefix}{clean_name}".strip("-")
-
-        if not clean_name and emoji:
-            return emoji
-        return formatted or "unnamed-channel"
+        if emoji and emoji.strip():
+            return f"{emoji.strip()}│{clean_name}"
+        return clean_name
 
     def parse_duration_seconds(self, duration_str: str) -> int:
-        """Parses a duration string like '10m', '2h', '1d', '30s' into seconds."""
-        duration_str = duration_str.strip().lower()
-        match = re.match(r'^(\d+)\s*([s|m|h|d])?$', duration_str)
+        """Parses duration strings like '30s', '15m', '2h', '1d' into total seconds."""
+        if not duration_str:
+            return 0
+        
+        match = re.match(r"^(\d+)\s*([smhdSMHD])?$", duration_str.strip())
         if not match:
-            return None
+            return 0
+            
+        value, unit = match.groups()
+        num = int(value)
+        unit = (unit or "s").lower()
 
-        value = int(match.group(1))
-        unit = match.group(2) or 'm'  # Default to minutes if no unit provided
+        if unit == "s":
+            return num
+        elif unit == "m":
+            return num * 60
+        elif unit == "h":
+            return num * 3600
+        elif unit == "d":
+            return num * 86400
+        return 0
 
-        if unit == 's':
-            return value
-        elif unit == 'm':
-            return value * 60
-        elif unit == 'h':
-            return value * 3600
-        elif unit == 'd':
-            return value * 86400
-        return None
-
-    async def schedule_channel_deletion(self, channel: discord.abc.GuildChannel, delay_seconds: int):
-        """Helper task to automatically delete a channel after specified delay in seconds."""
+    async def schedule_channel_deletion(
+        self,
+        channel: discord.abc.GuildChannel,
+        delay_seconds: int,
+        origin_channel: discord.abc.GuildChannel = None,
+        executor: discord.User = None
+    ):
+        """Helper task to automatically delete a channel after specified delay in seconds and log it."""
         await asyncio.sleep(delay_seconds)
+        channel_name = channel.name
+        channel_id = channel.id
         try:
             await channel.delete(reason="Temporary Channel Expiration Auto-Delete")
+            
+            # Send deletion log to the channel where the command was executed
+            if origin_channel:
+                log_embed = discord.Embed(
+                    title="[Temporary Channel Deleted]",
+                    description=f"The temporary channel **#{channel_name}** (`{channel_id}`) has expired and was automatically deleted.",
+                    color=0xf43f5e
+                )
+                if executor:
+                    log_embed.add_field(name="Created By", value=executor.mention, inline=True)
+                log_embed.set_footer(text="Echo Studio Infrastructure")
+                
+                try:
+                    await origin_channel.send(embed=log_embed)
+                except Exception as e:
+                    print(f"Failed to send temp channel deletion log to origin channel: {e}")
+
         except discord.NotFound:
             pass  # Channel was already deleted manually
         except Exception as e:
-            print(f"Failed to auto-delete temp channel {channel.id}: {e}")
+            print(f"Failed to auto-delete temp channel {channel_id}: {e}")
 
     async def wipe_guild_infrastructure(self, guild: discord.Guild, leave_fallback_channel: bool = False):
         """Helper method to completely purge channels, categories, and roles from a server."""
@@ -90,6 +115,75 @@ class BotCog(commands.Cog):
                 )
             except Exception as e:
                 print(f"Failed to create fallback channel: {e}")
+
+    # --- OWNER SYNC COMMAND ---
+    @commands.command(name="sync")
+    @commands.is_owner()
+    async def sync_commands(self, ctx: commands.Context):
+        """Manual prefix command (!sync) to purge duplicate guild overrides and sync global commands."""
+        embed = discord.Embed(
+            title="[Syncing Commands]",
+            description="Cleaning guild command overrides and syncing global commands...",
+            color=0x3b82f6
+        )
+        embed.set_footer(text="Echo Studio Infrastructure")
+        msg = await ctx.send(embed=embed)
+
+        try:
+            self.bot.tree.clear_commands(guild=ctx.guild)
+            await self.bot.tree.sync(guild=ctx.guild)
+            synced = await self.bot.tree.sync()
+
+            success_embed = discord.Embed(
+                title="[Sync Complete]",
+                description=f"Successfully cleaned duplicate guild commands and globally synced {len(synced)} command(s).",
+                color=0x2ecc71
+            )
+            success_embed.set_footer(text="Echo Studio Infrastructure")
+            await msg.edit(embed=success_embed)
+        except Exception as e:
+            err_embed = discord.Embed(
+                title="[Sync Error]",
+                description=f"Failed to sync commands: {e}",
+                color=0xf43f5e
+            )
+            err_embed.set_footer(text="Echo Studio Infrastructure")
+            await msg.edit(embed=err_embed)
+
+    # --- PING COMMAND ---
+    @app_commands.command(
+        name="ping",
+        description="Check the bot response latency."
+    )
+    async def ping(self, interaction: discord.Interaction):
+        latency = round(self.bot.latency * 1000)
+        embed = discord.Embed(
+            title="[Pong]",
+            description=f"Bot Latency: {latency}ms",
+            color=0x3b82f6
+        )
+        embed.set_footer(text="Echo Studio Infrastructure")
+        await interaction.response.send_message(embed=embed)
+
+    # --- WEBSITE COMMAND ---
+    @app_commands.command(
+        name="website",
+        description="Get the link to the dashboard and website."
+    )
+    async def website(self, interaction: discord.Interaction):
+        website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
+
+        embed = discord.Embed(
+            title="[Echo Studio Portal]",
+            description="Click the button below to access the dashboard",
+            color=0x8b5cf6
+        )
+        embed.set_footer(text="Echo Studio Dashboard")
+
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Visit Website", url=website_url, style=discord.ButtonStyle.link))
+
+        await interaction.response.send_message(embed=embed, view=view)
 
     # --- ADMIN CREATE SINGLE CHANNEL COMMAND ---
     @app_commands.command(
@@ -144,7 +238,7 @@ class BotCog(commands.Cog):
         stream: bool = None,
         use_voice_activation: bool = None
     ):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=False)
 
         clean_name = self.slugify_channel_name(name, emoji)
         role = target_role or interaction.guild.default_role
@@ -163,6 +257,9 @@ class BotCog(commands.Cog):
         if stream is not None: perm_kwargs["stream"] = stream
         if use_voice_activation is not None: perm_kwargs["use_voice_activation"] = use_voice_activation
 
+        if type == "announcement" and send_messages is None and role == interaction.guild.default_role:
+            perm_kwargs["send_messages"] = False
+
         overwrites = {}
         if perm_kwargs:
             overwrites[role] = discord.PermissionOverwrite(**perm_kwargs)
@@ -180,10 +277,14 @@ class BotCog(commands.Cog):
                     name=clean_name,
                     category=category,
                     topic=topic,
-                    news=True,
                     overwrites=overwrites,
                     reason=f"Admin single channel creation by {interaction.user}"
                 )
+                if "COMMUNITY" in interaction.guild.features:
+                    try:
+                        await new_chan.edit(type=discord.ChannelType.news)
+                    except Exception:
+                        pass
             else:
                 new_chan = await interaction.guild.create_text_channel(
                     name=clean_name,
@@ -203,7 +304,7 @@ class BotCog(commands.Cog):
             embed.add_field(name="Target Role", value=role.mention, inline=True)
             embed.set_footer(text="Echo Studio Infrastructure")
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=False)
 
         except Exception as e:
             err_embed = discord.Embed(
@@ -212,7 +313,7 @@ class BotCog(commands.Cog):
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
-            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            await interaction.followup.send(embed=err_embed, ephemeral=False)
 
     # --- ADMIN TEMPORARY CHANNEL COMMAND ---
     @app_commands.command(
@@ -269,7 +370,7 @@ class BotCog(commands.Cog):
         stream: bool = None,
         use_voice_activation: bool = None
     ):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=False)
 
         delay_seconds = self.parse_duration_seconds(duration)
         if not delay_seconds or delay_seconds <= 0:
@@ -279,7 +380,7 @@ class BotCog(commands.Cog):
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
-            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            await interaction.followup.send(embed=err_embed, ephemeral=False)
             return
 
         if delay_seconds > 604800:  # Cap at 7 days
@@ -289,7 +390,7 @@ class BotCog(commands.Cog):
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
-            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            await interaction.followup.send(embed=err_embed, ephemeral=False)
             return
 
         clean_name = self.slugify_channel_name(name, emoji)
@@ -308,6 +409,9 @@ class BotCog(commands.Cog):
         if speak is not None: perm_kwargs["speak"] = speak
         if stream is not None: perm_kwargs["stream"] = stream
         if use_voice_activation is not None: perm_kwargs["use_voice_activation"] = use_voice_activation
+
+        if type == "announcement" and send_messages is None and role == interaction.guild.default_role:
+            perm_kwargs["send_messages"] = False
 
         overwrites = {}
         if perm_kwargs:
@@ -329,10 +433,14 @@ class BotCog(commands.Cog):
                     name=clean_name,
                     category=category,
                     topic=full_topic,
-                    news=True,
                     overwrites=overwrites,
                     reason=f"Admin temp channel creation by {interaction.user} (expires in {duration})"
                 )
+                if "COMMUNITY" in interaction.guild.features:
+                    try:
+                        await new_chan.edit(type=discord.ChannelType.news)
+                    except Exception:
+                        pass
             else:
                 new_chan = await interaction.guild.create_text_channel(
                     name=clean_name,
@@ -342,8 +450,15 @@ class BotCog(commands.Cog):
                     reason=f"Admin temp channel creation by {interaction.user} (expires in {duration})"
                 )
 
-            # Schedule background deletion task
-            asyncio.create_task(self.schedule_channel_deletion(new_chan, delay_seconds))
+            # Schedule background deletion task with origin channel reference for logging
+            asyncio.create_task(
+                self.schedule_channel_deletion(
+                    channel=new_chan,
+                    delay_seconds=delay_seconds,
+                    origin_channel=interaction.channel,
+                    executor=interaction.user
+                )
+            )
 
             embed = discord.Embed(
                 title="[Temporary Channel Created]",
@@ -355,7 +470,7 @@ class BotCog(commands.Cog):
             embed.add_field(name="Type", value=type.capitalize(), inline=True)
             embed.set_footer(text="Echo Studio Infrastructure")
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=False)
 
         except Exception as e:
             err_embed = discord.Embed(
@@ -364,7 +479,7 @@ class BotCog(commands.Cog):
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
-            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            await interaction.followup.send(embed=err_embed, ephemeral=False)
 
     # --- ADMIN EDIT SINGLE CHANNEL COMMAND ---
     @app_commands.command(
@@ -414,7 +529,7 @@ class BotCog(commands.Cog):
         stream: bool = None,
         use_voice_activation: bool = None
     ):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True, ephemeral=False)
 
         try:
             kwargs = {}
@@ -460,7 +575,7 @@ class BotCog(commands.Cog):
             )
             embed.set_footer(text="Echo Studio Infrastructure")
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=False)
 
         except Exception as e:
             err_embed = discord.Embed(
@@ -469,76 +584,7 @@ class BotCog(commands.Cog):
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
-            await interaction.followup.send(embed=err_embed, ephemeral=True)
-
-    # --- OWNER SYNC COMMAND ---
-    @commands.command(name="sync")
-    @commands.is_owner()
-    async def sync_commands(self, ctx: commands.Context):
-        """Manual prefix command (!sync) to purge duplicate guild overrides and sync global commands."""
-        embed = discord.Embed(
-            title="[Syncing Commands]",
-            description="Cleaning guild command overrides and syncing global commands...",
-            color=0x3b82f6
-        )
-        embed.set_footer(text="Echo Studio Infrastructure")
-        msg = await ctx.send(embed=embed)
-
-        try:
-            self.bot.tree.clear_commands(guild=ctx.guild)
-            await self.bot.tree.sync(guild=ctx.guild)
-            synced = await self.bot.tree.sync()
-
-            success_embed = discord.Embed(
-                title="[Sync Complete]",
-                description=f"Successfully cleaned duplicate guild commands and globally synced {len(synced)} command(s).",
-                color=0x2ecc71
-            )
-            success_embed.set_footer(text="Echo Studio Infrastructure")
-            await msg.edit(embed=success_embed)
-        except Exception as e:
-            err_embed = discord.Embed(
-                title="[Sync Error]",
-                description=f"Failed to sync commands: `{e}`",
-                color=0xf43f5e
-            )
-            err_embed.set_footer(text="Echo Studio Infrastructure")
-            await msg.edit(embed=err_embed)
-
-    # --- PING COMMAND ---
-    @app_commands.command(
-        name="ping",
-        description="Check the bot response latency."
-    )
-    async def ping(self, interaction: discord.Interaction):
-        latency = round(self.bot.latency * 1000)
-        embed = discord.Embed(
-            title="[Pong]",
-            description=f"Bot Latency: `{latency}ms`",
-            color=0x3b82f6
-        )
-        embed.set_footer(text="Echo Studio Infrastructure")
-        await interaction.response.send_message(embed=embed)
-
-    # --- WEBSITE COMMAND ---
-    @app_commands.command(
-        name="website",
-        description="Get the link to the dashboard and website."
-    )
-    async def website(self, interaction: discord.Interaction):
-        website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://echo-dashboard-qn39.onrender.com"))
-
-        embed = discord.Embed(
-            title="[Echo Studio Portal]",
-            description="Click the button below to access the dashboard",
-            color=0x8b5cf6
-        )
-        embed.set_footer(text="Echo Studio Dashboard")
-
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Visit Website", url=website_url, style=discord.ButtonStyle.link))
-
-        await interaction.response.send_message(embed=embed, view=view)
+            await interaction.followup.send(embed=err_embed, ephemeral=False)
 
     # --- BUILD COMMAND ---
     @app_commands.command(
@@ -580,7 +626,7 @@ class BotCog(commands.Cog):
         except Exception as e:
             err_embed = discord.Embed(
                 title="[Fetch Error]",
-                description=f"Failed to fetch blueprint data: `{e}`",
+                description=f"Failed to fetch blueprint data: {e}",
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
@@ -616,7 +662,7 @@ class BotCog(commands.Cog):
         if not guild:
             err_embed = discord.Embed(
                 title="[Target Guild Not Found]",
-                description=f"Bot is not in target server (`{target_guild_id}`). Please invite the bot to the server first.",
+                description=f"Bot is not in target server ({target_guild_id}). Please invite the bot to the server first.",
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
@@ -646,7 +692,8 @@ class BotCog(commands.Cog):
 
                 for chan_cfg in cat_cfg.get("channels", []):
                     c_raw_name = chan_cfg.get("name", "channel")
-                    c_name = self.slugify_channel_name(c_raw_name)
+                    c_emoji = chan_cfg.get("emoji", "")
+                    c_name = self.slugify_channel_name(c_raw_name, c_emoji)
                     c_type = chan_cfg.get("type", "text")
                     c_topic = chan_cfg.get("topic", "")
 
@@ -676,6 +723,18 @@ class BotCog(commands.Cog):
                             category=category,
                             overwrites=overwrites
                         )
+                    elif c_type == "announcement":
+                        new_chan = await guild.create_text_channel(
+                            name=c_name,
+                            category=category,
+                            topic=c_topic,
+                            overwrites=overwrites
+                        )
+                        if "COMMUNITY" in guild.features:
+                            try:
+                                await new_chan.edit(type=discord.ChannelType.news)
+                            except Exception:
+                                pass
                     else:
                         await guild.create_text_channel(
                             name=c_name,
@@ -688,7 +747,7 @@ class BotCog(commands.Cog):
 
         embed = discord.Embed(
             title="[Server Rebuilt]",
-            description=f"Successfully nuked previous layout and deployed new blueprint to **{guild.name}** (`{guild.id}`).",
+            description=f"Successfully nuked previous layout and deployed new blueprint to {guild.name} ({guild.id}).",
             color=0x2ecc71
         )
         embed.set_footer(text="Echo Studio Infrastructure")
@@ -734,7 +793,7 @@ class BotCog(commands.Cog):
         if not guild:
             err_embed = discord.Embed(
                 title="[Guild Not Found]",
-                description=f"Guild ID `{target_guild_id}` not found or bot is not present.",
+                description=f"Guild ID {target_guild_id} not found or bot is not present.",
                 color=0xf43f5e
             )
             err_embed.set_footer(text="Echo Studio Infrastructure")
@@ -743,7 +802,7 @@ class BotCog(commands.Cog):
 
         init_embed = discord.Embed(
             title="[Nuking...]",
-            description=f"Initiating complete server nuke on **{guild.name}** (`{guild.id}`)...",
+            description=f"Initiating complete server nuke on {guild.name} ({guild.id})...",
             color=0xeab308
         )
         init_embed.set_footer(text="Echo Studio Infrastructure")
@@ -756,7 +815,7 @@ class BotCog(commands.Cog):
             try:
                 dm_embed = discord.Embed(
                     title="[Server Nuked]",
-                    description=f"Complete server nuke executed on **{guild.name}** (`{guild.id}`). All channels and roles deleted.",
+                    description=f"Complete server nuke executed on {guild.name} ({guild.id}). All channels and roles deleted.",
                     color=0x2ecc71
                 )
                 dm_embed.set_footer(text="Echo Studio Infrastructure")
