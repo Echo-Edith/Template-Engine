@@ -263,17 +263,21 @@
         }
 
         .btn-glass.btn-premium {
-            background: linear-gradient(135deg, rgba(241, 196, 15, 0.9) 0%, rgba(243, 156, 18, 0.9) 100%);
+            background: linear-gradient(135deg, rgba(241, 196, 15, 0.95) 0%, rgba(243, 156, 18, 0.95) 100%);
             color: #000000;
             font-weight: 800;
             box-shadow: 0 8px 20px rgba(241, 196, 15, 0.4);
-            border: 1px solid rgba(255, 255, 255, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.5);
         }
 
         .btn-glass:hover:not(:disabled) {
             transform: translateY(-1px);
             box-shadow: 0 12px 25px rgba(139, 92, 246, 0.5);
             filter: brightness(1.1);
+        }
+
+        .btn-glass.btn-premium:hover:not(:disabled) {
+            box-shadow: 0 12px 25px rgba(241, 196, 15, 0.6);
         }
 
         .btn-glass:disabled {
@@ -418,15 +422,16 @@
             border-radius: 50%;
         }
 
-        /* Permissions Modal Styling */
+        /* Modal Backdrop Styling */
         .modal-backdrop {
             position: fixed;
             top: 0;
             left: 0;
             width: 100vw;
             height: 100vh;
-            background: rgba(0, 0, 0, 0.7);
+            background: rgba(0, 0, 0, 0.75);
             backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
             z-index: 999;
             display: none;
             justify-content: center;
@@ -479,6 +484,18 @@
             padding: 6px 4px;
             font-size: 0.85rem;
             color: var(--text-sub);
+        }
+
+        .robux-badge {
+            background: rgba(241, 196, 15, 0.15);
+            border: 1px solid rgba(241, 196, 15, 0.3);
+            color: #f1c40f;
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin: 16px 0;
+            font-size: 0.88rem;
+            line-height: 1.5;
+            text-align: left;
         }
 
         .spinner {
@@ -671,8 +688,8 @@
                 </div>
             </div>
 
-            <button id="submit-design-btn" class="btn-glass" onclick="handleSubmitDesign()">
-                <i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit Server Design</span>
+            <button id="submit-design-btn" class="btn-glass" onclick="handleInitialSubmitClick()">
+                <i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit design to staff</span>
             </button>
         </div>
 
@@ -693,6 +710,35 @@
             </button>
         </div>
 
+    </div>
+
+    <!-- NON-PREMIUM ROBUX NOTICE MODAL -->
+    <div id="robux-notice-modal" class="modal-backdrop">
+        <div class="modal-card" style="text-align: center;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h3 style="font-size:1.1rem; font-weight:700; color: #f1c40f;">
+                    <i class="fa-solid fa-coins"></i> Standard Build Notice
+                </h3>
+                <i class="fa-solid fa-xmark" onclick="closeRobuxNoticeModal()" style="cursor:pointer; font-size:1.2rem;"></i>
+            </div>
+
+            <div class="robux-badge">
+                <strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout requires Robux unless you have an active <strong>TE Premium</strong> subscription (299 Robux/mo).
+            </div>
+
+            <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
+                Submitting this design will dispatch your blueprint to staff for manual deployment review.
+            </p>
+
+            <div style="display:flex; gap:10px;">
+                <button class="btn-glass" style="background: rgba(255, 255, 255, 0.08); border: 1px solid var(--glass-inner-border);" onclick="closeRobuxNoticeModal()">
+                    Cancel
+                </button>
+                <button class="btn-glass" onclick="confirmNonPremiumSubmission()">
+                    Confirm & Submit
+                </button>
+            </div>
+        </div>
     </div>
 
     <!-- ADVANCED PERMISSIONS MODAL -->
@@ -745,16 +791,21 @@
                 isCaptchaVerified = true;
             }
             checkAuthAndCaptchaStatus();
-            updateSubmitButtonForPremium();
+            applyPremiumTheme();
         });
 
-        function updateSubmitButtonForPremium() {
+        function applyPremiumTheme() {
             const btn = document.getElementById('submit-design-btn');
             const label = document.getElementById('submit-btn-label');
 
-            if (IS_TE_PREMIUM && btn && label) {
+            if (label) {
+                label.innerText = "Submit design to staff";
+            }
+
+            if (IS_TE_PREMIUM && btn) {
                 btn.classList.add('btn-premium');
-                label.innerText = "Auto-Build Server Now (TE Premium)";
+            } else if (btn) {
+                btn.classList.remove('btn-premium');
             }
         }
 
@@ -842,7 +893,7 @@
             }
 
             if (pageId === 'page-permissions') {
-                updateSubmitButtonForPremium();
+                applyPremiumTheme();
             }
 
             window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1229,15 +1280,35 @@
             if (btn) btn.href = inviteUrl;
         }
 
-        async function handleSubmitDesign() {
+        function handleInitialSubmitClick() {
             const serverId = document.getElementById('gen-server-id').value.trim();
             const serverLink = document.getElementById('gen-server-link').value.trim();
-            const promptVal = document.getElementById('gen-prompt').value.trim();
 
             if (!serverId || !serverLink) {
                 alert('Server ID and Server Invite Link are required to submit.');
                 return;
             }
+
+            if (!IS_TE_PREMIUM) {
+                document.getElementById('robux-notice-modal').style.display = 'flex';
+            } else {
+                handleSubmitDesign();
+            }
+        }
+
+        function closeRobuxNoticeModal() {
+            document.getElementById('robux-notice-modal').style.display = 'none';
+        }
+
+        function confirmNonPremiumSubmission() {
+            closeRobuxNoticeModal();
+            handleSubmitDesign();
+        }
+
+        async function handleSubmitDesign() {
+            const serverId = document.getElementById('gen-server-id').value.trim();
+            const serverLink = document.getElementById('gen-server-link').value.trim();
+            const promptVal = document.getElementById('gen-prompt').value.trim();
 
             const btn = document.getElementById('submit-design-btn');
             btn.disabled = true;
@@ -1269,17 +1340,21 @@
                 });
                 const resData = await response.json();
                 
+                const heading = document.getElementById('final-title-heading');
+                const desc = document.getElementById('final-desc-text');
+
                 if (resData.is_premium) {
-                    const heading = document.getElementById('final-title-heading');
-                    const desc = document.getElementById('final-desc-text');
-                    if (heading) heading.innerText = "👑 TE Premium Auto-Build Dispatched!";
-                    if (desc) desc.innerText = "Your blueprint has been queued for real-time automated building. Check your server in a few seconds!";
+                    if (heading) heading.innerText = "👑 TE Premium Design Dispatched!";
+                    if (desc) desc.innerText = "Your blueprint has been sent to staff channel with an interactive One-Click Build button attached!";
+                } else {
+                    if (heading) heading.innerText = "Blueprint Submitted to Staff!";
+                    if (desc) desc.innerText = "Your blueprint has been sent to staff for deployment review.";
                 }
             } catch (err) {
                 console.error('Submission error:', err);
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> <span>Submit Server Design</span>`;
+                applyPremiumTheme();
                 navigateTo('page-final');
             }
         }
