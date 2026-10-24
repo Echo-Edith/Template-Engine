@@ -1,15 +1,12 @@
 import os
 import asyncio
 import threading
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 import discord
 from discord.ext import commands
 
-# Render Web Services require an open HTTP port.
+# Render Web Services require an open HTTP port to pass health checks.
 web_app = Flask(__name__)
-
-# Shared global event loop for thread-safe bot execution
-bot_loop = None
 
 @web_app.route("/")
 @web_app.route("/health")
@@ -18,57 +15,6 @@ def health_check():
         "status": "online",
         "bot": str(bot.user) if bot.user else "initializing"
     }), 200
-
-
-@web_app.route("/api/bot-autobuild", methods=["POST"])
-def trigger_autobuild():
-    """Endpoint called by keep_alive.py (Vercel) to trigger instant server builds for TE Premium users."""
-    data = request.get_json() or {}
-    secret = data.get("secret", "")
-    expected_secret = os.getenv("FLASK_SECRET_KEY", "super-secret-key-fallback").strip()
-
-    if secret != expected_secret:
-        return jsonify({"success": False, "error": "Unauthorized internal request."}), 401
-
-    target_server_id = data.get("target_server_id")
-    layout = data.get("layout")
-    user_id = data.get("user_id")
-
-    if not target_server_id or not layout:
-        return jsonify({"success": False, "error": "Missing target_server_id or layout."}), 400
-
-    try:
-        guild_id = int(target_server_id)
-        guild = bot.get_guild(guild_id)
-    except Exception:
-        guild = None
-
-    if not guild:
-        return jsonify({
-            "success": False,
-            "error": f"Bot is not in the target server (ID: {target_server_id}). Please invite the bot first!"
-        }), 404
-
-    # Fetch BotCog instance and execute build thread-safely
-    bot_cog = bot.get_cog("BotCog")
-    if not bot_cog:
-        return jsonify({"success": False, "error": "BotCog is not loaded on bot runner."}), 500
-
-    if bot_loop and bot_loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(
-            bot_cog.execute_blueprint_build(guild, layout),
-            bot_loop
-        )
-        try:
-            future.result(timeout=60) # Wait up to 60s for build completion
-            return jsonify({
-                "success": True,
-                "message": f"Successfully auto-built server '{guild.name}' ({guild.id})!"
-            }), 200
-        except Exception as e:
-            return jsonify({"success": False, "error": f"Build execution failed: {str(e)}"}), 500
-    else:
-        return jsonify({"success": False, "error": "Bot loop is not running."}), 500
 
 
 def run_health_server():
@@ -91,9 +37,6 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
-    global bot_loop
-    bot_loop = asyncio.get_running_loop()
-
     print("-----------------------------------------")
     print(f"Logged in as: {bot.user} (ID: {bot.user.id})")
     print("-----------------------------------------")
