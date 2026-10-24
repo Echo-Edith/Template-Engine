@@ -23,7 +23,6 @@ if MONGO_URI:
     except Exception as e:
         print(f"[Bot Mongo Warning] Could not connect to MongoDB for Premium: {e}")
 
-# In-memory fallback if MongoDB is not present
 LOCAL_PREMIUM_USERS = {}
 
 
@@ -36,14 +35,10 @@ def parse_duration_to_timedelta(duration_str: str) -> timedelta:
     val, unit = match.groups()
     num = int(val)
     unit = (unit or "d").lower()
-    if unit == "s":
-        return timedelta(seconds=num)
-    elif unit == "m":
-        return timedelta(minutes=num)
-    elif unit == "h":
-        return timedelta(hours=num)
-    elif unit == "d":
-        return timedelta(days=num)
+    if unit == "s": return timedelta(seconds=num)
+    elif unit == "m": return timedelta(minutes=num)
+    elif unit == "h": return timedelta(hours=num)
+    elif unit == "d": return timedelta(days=num)
     return timedelta(days=30)
 
 
@@ -112,6 +107,84 @@ def get_all_active_premiums():
 class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        """Listens for 'One-Click Build' button interactions sent via webhooks."""
+        if interaction.type != discord.InteractionType.component:
+            return
+
+        custom_id = interaction.data.get("custom_id", "")
+        if not custom_id.startswith("buildbtn_"):
+            return
+
+        # Custom ID format: buildbtn_<server_id>_<blueprint_url>
+        parts = custom_id.split("_", 2)
+        if len(parts) < 3:
+            await interaction.response.send_message("❌ Invalid build button payload.", ephemeral=True)
+            return
+
+        target_server_id = parts[1]
+        blueprint_url = parts[2]
+
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="[One-Click Build Initiated]",
+                description=f"⚡ Starting server build for target ID `{target_server_id}`...",
+                color=0xeab308
+            ),
+            ephemeral=True
+        )
+
+        try:
+            guild_id = int(target_server_id)
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                guild = await self.bot.fetch_guild(guild_id)
+        except Exception:
+            guild = None
+
+        if not guild:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="[Build Error]",
+                    description=f"❌ Bot is not inside target server ID (`{target_server_id}`). Please invite the bot first!",
+                    color=0xf43f5e
+                ),
+                ephemeral=True
+            )
+            return
+
+        # Fetch layout JSON content directly from blueprint URL
+        blueprint_data = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(blueprint_url) as resp:
+                    if resp.status == 200:
+                        blueprint_data = await resp.json()
+        except Exception as e:
+            print(f"Failed to fetch blueprint file: {e}")
+
+        if not blueprint_data:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="[Build Error]",
+                    description="❌ Failed to load blueprint JSON file from server.",
+                    color=0xf43f5e
+                ),
+                ephemeral=True
+            )
+            return
+
+        asyncio.create_task(self.execute_blueprint_build(guild, blueprint_data))
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title="[Build Executing]",
+                description=f"✅ Successfully queued build for server **{guild.name}**! Channels and roles are being generated now.",
+                color=0x2ecc71
+            ),
+            ephemeral=True
+        )
 
     def slugify_channel_name(self, name: str, emoji: str = "") -> str:
         if not name:
@@ -409,7 +482,7 @@ class BotCog(commands.Cog):
         target_guild_id = int(server_id.strip()) if server_id else interaction.guild_id
         guild = self.bot.get_guild(target_guild_id)
         if not guild:
-            await interaction.response.send_message(embed=discord.Embed(title="[Guild Not Found]", description="Guild not found.", color=0xf43f5e), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="[Access Denied]", description="Guild not found.", color=0xf43f5e), ephemeral=True)
             return
 
         await interaction.response.send_message(embed=discord.Embed(title="[Nuking...]", description=f"Nuking {guild.name}...", color=0xeab308))
