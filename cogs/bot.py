@@ -10,10 +10,8 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
-# Target Channel ID for scanning TE Premium webhook submissions
 PREMIUM_SCAN_CHANNEL_ID = 1563544108696477802
 
-# MongoDB Client Setup for Premium persistence in Bot Cog
 MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
 if MONGO_URI:
@@ -29,7 +27,7 @@ if MONGO_URI:
 
 LOCAL_PREMIUM_USERS = {}
 PREMIUM_ROLE_NAME = "Template Engine Premium"
-PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)  # Gold Color
+PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)
 
 
 def parse_duration_to_timedelta(duration_str: str) -> timedelta:
@@ -140,7 +138,6 @@ class BotCog(commands.Cog):
         self.check_premium_expirations.cancel()
 
     async def get_or_create_premium_role(self, guild: discord.Guild) -> discord.Role:
-        """Finds or creates the gold 'Template Engine Premium' role in the specified guild."""
         role = discord.utils.get(guild.roles, name=PREMIUM_ROLE_NAME)
         if not role:
             try:
@@ -156,7 +153,6 @@ class BotCog(commands.Cog):
         return role
 
     async def assign_premium_role(self, user_id: str):
-        """Assigns the gold TE Premium role to a user across all mutual guilds."""
         for guild in self.bot.guilds:
             member = guild.get_member(int(user_id))
             if not member:
@@ -173,7 +169,6 @@ class BotCog(commands.Cog):
                         print(f"[Role Assign Error] Failed to assign role to {member} in {guild.name}: {e}")
 
     async def remove_premium_role(self, user_id: str):
-        """Removes the gold TE Premium role from a user across all mutual guilds."""
         for guild in self.bot.guilds:
             member = guild.get_member(int(user_id))
             if not member:
@@ -191,7 +186,6 @@ class BotCog(commands.Cog):
 
     @tasks.loop(minutes=1.0)
     async def check_premium_expirations(self):
-        """Background loop that checks for expired subscriptions every minute and strips the role."""
         expired_ids = get_all_expired_premiums()
         for uid in expired_ids:
             remove_user_premium(uid)
@@ -201,72 +195,12 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        """Scans specified channel (ID: 1563544108696477802) for TE Premium webhook submissions and attaches One-Click Build button."""
-        # Always check target channel ID
-        if message.channel.id != PREMIUM_SCAN_CHANNEL_ID and not (message.embeds and any("TE PREMIUM" in (e.title or "").upper() for e in message.embeds)):
-            return
+    # --- DIRECT HANDSHAKE BACKGROUND BUILDER ---
+    async def handle_direct_handshake_build(self, user_id: str, target_server_id: str, blueprint_url: str, blueprint_data: dict, log_channel_id: str):
+        """Processes TE Premium layout build directly via website API handshake without scanning."""
+        await self.bot.wait_until_ready()
 
-        if not message.embeds:
-            return
-
-        for embed in message.embeds:
-            is_premium_embed = False
-            title_text = (embed.title or "").upper()
-            desc_text = (embed.description or "").upper()
-            full_dict = str(embed.to_dict()).upper()
-
-            # Check for TE Premium identifier
-            if "TE PREMIUM" in title_text or "TE PREMIUM" in desc_text or "TE PREMIUM" in full_dict:
-                is_premium_embed = True
-
-            if is_premium_embed:
-                target_server_id = None
-                blueprint_url = None
-
-                for field in embed.fields:
-                    f_name = (field.name or "").strip()
-                    f_val = (field.value or "").strip()
-
-                    if f_name == "Target Server ID":
-                        target_server_id = f_val.replace("`", "").strip()
-                    elif f_name == "Blueprint File":
-                        blueprint_url = f_val.replace("`", "").strip()
-
-                if target_server_id and blueprint_url:
-                    view = discord.ui.View(timeout=None)
-                    view.add_item(discord.ui.Button(
-                        label="⚡ One-Click Build Server",
-                        style=discord.ButtonStyle.green,
-                        custom_id=f"buildbtn_{target_server_id}_{blueprint_url}"
-                    ))
-                    try:
-                        await message.channel.send(
-                            content=f"👑 **[TE Premium Build Ready]** Target Server ID: `{target_server_id}`",
-                            view=view
-                        )
-                        print(f"[Button Dispatch Success] Attached build button for Server ID: {target_server_id} in channel {message.channel.id}")
-                    except Exception as e:
-                        print(f"[Button Send Error] Failed to dispatch button in channel {message.channel.id}: {e}")
-
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction):
-        """Listens for 'One-Click Build' button interactions."""
-        if interaction.type != discord.InteractionType.component:
-            return
-
-        custom_id = interaction.data.get("custom_id", "")
-        if not custom_id.startswith("buildbtn_"):
-            return
-
-        parts = custom_id.split("_", 2)
-        if len(parts) < 3:
-            await interaction.response.send_message("❌ Invalid build button payload.", ephemeral=True)
-            return
-
-        target_server_id = parts[1]
-        blueprint_url = parts[2]
+        target_channel = self.bot.get_channel(int(log_channel_id)) if log_channel_id and str(log_channel_id).isdigit() else self.bot.get_channel(PREMIUM_SCAN_CHANNEL_ID)
 
         guild = None
         try:
@@ -281,68 +215,51 @@ class BotCog(commands.Cog):
             client_id = os.getenv("DISCORD_CLIENT_ID", str(self.bot.user.id if self.bot.user else ""))
             invite_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=8&scope=bot%20applications.commands&guild_id={target_server_id}"
 
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="[Build Error]",
-                    description=f"❌ The bot isn't in the server! Please invite the bot first.\nTarget Server ID: `{target_server_id}`",
-                    color=0xf43f5e
-                ),
-                ephemeral=True
-            )
+            if target_channel:
+                try:
+                    embed = discord.Embed(
+                        title="⚠️ [Auto-Build Pending - Bot Missing]",
+                        description=f"Bot isn't in target server `{target_server_id}`! User has been sent an invite DM.",
+                        color=0xeab308
+                    )
+                    await target_channel.send(embed=embed)
+                except Exception: pass
 
-            try:
-                dm_embed = discord.Embed(
-                    title="⚠️ Bot Missing From Target Server",
-                    description=(
-                        f"You attempted a One-Click Build for server ID `{target_server_id}`, but the bot has not been added to that server yet.\n\n"
-                        f"👉 **[Click Here to Add Bot to Target Server]({invite_url})**"
-                    ),
-                    color=0xeab308
-                )
-                dm_embed.set_footer(text="Echo Studio Infrastructure")
-                await interaction.user.send(embed=dm_embed)
-            except Exception as e:
-                print(f"[DM Error] Could not send direct message to user {interaction.user}: {e}")
+            if user_id and str(user_id).isdigit():
+                try:
+                    usr = await self.bot.fetch_user(int(user_id))
+                    if usr:
+                        dm_embed = discord.Embed(
+                            title="⚠️ Action Required: Add Bot to Complete Server Build",
+                            description=(
+                                f"Your TE Premium design for server ID `{target_server_id}` is ready to deploy, but the bot hasn't joined that server yet!\n\n"
+                                f"👉 **[Click Here to Add Bot & Start Auto-Build]({invite_url})**"
+                            ),
+                            color=0xeab308
+                        )
+                        dm_embed.set_footer(text="Echo Studio Infrastructure")
+                        await usr.send(embed=dm_embed)
+                except Exception as e:
+                    print(f"[DM Error] Could not send direct message: {e}")
             return
 
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="[One-Click Build Initiated]",
-                description=f"⚡ Starting server build for **{guild.name}** (`{target_server_id}`)...",
-                color=0xeab308
-            ),
-            ephemeral=True
-        )
-
-        blueprint_data = None
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(blueprint_url) as resp:
-                    if resp.status == 200:
-                        blueprint_data = await resp.json()
-        except Exception as e:
-            print(f"Failed to fetch blueprint file: {e}")
-
-        if not blueprint_data:
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="[Build Error]",
-                    description="❌ Failed to load blueprint JSON file from server.",
+            await self.execute_blueprint_build(guild, blueprint_data)
+            if target_channel:
+                embed = discord.Embed(
+                    title="⚡ [Auto-Build Complete]",
+                    description=f"✅ Automatically built server **{guild.name}** (`{target_server_id}`) successfully!",
+                    color=0x2ecc71
+                )
+                await target_channel.send(embed=embed)
+        except Exception as build_err:
+            if target_channel:
+                embed = discord.Embed(
+                    title="❌ [Auto-Build Failed]",
+                    description=f"An error occurred while deploying channels/roles to `{target_server_id}`: `{str(build_err)}`",
                     color=0xf43f5e
-                ),
-                ephemeral=True
-            )
-            return
-
-        asyncio.create_task(self.execute_blueprint_build(guild, blueprint_data))
-        await interaction.followup.send(
-            embed=discord.Embed(
-                title="[Build Executing]",
-                description=f"✅ Successfully queued build for server **{guild.name}**! Channels and roles are being generated now.",
-                color=0x2ecc71
-            ),
-            ephemeral=True
-        )
+                )
+                await target_channel.send(embed=embed)
 
     def slugify_channel_name(self, name: str, emoji: str = "") -> str:
         if not name:
