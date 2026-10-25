@@ -155,6 +155,11 @@ class BotCog(commands.Cog):
         """Assigns the gold TE Premium role to a user across all mutual guilds."""
         for guild in self.bot.guilds:
             member = guild.get_member(int(user_id))
+            if not member:
+                try:
+                    member = await guild.fetch_member(int(user_id))
+                except Exception:
+                    member = None
             if member:
                 role = await self.get_or_create_premium_role(guild)
                 if role and role not in member.roles:
@@ -167,6 +172,11 @@ class BotCog(commands.Cog):
         """Removes the gold TE Premium role from a user across all mutual guilds."""
         for guild in self.bot.guilds:
             member = guild.get_member(int(user_id))
+            if not member:
+                try:
+                    member = await guild.fetch_member(int(user_id))
+                except Exception:
+                    member = None
             if member:
                 role = discord.utils.get(guild.roles, name=PREMIUM_ROLE_NAME)
                 if role and role in member.roles:
@@ -418,7 +428,7 @@ class BotCog(commands.Cog):
 
         desc_lines = []
         for uid, exp in active_list:
-            desc_lines.append(f"• <@{uid}> (`{uid}`) — Expires: <t:{int(exp.timestamp())}:R>")
+            desc_lines.append(f"• <@{uid}> — Expires: <t:{int(exp.timestamp())}:R>")
 
         embed = discord.Embed(
             title=f"[Active TE Premiums ({len(active_list)})]",
