@@ -4,7 +4,6 @@ import json
 import asyncio
 import aiohttp
 import discord
-import sys
 from datetime import datetime, timezone, timedelta
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -133,6 +132,7 @@ class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.check_premium_expirations.start()
+        self.processed_message_ids = set()
 
     def cog_unload(self):
         self.check_premium_expirations.cancel()
@@ -195,9 +195,9 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
-    # --- DIRECT HANDSHAKE BACKGROUND BUILDER ---
+    # --- DIRECT HANDSHAKE & BACKUP LISTENERS ---
     async def handle_direct_handshake_build(self, user_id: str, target_server_id: str, blueprint_url: str, blueprint_data: dict, log_channel_id: str):
-        """Processes TE Premium layout build directly via website API handshake without scanning."""
+        """Executes auto-build directly from website API handshake."""
         await self.bot.wait_until_ready()
 
         target_channel = self.bot.get_channel(int(log_channel_id)) if log_channel_id and str(log_channel_id).isdigit() else self.bot.get_channel(PREMIUM_SCAN_CHANNEL_ID)
@@ -219,7 +219,7 @@ class BotCog(commands.Cog):
                 try:
                     embed = discord.Embed(
                         title="⚠️ [Auto-Build Pending - Bot Missing]",
-                        description=f"Bot isn't in target server `{target_server_id}`! User has been sent an invite DM.",
+                        description=f"Bot isn't in target server `{target_server_id}`! Direct message sent to user with invite link.",
                         color=0xeab308
                     )
                     await target_channel.send(embed=embed)
@@ -248,7 +248,7 @@ class BotCog(commands.Cog):
             if target_channel:
                 embed = discord.Embed(
                     title="⚡ [Auto-Build Complete]",
-                    description=f"✅ Automatically built server **{guild.name}** (`{target_server_id}`) successfully!",
+                    description=f"✅ Successfully built server **{guild.name}** (`{target_server_id}`) automatically!",
                     color=0x2ecc71
                 )
                 await target_channel.send(embed=embed)
@@ -260,6 +260,64 @@ class BotCog(commands.Cog):
                     color=0xf43f5e
                 )
                 await target_channel.send(embed=embed)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Fallback listener: If handshake times out while Render wakes up, scan log channel when online."""
+        if message.channel.id != PREMIUM_SCAN_CHANNEL_ID:
+            return
+
+        if message.id in self.processed_message_ids:
+            return
+
+        if not message.embeds:
+            return
+
+        embed = message.embeds[0]
+        title_text = str(embed.title or "").upper()
+
+        if "TE PREMIUM" in title_text or "BLUEPRINT SUBMITTED" in title_text:
+            self.processed_message_ids.add(message.id)
+
+            target_server_id = None
+            blueprint_url = None
+            user_id = None
+
+            for field in embed.fields:
+                f_name = str(field.name or "").lower()
+                f_val = str(field.value or "").strip("`")
+
+                if "target server" in f_name or "server id" in f_name:
+                    target_server_id = f_val
+                elif "blueprint" in f_name or "file" in f_name:
+                    match = re.search(r'https?://[^\s>]+', field.value)
+                    if match:
+                        blueprint_url = match.group(0)
+                    else:
+                        blueprint_url = f_val
+                elif "user information" in f_name:
+                    match = re.search(r'<@!?(\d+)>', field.value)
+                    if match:
+                        user_id = match.group(1)
+
+            if target_server_id and blueprint_url:
+                blueprint_data = None
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(blueprint_url, timeout=10) as resp:
+                            if resp.status == 200:
+                                blueprint_data = await resp.json()
+                except Exception as fe:
+                    print(f"[Fallback Fetch Error] {fe}")
+
+                if blueprint_data:
+                    await self.handle_direct_handshake_build(
+                        user_id=user_id,
+                        target_server_id=target_server_id,
+                        blueprint_url=blueprint_url,
+                        blueprint_data=blueprint_data,
+                        log_channel_id=str(PREMIUM_SCAN_CHANNEL_ID)
+                    )
 
     def slugify_channel_name(self, name: str, emoji: str = "") -> str:
         if not name:
