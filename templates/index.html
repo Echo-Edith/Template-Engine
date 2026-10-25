@@ -4,12 +4,64 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Discord Infrastructure Architect</title>
-<!-- Google reCAPTCHA v2 API Script -->
-<script src="https://www.google.com/recaptcha/api.js" async defer></script>
-<!-- SortableJS for Drag and Drop -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 <!-- FontAwesome Icons -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<!-- SortableJS for Drag and Drop -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+<!-- Global State & Callbacks defined BEFORE Google reCAPTCHA script loads -->
+<script>
+const RECAPTCHA_SITE_KEY = "{{ recaptcha_site_key or '' }}".trim();
+const DISCORD_CLIENT_ID = "{{ discord_client_id or '' }}".trim();
+const IS_USER_LOGGED_IN = {{ 'true' if user else 'false' }};
+const IS_TE_PREMIUM = {{ 'true' if is_premium else 'false' }};
+let isCaptchaVerified = false;
+function checkAuthAndCaptchaStatus() {
+const btn = document.getElementById('verify-continue-btn');
+const label = document.getElementById('continue-btn-label');
+if (!IS_USER_LOGGED_IN) {
+if (btn) btn.disabled = true;
+if (label) label.innerText = "Log In with Discord First";
+return;
+}
+if (!isCaptchaVerified) {
+if (btn) btn.disabled = true;
+if (label) label.innerText = "Complete Verification Below";
+return;
+}
+if (btn) btn.disabled = false;
+if (label) label.innerText = "Verify & Continue";
+}
+// Global Callback Handler for Google reCAPTCHA
+window.onCaptchaVerified = function(token) {
+isCaptchaVerified = true;
+checkAuthAndCaptchaStatus();
+if (token && RECAPTCHA_SITE_KEY) {
+fetch('/api/verify-captcha', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ token })
+}).catch(e => console.log('Captcha verification log:', e));
+}
+};
+window.onCaptchaExpired = function() {
+isCaptchaVerified = false;
+checkAuthAndCaptchaStatus();
+};
+// Fallback polling loop to detect reCAPTCHA state in real-time
+setInterval(function() {
+if (typeof grecaptcha !== 'undefined' && !isCaptchaVerified) {
+try {
+const response = grecaptcha.getResponse();
+if (response && response.length > 0) {
+isCaptchaVerified = true;
+checkAuthAndCaptchaStatus();
+}
+} catch(e) {}
+}
+}, 500);
+</script>
+<!-- Google reCAPTCHA v2 API Script -->
+<script src="https://www.google.com/recaptcha/api.js" async defer></script>
 <style>
 :root {
 --bg-base: #090a10;
@@ -661,43 +713,6 @@ Save & Apply Permissions
 </div>
 </div>
 <script>
-const RECAPTCHA_SITE_KEY = "{{ recaptcha_site_key or '' }}".trim();
-const DISCORD_CLIENT_ID = "{{ discord_client_id or '' }}".trim();
-const IS_USER_LOGGED_IN = {{ 'true' if user else 'false' }};
-const IS_TE_PREMIUM = {{ 'true' if is_premium else 'false' }};
-let isCaptchaVerified = false;
-function checkAuthAndCaptchaStatus() {
-const btn = document.getElementById('verify-continue-btn');
-const label = document.getElementById('continue-btn-label');
-if (!IS_USER_LOGGED_IN) {
-if (btn) btn.disabled = true;
-if (label) label.innerText = "Log In with Discord First";
-return;
-}
-if (!isCaptchaVerified) {
-if (btn) btn.disabled = true;
-if (label) label.innerText = "Complete Verification Below";
-return;
-}
-if (btn) btn.disabled = false;
-if (label) label.innerText = "Verify & Continue";
-}
-// DIRECT SYNCHRONOUS CALLBACK FOR GOOGLE RECAPTCHA
-function onCaptchaVerified(token) {
-isCaptchaVerified = true;
-checkAuthAndCaptchaStatus();
-if (token && RECAPTCHA_SITE_KEY) {
-fetch('/api/verify-captcha', {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ token })
-}).catch(e => console.log('Captcha log info:', e));
-}
-}
-function onCaptchaExpired() {
-isCaptchaVerified = false;
-checkAuthAndCaptchaStatus();
-}
 document.addEventListener("DOMContentLoaded", () => {
 if (!RECAPTCHA_SITE_KEY || RECAPTCHA_SITE_KEY.length < 5) {
 isCaptchaVerified = true;
