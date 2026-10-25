@@ -243,44 +243,49 @@ class BotCog(commands.Cog):
 
         return ow
 
-    # --- PUBLIC TE PREMIUM INFORMATION COMMAND ---
-    @app_commands.command(name="premium", description="View features, perks, and pricing for TE Premium status.")
+    # --- UPDATED PUBLIC TE PREMIUM INFORMATION COMMAND ---
+    @app_commands.command(name="premium", description="View updated features, perks, and pricing for TE Premium status.")
     async def premium_info(self, interaction: discord.Interaction):
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
         
         embed = discord.Embed(
             title="👑 Echo Studio — TE Premium Membership",
             description=(
-                "Unlock full automated Discord infrastructure deployment, priority processing, and exclusive perks!\n\n"
-                "💰 **Price:** `299 Robux / Month`"
+                "Supercharge your Discord architecture workflow with instant background builds, stylized typography, and zero queue wait times!\n\n"
+                "💰 **Pricing:** `299 Robux / Month`"
             ),
             color=0xF1C40F,
             timestamp=datetime.now(timezone.utc)
         )
         embed.add_field(
-            name="⚡ 1. Fully Automated Auto-Builds",
-            value="Skip manual deployment! Server categories, channels, and roles build automatically in seconds.",
+            name="⚡ 1. Fully Automated Background Auto-Builds",
+            value="Skip manual staff reviews! Layouts auto-build instantly into your target server upon submission.",
             inline=False
         )
         embed.add_field(
-            name="🎯 2. Unlimited Server Layouts",
-            value="Generate and deploy as many AI server layouts as you want without restrictions.",
+            name="✨ 2. Exclusive Channel Font Engine",
+            value="Customize your channels using 𝔊𝔬𝔱𝔥𝔦𝔠, 𐌱𝒶𝓃𝒸𝓎, 𝙼𝚘𝚗𝚘𝚜𝚙𝚊𝚌𝚎, 🅂🅀🅄🄰🅁🄴🄳, S L A S H, and ⓒⓘⓡⓒⓛⓔⓓ fonts.",
             inline=False
         )
         embed.add_field(
-            name="🚀 3. Priority Processing Queue",
-            value="Bypass standard review queues for instant execution.",
+            name="🧵 3. Automated Thread & Nested Discussions",
+            value="Enable auto-thread creation on support and topic channels directly from the generator UI.",
             inline=False
         )
         embed.add_field(
-            name="🌟 4. Exclusive Discord Gold Role",
-            value=f"Receive the **{PREMIUM_ROLE_NAME}** gold role across official Echo Studio servers.",
+            name="🎨 4. Premium Design Presets & Sleek Minimalist",
+            value="Access Minimalist (No Emoji), Corporate, Community, and Gaming presets out of the box.",
+            inline=False
+        )
+        embed.add_field(
+            name="🌟 5. Exclusive Gold Role Badge",
+            value=f"Receive the **{PREMIUM_ROLE_NAME}** gold role across all official Echo Studio servers.",
             inline=False
         )
         embed.set_footer(text="Echo Studio Infrastructure • Upgrade Today")
 
         view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Open Dashboard", url=website_url, style=discord.ButtonStyle.link))
+        view.add_item(discord.ui.Button(label="Open Studio Dashboard", url=website_url, style=discord.ButtonStyle.link))
         
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -658,14 +663,14 @@ class BotCog(commands.Cog):
             await self.execute_blueprint_build(guild, blueprint_data)
             if target_channel:
                 await target_channel.send(embed=discord.Embed(
-                    title="[Auto-Build Complete]",
-                    description=f" Successfully built server **{guild.name}** (`{target_server_id}`) automatically!",
+                    title="⚡ [Auto-Build Complete]",
+                    description=f"✅ Successfully built server **{guild.name}** (`{target_server_id}`) automatically!",
                     color=0x2ecc71
                 ))
         except Exception as build_err:
             if target_channel:
                 await target_channel.send(embed=discord.Embed(
-                    title="[Auto-Build Failed]",
+                    title="❌ [Auto-Build Failed]",
                     description=f"Error deploying to `{target_server_id}`: `{str(build_err)}`",
                     color=0xf43f5e
                 ))
@@ -711,7 +716,7 @@ class BotCog(commands.Cog):
     @commands.is_owner()
     async def sync_commands(self, ctx: commands.Context):
         synced = await self.bot.tree.sync()
-        await ctx.send(f" Registered & synced {len(synced)} command(s).")
+        await ctx.send(f"✅ Registered & synced {len(synced)} command(s).")
 
 
 async def setup(bot):
