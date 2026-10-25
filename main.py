@@ -5,7 +5,6 @@ from flask import Flask, jsonify
 import discord
 from discord.ext import commands
 
-# Render Web Services require an open HTTP port to pass health checks.
 web_app = Flask(__name__)
 
 @web_app.route("/")
@@ -45,6 +44,9 @@ async def on_ready():
         if "cogs.bot" not in bot.extensions:
             await bot.load_extension("cogs.bot")
             print("Successfully loaded extension cog: cogs.bot")
+        else:
+            await bot.reload_extension("cogs.bot")
+            print("Successfully reloaded extension cog: cogs.bot")
     except Exception as e:
         print(f"CRITICAL ERROR loading cog cogs.bot: {e}")
 
