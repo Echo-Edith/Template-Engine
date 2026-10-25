@@ -5,7 +5,7 @@ import asyncio
 import aiohttp
 import discord
 from datetime import datetime, timezone, timedelta
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
@@ -24,6 +24,8 @@ if MONGO_URI:
         print(f"[Bot Mongo Warning] Could not connect to MongoDB for Premium: {e}")
 
 LOCAL_PREMIUM_USERS = {}
+PREMIUM_ROLE_NAME = "Template Engine Premium"
+PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)  # Vibrant Gold Color
 
 
 def parse_duration_to_timedelta(duration_str: str) -> timedelta:
@@ -104,9 +106,86 @@ def get_all_active_premiums():
     return active
 
 
+def get_all_expired_premiums():
+    now = datetime.now(timezone.utc)
+    expired = []
+    if db_premium is not None:
+        docs = db_premium.find()
+        for doc in docs:
+            uid = doc.get("user_id")
+            exp_raw = doc.get("expires_at")
+            if uid and exp_raw:
+                exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp <= now:
+                    expired.append(uid)
+    else:
+        for uid, exp in LOCAL_PREMIUM_USERS.items():
+            if exp <= now:
+                expired.append(uid)
+    return expired
+
+
 class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.check_premium_expirations.start()
+
+    def cog_unload(self):
+        self.check_premium_expirations.cancel()
+
+    async def get_or_create_premium_role(self, guild: discord.Guild) -> discord.Role:
+        """Finds or creates the gold 'Template Engine Premium' role in the specified guild."""
+        role = discord.utils.get(guild.roles, name=PREMIUM_ROLE_NAME)
+        if not role:
+            try:
+                role = await guild.create_role(
+                    name=PREMIUM_ROLE_NAME,
+                    color=PREMIUM_ROLE_COLOR,
+                    hoist=True,
+                    reason="Automated TE Premium system setup"
+                )
+            except Exception as e:
+                print(f"[Role Creation Error] Could not create gold role in {guild.name}: {e}")
+                return None
+        return role
+
+    async def assign_premium_role(self, user_id: str):
+        """Assigns the gold TE Premium role to a user across all mutual guilds."""
+        for guild in self.bot.guilds:
+            member = guild.get_member(int(user_id))
+            if member:
+                role = await self.get_or_create_premium_role(guild)
+                if role and role not in member.roles:
+                    try:
+                        await member.add_roles(role, reason="TE Premium activated")
+                    except Exception as e:
+                        print(f"[Role Assign Error] Failed to assign role to {member} in {guild.name}: {e}")
+
+    async def remove_premium_role(self, user_id: str):
+        """Removes the gold TE Premium role from a user across all mutual guilds."""
+        for guild in self.bot.guilds:
+            member = guild.get_member(int(user_id))
+            if member:
+                role = discord.utils.get(guild.roles, name=PREMIUM_ROLE_NAME)
+                if role and role in member.roles:
+                    try:
+                        await member.remove_roles(role, reason="TE Premium expired or revoked")
+                    except Exception as e:
+                        print(f"[Role Remove Error] Failed to remove role from {member} in {guild.name}: {e}")
+
+    @tasks.loop(minutes=1.0)
+    async def check_premium_expirations(self):
+        """Background loop that checks for expired subscriptions every minute and strips the role."""
+        expired_ids = get_all_expired_premiums()
+        for uid in expired_ids:
+            remove_user_premium(uid)
+            await self.remove_premium_role(uid)
+
+    @check_premium_expirations.before_loop
+    async def before_check_expirations(self):
+        await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -118,7 +197,6 @@ class BotCog(commands.Cog):
         if not custom_id.startswith("buildbtn_"):
             return
 
-        # Custom ID format: buildbtn_<server_id>_<blueprint_url>
         parts = custom_id.split("_", 2)
         if len(parts) < 3:
             await interaction.response.send_message("❌ Invalid build button payload.", ephemeral=True)
@@ -155,7 +233,6 @@ class BotCog(commands.Cog):
             )
             return
 
-        # Fetch layout JSON content directly from blueprint URL
         blueprint_data = None
         try:
             async with aiohttp.ClientSession() as session:
@@ -263,36 +340,45 @@ class BotCog(commands.Cog):
     # --- TE PREMIUM COMMANDS ---
     premium_group = app_commands.Group(name="premium", description="[ADMIN ONLY] Manage TE Premium Subscriptions")
 
-    @premium_group.command(name="add", description="Grant TE Premium to a user (Default length: 30 days)")
+    @premium_group.command(name="add", description="Grant TE Premium to a user & assign gold role (Default: 30 days)")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(user="User to grant TE Premium", length="Duration (e.g. 30d, 60d, 1y). Default: 30d")
     async def premium_add(self, interaction: discord.Interaction, user: discord.User, length: str = "30d"):
+        await interaction.response.defer(thinking=True)
         td = parse_duration_to_timedelta(length)
         set_user_premium(str(user.id), td)
         exp_date = datetime.now(timezone.utc) + td
 
+        # Automatically assign gold role
+        await self.assign_premium_role(str(user.id))
+
         embed = discord.Embed(
             title="[TE Premium Activated]",
-            description=f"Granted TE Premium status to {user.mention}.",
-            color=0x8b5cf6
+            description=f"Granted TE Premium status to {user.mention} and assigned the **{PREMIUM_ROLE_NAME}** gold role!",
+            color=0xF1C40F
         )
         embed.add_field(name="User ID", value=f"`{user.id}`", inline=True)
         embed.add_field(name="Expires On", value=f"<t:{int(exp_date.timestamp())}:F>", inline=True)
         embed.set_footer(text="TE Premium Infrastructure")
-        await interaction.response.send_message(embed=embed, ephemeral=False)
+        await interaction.followup.send(embed=embed, ephemeral=False)
 
-    @premium_group.command(name="remove", description="Revoke TE Premium status from a user")
+    @premium_group.command(name="remove", description="Revoke TE Premium status & remove gold role from a user")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(user="User to revoke TE Premium from")
     async def premium_remove(self, interaction: discord.Interaction, user: discord.User):
+        await interaction.response.defer(thinking=True)
         remove_user_premium(str(user.id))
+
+        # Automatically remove gold role
+        await self.remove_premium_role(str(user.id))
+
         embed = discord.Embed(
             title="[TE Premium Revoked]",
-            description=f"Revoked TE Premium status from {user.mention}.",
+            description=f"Revoked TE Premium status from {user.mention} and removed the **{PREMIUM_ROLE_NAME}** role.",
             color=0xf43f5e
         )
         embed.set_footer(text="TE Premium Infrastructure")
-        await interaction.response.send_message(embed=embed, ephemeral=False)
+        await interaction.followup.send(embed=embed, ephemeral=False)
 
     @premium_group.command(name="check", description="Check TE Premium status of a user")
     @app_commands.describe(user="User to check")
@@ -304,7 +390,7 @@ class BotCog(commands.Cog):
             embed = discord.Embed(
                 title="[TE Premium Active]",
                 description=f"{target.mention} holds active TE Premium membership! 👑",
-                color=0x2ecc71
+                color=0xF1C40F
             )
         else:
             embed = discord.Embed(
@@ -337,7 +423,7 @@ class BotCog(commands.Cog):
         embed = discord.Embed(
             title=f"[Active TE Premiums ({len(active_list)})]",
             description="\n".join(desc_lines[:25]),
-            color=0x8b5cf6
+            color=0xF1C40F
         )
         embed.set_footer(text="TE Premium Infrastructure")
         await interaction.response.send_message(embed=embed, ephemeral=False)
