@@ -4,6 +4,7 @@ import json
 import asyncio
 import aiohttp
 import discord
+import sys
 from datetime import datetime, timezone, timedelta
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -25,7 +26,7 @@ if MONGO_URI:
 
 LOCAL_PREMIUM_USERS = {}
 PREMIUM_ROLE_NAME = "Template Engine Premium"
-PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)  # Vibrant Gold Color
+PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)  # Gold Color
 
 
 def parse_duration_to_timedelta(duration_str: str) -> timedelta:
@@ -199,10 +200,7 @@ class BotCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Scans log channel for TE Premium submissions and attaches the One-Click Build button."""
-        if message.author == self.bot.user:
-            return
-
+        """Scans log channel for TE Premium submissions and sends the One-Click Build button."""
         if not message.embeds:
             return
 
@@ -225,9 +223,12 @@ class BotCog(commands.Cog):
                         custom_id=f"buildbtn_{target_server_id}_{blueprint_url}"
                     ))
                     try:
-                        await message.edit(view=view)
+                        await message.channel.send(
+                            content=f"👑 **[TE Premium Build Ready]** Target Server ID: `{target_server_id}`",
+                            view=view
+                        )
                     except Exception as e:
-                        print(f"[Webhook Attach Error] Could not attach button to webhook: {e}")
+                        print(f"[Button Send Error] Could not send button to channel: {e}")
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -358,6 +359,52 @@ class BotCog(commands.Cog):
             except Exception as e:
                 print(f"Failed to create fallback channel: {e}")
 
+    # --- SYSTEM UPDATE & HOT RELOAD COMMAND ---
+    @app_commands.command(name="update", description="[OWNER ONLY] Hot-reloads all bot cogs and re-syncs slash commands.")
+    async def update_system(self, interaction: discord.Interaction):
+        app_info = await self.bot.application_info()
+        if interaction.user.id != app_info.owner.id:
+            await interaction.response.send_message("❌ This command is restricted to the bot owner.", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True)
+        logs = []
+
+        # 1. Reload bot cog
+        try:
+            await self.bot.reload_extension("cogs.bot")
+            logs.append("✅ Extension `cogs.bot` reloaded successfully.")
+        except Exception as e:
+            logs.append(f"❌ Failed to reload extension `cogs.bot`: {e}")
+
+        # 2. Re-sync Application Slash Commands
+        try:
+            synced = await self.bot.tree.sync()
+            logs.append(f"✅ Synced {len(synced)} global application command(s).")
+        except Exception as e:
+            logs.append(f"❌ Application command sync error: {e}")
+
+        # 3. Notify connected website endpoint
+        website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{website_url.rstrip('/')}/health", timeout=5) as resp:
+                    if resp.status == 200:
+                        logs.append(f"✅ Website portal alive at `{website_url}`.")
+                    else:
+                        logs.append(f"⚠️ Website responded with status code `{resp.status}`.")
+        except Exception as e:
+            logs.append(f"⚠️ Could not reach website health endpoint: {e}")
+
+        embed = discord.Embed(
+            title="🔄 [System Update Complete]",
+            description="\n".join(logs),
+            color=0x2ecc71,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_footer(text="Echo Studio Infrastructure")
+        await interaction.followup.send(embed=embed)
+
     # --- TE PREMIUM COMMANDS ---
     premium_group = app_commands.Group(name="premium", description="[ADMIN ONLY] Manage TE Premium Subscriptions")
 
@@ -475,7 +522,7 @@ class BotCog(commands.Cog):
     @app_commands.command(name="website", description="Get the link to the dashboard.")
     async def website(self, interaction: discord.Interaction):
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
-        embed = discord.Embed(title="[Echo Studio Portal]", description="Click button below to access dashboard", color=0x8b5cf6)
+        embed = discord.Embed(title="[Echo Studio Portal]", description="Click button below to access dashboard", color=08b5cf6)
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="Visit Website", url=website_url, style=discord.ButtonStyle.link))
         await interaction.response.send_message(embed=embed, view=view)
