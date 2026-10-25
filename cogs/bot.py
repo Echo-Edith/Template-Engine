@@ -318,32 +318,8 @@ class BotCog(commands.Cog):
         if unit == "s": return num
         elif unit == "m": return num * 60
         elif unit == "h": return num * 3600
-        elif unit == "d": return num * 86400
+        elif unit == "d": return num * 84600
         return 0
-
-    async def schedule_channel_deletion(self, channel: discord.abc.GuildChannel, delay_seconds: int, origin_channel: discord.abc.GuildChannel = None, executor: discord.User = None):
-        await asyncio.sleep(delay_seconds)
-        channel_name = channel.name
-        channel_id = channel.id
-        try:
-            await channel.delete(reason="Temporary Channel Expiration Auto-Delete")
-            if origin_channel:
-                log_embed = discord.Embed(
-                    title="[Temporary Channel Deleted]",
-                    description=f"The temporary channel **#{channel_name}** (`{channel_id}`) has expired and was automatically deleted.",
-                    color=0xf43f5e
-                )
-                if executor:
-                    log_embed.add_field(name="Created By", value=executor.mention, inline=True)
-                log_embed.set_footer(text="Echo Studio Infrastructure")
-                try:
-                    await origin_channel.send(embed=log_embed)
-                except Exception as e:
-                    print(f"Failed to send deletion log: {e}")
-        except discord.NotFound:
-            pass
-        except Exception as e:
-            print(f"Failed to delete temp channel {channel_id}: {e}")
 
     async def wipe_guild_infrastructure(self, guild: discord.Guild, leave_fallback_channel: bool = False):
         for channel in guild.channels:
@@ -384,7 +360,7 @@ class BotCog(commands.Cog):
             description=f"Granted TE Premium status to {user.mention} and assigned the **{PREMIUM_ROLE_NAME}** gold role!",
             color=0xF1C40F
         )
-        embed.add_field(name="User ID", value=f"`{user.id}`", inline=True)
+        embed.add_field(name="User", value=user.mention, inline=True)
         embed.add_field(name="Expires On", value=f"<t:{int(exp_date.timestamp())}:F>", inline=True)
         embed.set_footer(text="TE Premium Infrastructure")
         await interaction.followup.send(embed=embed, ephemeral=False)
@@ -514,27 +490,6 @@ class BotCog(commands.Cog):
             await interaction.followup.send(embed=discord.Embed(title="[Channel Created]", description=f"Created {new_chan.mention}", color=0x2ecc71))
         except Exception as e:
             await interaction.followup.send(embed=discord.Embed(title="[Creation Failed]", description=f"Error: `{e}`", color=0xf43f5e))
-
-    @app_commands.command(name="temp_channel", description="[ADMIN ONLY] Create a self-destructing temp channel.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def temp_channel(self, interaction: discord.Interaction, name: str, duration: str, type: str, category: discord.CategoryChannel = None, emoji: str = "⏳", topic: str = ""):
-        await interaction.response.defer(thinking=True, ephemeral=False)
-        delay_seconds = self.parse_duration_seconds(duration)
-        if not delay_seconds or delay_seconds <= 0 or delay_seconds > 604800:
-            await interaction.followup.send(embed=discord.Embed(title="[Invalid Duration]", description="Please specify duration up to 7d (e.g. 30s, 15m, 2h, 1d).", color=0xf43f5e))
-            return
-
-        clean_name = self.slugify_channel_name(name, emoji)
-        try:
-            if type == "voice":
-                new_chan = await interaction.guild.create_voice_channel(name=clean_name, category=category)
-            else:
-                new_chan = await interaction.guild.create_text_channel(name=clean_name, category=category, topic=f"{topic}\n⏱️ Expires in {duration}".strip())
-
-            asyncio.create_task(self.schedule_channel_deletion(new_chan, delay_seconds, interaction.channel, interaction.user))
-            await interaction.followup.send(embed=discord.Embed(title="[Temp Channel Created]", description=f"Created {new_chan.mention} (expires in `{duration}`).", color=0xeab308))
-        except Exception as e:
-            await interaction.followup.send(embed=discord.Embed(title="[Temp Creation Failed]", description=f"Error: `{e}`", color=0xf43f5e))
 
     # --- BUILD COMMAND ---
     @app_commands.command(name="build", description="Nukes the server and deploys layout blueprint.")
