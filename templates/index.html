@@ -682,6 +682,22 @@ return;
 if (btn) btn.disabled = false;
 if (label) label.innerText = "Verify & Continue";
 }
+// DIRECT SYNCHRONOUS CALLBACK FOR GOOGLE RECAPTCHA
+function onCaptchaVerified(token) {
+isCaptchaVerified = true;
+checkAuthAndCaptchaStatus();
+if (token && RECAPTCHA_SITE_KEY) {
+fetch('/api/verify-captcha', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ token })
+}).catch(e => console.log('Captcha log info:', e));
+}
+}
+function onCaptchaExpired() {
+isCaptchaVerified = false;
+checkAuthAndCaptchaStatus();
+}
 document.addEventListener("DOMContentLoaded", () => {
 if (!RECAPTCHA_SITE_KEY || RECAPTCHA_SITE_KEY.length < 5) {
 isCaptchaVerified = true;
@@ -734,21 +750,6 @@ const DISCORD_PERMISSIONS_LIST = [
 ];
 let selectedTargetKey = "";
 let activePermissionsBuffer = {};
-function onCaptchaVerified(token) {
-isCaptchaVerified = true;
-checkAuthAndCaptchaStatus();
-if (token && RECAPTCHA_SITE_KEY) {
-fetch('/api/verify-captcha', {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ token })
-}).catch(e => console.log('Captcha log info:', e));
-}
-}
-function onCaptchaExpired() {
-isCaptchaVerified = false;
-checkAuthAndCaptchaStatus();
-}
 function proceedToGenerator() {
 if (!IS_USER_LOGGED_IN) {
 window.location.href = "/login";
