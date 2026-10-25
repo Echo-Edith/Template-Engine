@@ -215,15 +215,7 @@ class BotCog(commands.Cog):
         target_server_id = parts[1]
         blueprint_url = parts[2]
 
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="[One-Click Build Initiated]",
-                description=f"⚡ Starting server build for target ID `{target_server_id}`...",
-                color=0xeab308
-            ),
-            ephemeral=True
-        )
-
+        guild = None
         try:
             guild_id = int(target_server_id)
             guild = self.bot.get_guild(guild_id)
@@ -233,15 +225,41 @@ class BotCog(commands.Cog):
             guild = None
 
         if not guild:
-            await interaction.followup.send(
+            client_id = os.getenv("DISCORD_CLIENT_ID", str(self.bot.user.id if self.bot.user else ""))
+            invite_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=8&scope=bot%20applications.commands&guild_id={target_server_id}"
+
+            await interaction.response.send_message(
                 embed=discord.Embed(
                     title="[Build Error]",
-                    description=f"❌ Bot is not inside target server ID (`{target_server_id}`). Please invite the bot first!",
+                    description=f"❌ The bot isn't in the server! Please invite the bot first.\nTarget Server ID: `{target_server_id}`",
                     color=0xf43f5e
                 ),
                 ephemeral=True
             )
+
+            try:
+                dm_embed = discord.Embed(
+                    title="⚠️ Bot Missing From Target Server",
+                    description=(
+                        f"You attempted a One-Click Build for server ID `{target_server_id}`, but the bot has not been added to that server yet.\n\n"
+                        f"👉 **[Click Here to Add Bot to Target Server]({invite_url})**"
+                    ),
+                    color=0xeab308
+                )
+                dm_embed.set_footer(text="Echo Studio Infrastructure")
+                await interaction.user.send(embed=dm_embed)
+            except Exception as e:
+                print(f"[DM Error] Could not send direct message to user {interaction.user}: {e}")
             return
+
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="[One-Click Build Initiated]",
+                description=f"⚡ Starting server build for **{guild.name}** (`{target_server_id}`)...",
+                color=0xeab308
+            ),
+            ephemeral=True
+        )
 
         blueprint_data = None
         try:
@@ -359,7 +377,6 @@ class BotCog(commands.Cog):
         set_user_premium(str(user.id), td)
         exp_date = datetime.now(timezone.utc) + td
 
-        # Automatically assign gold role
         await self.assign_premium_role(str(user.id))
 
         embed = discord.Embed(
@@ -379,7 +396,6 @@ class BotCog(commands.Cog):
         await interaction.response.defer(thinking=True)
         remove_user_premium(str(user.id))
 
-        # Automatically remove gold role
         await self.remove_premium_role(str(user.id))
 
         embed = discord.Embed(
@@ -395,7 +411,7 @@ class BotCog(commands.Cog):
     async def premium_check(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
         is_prem = is_user_premium(str(target.id))
-        
+
         if is_prem:
             embed = discord.Embed(
                 title="[TE Premium Active]",
@@ -415,7 +431,7 @@ class BotCog(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def premiums_list(self, interaction: discord.Interaction):
         active_list = get_all_active_premiums()
-        
+
         if not active_list:
             embed = discord.Embed(
                 title="[Active TE Premiums]",
