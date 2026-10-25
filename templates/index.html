@@ -23,7 +23,7 @@ if (btn) btn.disabled = true;
 if (label) label.innerText = "Log In with Discord First";
 return;
 }
-if (!isCaptchaVerified) {
+if (!isCaptchaVerified && RECAPTCHA_SITE_KEY && RECAPTCHA_SITE_KEY.length > 5) {
 if (btn) btn.disabled = true;
 if (label) label.innerText = "Complete Verification Below";
 return;
@@ -543,7 +543,7 @@ data-expired-callback="onCaptchaExpired"></div>
 <span style="font-size: 0.78rem; color: #a1a1aa; text-align:center;">[Verification Ready - Key Auto Bypass]</span>
 {% endif %}
 </div>
-<button id="verify-continue-btn" class="btn-glass" onclick="proceedToGenerator()" disabled>
+<button id="verify-continue-btn" class="btn-glass" disabled>
 <span id="continue-btn-label">Log In & Verify to Continue</span> <i class="fa-solid fa-arrow-right"></i>
 </button>
 </div>
@@ -719,6 +719,11 @@ isCaptchaVerified = true;
 }
 checkAuthAndCaptchaStatus();
 applyPremiumTheme();
+// Explicit direct event listener on continue button
+const continueBtn = document.getElementById('verify-continue-btn');
+if (continueBtn) {
+continueBtn.addEventListener('click', proceedToGenerator);
+}
 });
 function applyPremiumTheme() {
 const btn = document.getElementById('submit-design-btn');
@@ -770,12 +775,14 @@ if (!IS_USER_LOGGED_IN) {
 window.location.href = "/login";
 return;
 }
-if (!isCaptchaVerified) return;
 navigateTo('page-generator');
 }
 function navigateTo(pageId) {
 document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-document.getElementById(pageId).classList.add('active');
+const targetPage = document.getElementById(pageId);
+if (targetPage) {
+targetPage.classList.add('active');
+}
 const panelWrapper = document.getElementById('panel-wrapper');
 if (pageId === 'page-layout' || pageId === 'page-permissions') {
 panelWrapper.classList.add('layout-mode');
