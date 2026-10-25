@@ -29,13 +29,17 @@ BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").str
 RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
-# Target Channel IDs or Webhooks
+# Log Channels
 DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "").strip()
 PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
 
 SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
+
+# Internal Bot Runner Port for Direct Handshake
+BOT_API_PORT = int(os.getenv("BOT_PORT", "10000"))
+BOT_HANDSHAKE_URL = f"http://127.0.0.1:{BOT_API_PORT}/api/auto-build"
 
 MONGO_URI = os.getenv("MONGO_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -146,7 +150,7 @@ def is_user_banned(user_id):
 
 
 def send_bot_native_log(channel_id: str, embed_payload: dict) -> bool:
-    """Posts natively to Discord Channel API using BOT_TOKEN."""
+    """Posts natively to Discord Channel API using DISCORD_BOT_TOKEN."""
     if not channel_id or not BOT_TOKEN:
         print("[Bot Log Error] Missing channel_id or BOT_TOKEN.")
         return False
@@ -240,7 +244,7 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
         "title": title,
         "color": color,
         "fields": fields,
-        "footer": {"text": "Echo Studio Infrastructure — Auto Build Engine"},
+        "footer": {"text": "Echo Studio Infrastructure — Direct Bot Engine"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -250,6 +254,17 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
             return True
 
     send_discord_webhook_log(channel_source, embed)
+
+
+def trigger_bot_direct_build(payload: dict):
+    """Direct local HTTP Handshake to Bot runner for automated background build."""
+    try:
+        res = requests.post(BOT_HANDSHAKE_URL, json=payload, timeout=5)
+        print(f"[Bot Handshake Dispatch] Status: {res.status_code}")
+        return res.status_code == 200
+    except Exception as e:
+        print(f"[Bot Handshake Local Error] Could not connect to bot runner on {BOT_HANDSHAKE_URL}: {e}")
+        return False
 
 
 @app.route("/")
@@ -501,21 +516,34 @@ def submit_design():
         "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`"
     }
 
+    # Post initial log directly via Bot Token
     try:
         log_event_via_bot(
             channel_source=target_channel,
             title=log_title,
             user_data=user,
-            action_desc="User submitted a server layout blueprint to staff.",
+            action_desc="User submitted a server layout blueprint.",
             color=0xf1c40f if has_premium else 0x2ecc71,
             extra_fields=extra_fields
         )
     except Exception as err:
         print(f"[Submit Log Error] {err}")
 
+    # DIRECT HANDSHAKE: Trigger bot background build directly via local HTTP POST
+    if has_premium:
+        handshake_payload = {
+            "user_id": str(user.get("id")),
+            "target_server_id": target_server_id,
+            "blueprint_url": blueprint_url,
+            "blueprint_data": blueprint_content,
+            "log_channel_id": target_channel,
+            "user_data": user
+        }
+        trigger_bot_direct_build(handshake_payload)
+
     return jsonify({
         "success": True,
-        "message": "Blueprint successfully submitted to staff!",
+        "message": "Blueprint successfully submitted!",
         "url": blueprint_url,
         "is_premium": has_premium
     })
