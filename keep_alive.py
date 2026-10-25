@@ -29,14 +29,13 @@ BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").str
 RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
-# Channel IDs or Webhook URLs
+# Target Channel IDs or Webhooks
 DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "").strip()
-PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or DESIGN_CHANNEL_ID).strip()
+PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
 
 SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
-PREMIUM_DESIGN_WEBHOOK_URL = (os.getenv("PREMIUM_DESIGN_WEBHOOK_URL") or DESIGN_WEBHOOK_URL).strip()
 
 MONGO_URI = os.getenv("MONGO_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -146,33 +145,46 @@ def is_user_banned(user_id):
     return WEBSITE_BANS.get(user_id_str)
 
 
-def send_discord_log(target_destination: str, embed_payload: dict) -> bool:
-    """Sends clean, fast log messages to Webhook URLs or Discord Channel IDs."""
-    if not target_destination:
-        print("[Log Warning] Target destination is empty.")
+def send_bot_native_log(channel_id: str, embed_payload: dict) -> bool:
+    """Posts natively to Discord Channel API using BOT_TOKEN."""
+    if not channel_id or not BOT_TOKEN:
+        print("[Bot Log Error] Missing channel_id or BOT_TOKEN.")
+        return False
+
+    target_channel = str(channel_id).strip()
+
+    if target_channel.startswith("http"):
+        match = re.search(r"/webhooks/(\d+)/", target_channel)
+        if match:
+            target_channel = match.group(1)
+
+    url = f"{DISCORD_API_BASE_URL}/channels/{target_channel}/messages"
+    headers = {
+        "Authorization": f"Bot {BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    body = {"embeds": [embed_payload]}
+
+    try:
+        res = requests.post(url, headers=headers, json=body, timeout=8)
+        if res.status_code in (200, 201):
+            return True
+        print(f"[Bot Log API Failed] Status: {res.status_code}, Resp: {res.text}")
+    except Exception as e:
+        print(f"[Bot Log Exception] {e}")
+
+    return False
+
+
+def send_discord_webhook_log(webhook_url: str, embed_payload: dict) -> bool:
+    """Fallback standard webhook log dispatcher."""
+    if not webhook_url:
         return False
 
     body = {"embeds": [embed_payload]}
-    target_str = str(target_destination).strip()
+    target_str = str(webhook_url).strip()
 
-    # Case A: Target is a numerical Channel ID
-    if target_str.isdigit():
-        if not BOT_TOKEN:
-            print("[Log Warning] BOT_TOKEN missing; cannot post to channel ID directly.")
-            return False
-        headers = {
-            "Authorization": f"Bot {BOT_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        url = f"{DISCORD_API_BASE_URL}/channels/{target_str}/messages"
-        try:
-            res = requests.post(url, headers=headers, json=body, timeout=8)
-            return res.status_code in (200, 201)
-        except Exception as e:
-            print(f"[Log Error] Channel API post failed: {e}")
-            return False
-
-    # Case B: Target is a Webhook URL
     if target_str.startswith("http"):
         try:
             res = requests.post(target_str, json=body, timeout=8)
@@ -228,11 +240,16 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
         "title": title,
         "color": color,
         "fields": fields,
-        "footer": {"text": "Studio Logging System"},
+        "footer": {"text": "Echo Studio Infrastructure — Auto Build Engine"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    send_discord_log(channel_source, embed)
+    if BOT_TOKEN:
+        success = send_bot_native_log(channel_source, embed)
+        if success:
+            return True
+
+    send_discord_webhook_log(channel_source, embed)
 
 
 @app.route("/")
@@ -321,7 +338,7 @@ def callback():
 
             try:
                 log_event_via_bot(
-                    channel_source=WEBSITE_WEBHOOK_URL,
+                    channel_source=WEBSITE_WEBHOOK_URL or DESIGN_CHANNEL_ID,
                     title="[Website Login Logged]",
                     user_data=user_data,
                     action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
@@ -471,11 +488,7 @@ def submit_design():
     blueprint_url = f"{get_base_url()}/blueprint/{filename}"
     build_command_text = f"`/build url: {blueprint_url}`"
 
-    if has_premium:
-        target_destination = PREMIUM_DESIGN_CHANNEL_ID or PREMIUM_DESIGN_WEBHOOK_URL or DESIGN_CHANNEL_ID or DESIGN_WEBHOOK_URL
-    else:
-        target_destination = DESIGN_CHANNEL_ID or DESIGN_WEBHOOK_URL
-
+    target_channel = PREMIUM_DESIGN_CHANNEL_ID if has_premium else (DESIGN_CHANNEL_ID or DESIGN_WEBHOOK_URL)
     log_title = "👑 [TE PREMIUM] Blueprint Submitted" if has_premium else "[New Blueprint Submitted]"
 
     extra_fields = {
@@ -490,7 +503,7 @@ def submit_design():
 
     try:
         log_event_via_bot(
-            channel_source=target_destination,
+            channel_source=target_channel,
             title=log_title,
             user_data=user,
             action_desc="User submitted a server layout blueprint to staff.",
