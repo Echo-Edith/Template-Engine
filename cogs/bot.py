@@ -494,24 +494,27 @@ class BotCog(commands.Cog):
         embed.set_footer(text="TE Premium Infrastructure")
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
-    # --- OWNER SYNC COMMAND ---
+    # --- OWNER PREFIX SYNC COMMAND (!sync) ---
     @commands.command(name="sync")
     @commands.is_owner()
     async def sync_commands(self, ctx: commands.Context):
-        embed = discord.Embed(title="[Syncing Commands]", description="Syncing commands...", color=0x3b82f6)
+        embed = discord.Embed(title="[Syncing Commands]", description="Registering and syncing commands globally...", color=0x3b82f6)
         msg = await ctx.send(embed=embed)
         try:
-            self.bot.tree.add_command(self.premium_group)
-        except Exception:
-            pass
-        try:
-            self.bot.tree.clear_commands(guild=ctx.guild)
-            await self.bot.tree.sync(guild=ctx.guild)
+            try:
+                self.bot.tree.add_command(self.premium_group)
+            except Exception:
+                pass
+
             synced = await self.bot.tree.sync()
-            success_embed = discord.Embed(title="[Sync Complete]", description=f"Synced {len(synced)} global command(s).", color=0x2ecc71)
+            success_embed = discord.Embed(
+                title="[Sync Complete]",
+                description=f"✅ Successfully registered and synced {len(synced)} global command(s).",
+                color=0x2ecc71
+            )
             await msg.edit(embed=success_embed)
         except Exception as e:
-            err_embed = discord.Embed(title="[Sync Error]", description=f"Failed to sync: {e}", color=0xf43f5e)
+            err_embed = discord.Embed(title="[Sync Error]", description=f"❌ Failed to sync: {e}", color=0xf43f5e)
             await msg.edit(embed=err_embed)
 
     # --- PING & WEBSITE COMMANDS ---
@@ -522,7 +525,7 @@ class BotCog(commands.Cog):
     @app_commands.command(name="website", description="Get the link to the dashboard.")
     async def website(self, interaction: discord.Interaction):
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
-        embed = discord.Embed(title="[Echo Studio Portal]", description="Click button below to access dashboard", color=08b5cf6)
+        embed = discord.Embed(title="[Echo Studio Portal]", description="Click button below to access dashboard", color=0x8b5cf6)
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="Visit Website", url=website_url, style=discord.ButtonStyle.link))
         await interaction.response.send_message(embed=embed, view=view)
