@@ -29,17 +29,18 @@ BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").str
 RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
-# Log Channels
-DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "").strip()
+# Target Log Channels
+DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
 PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
 
 SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 
-# Internal Bot Runner Port for Direct Handshake
+# External Bot Runner URL for Handshake
 BOT_API_PORT = int(os.getenv("BOT_PORT", "10000"))
-BOT_HANDSHAKE_URL = f"http://127.0.0.1:{BOT_API_PORT}/api/auto-build"
+BOT_SERVER_URL = (os.getenv("BOT_SERVER_URL") or f"http://127.0.0.1:{BOT_API_PORT}").rstrip("/")
+BOT_HANDSHAKE_URL = f"{BOT_SERVER_URL}/api/auto-build"
 
 MONGO_URI = os.getenv("MONGO_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -150,13 +151,12 @@ def is_user_banned(user_id):
 
 
 def send_bot_native_log(channel_id: str, embed_payload: dict) -> bool:
-    """Posts natively to Discord Channel API using DISCORD_BOT_TOKEN."""
-    if not channel_id or not BOT_TOKEN:
-        print("[Bot Log Error] Missing channel_id or BOT_TOKEN.")
+    """Posts directly to Discord API using BOT_TOKEN."""
+    if not BOT_TOKEN:
+        print("[Bot Log Error] BOT_TOKEN is missing from Vercel Environment Variables!")
         return False
 
     target_channel = str(channel_id).strip()
-
     if target_channel.startswith("http"):
         match = re.search(r"/webhooks/(\d+)/", target_channel)
         if match:
@@ -173,31 +173,27 @@ def send_bot_native_log(channel_id: str, embed_payload: dict) -> bool:
     try:
         res = requests.post(url, headers=headers, json=body, timeout=8)
         if res.status_code in (200, 201):
+            print(f"[Discord API Log Success] Posted to channel: {target_channel}")
             return True
-        print(f"[Bot Log API Failed] Status: {res.status_code}, Resp: {res.text}")
+        print(f"[Discord API Log Failed] Status: {res.status_code}, Resp: {res.text}")
     except Exception as e:
-        print(f"[Bot Log Exception] {e}")
+        print(f"[Discord API Log Exception] {e}")
 
     return False
 
 
 def send_discord_webhook_log(webhook_url: str, embed_payload: dict) -> bool:
-    """Fallback standard webhook log dispatcher."""
-    if not webhook_url:
+    """Fallback webhook log dispatcher."""
+    if not webhook_url or not str(webhook_url).startswith("http"):
         return False
 
     body = {"embeds": [embed_payload]}
-    target_str = str(webhook_url).strip()
-
-    if target_str.startswith("http"):
-        try:
-            res = requests.post(target_str, json=body, timeout=8)
-            return res.status_code in (200, 204)
-        except Exception as e:
-            print(f"[Log Error] Webhook post failed: {e}")
-            return False
-
-    return False
+    try:
+        res = requests.post(str(webhook_url).strip(), json=body, timeout=5)
+        return res.status_code in (200, 204)
+    except Exception as e:
+        print(f"[Webhook Log Exception] {e}")
+        return False
 
 
 def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None):
@@ -244,26 +240,27 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
         "title": title,
         "color": color,
         "fields": fields,
-        "footer": {"text": "Echo Studio Infrastructure — Direct Bot Engine"},
+        "footer": {"text": "Echo Studio Infrastructure"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    if BOT_TOKEN:
-        success = send_bot_native_log(channel_source, embed)
-        if success:
-            return True
+    # 1. Post natively to Discord Channel API via Bot Token
+    success = send_bot_native_log(channel_source, embed)
+    if success:
+        return True
 
-    send_discord_webhook_log(channel_source, embed)
+    # 2. Fallback to Webhook if Bot Token posting fails
+    return send_discord_webhook_log(channel_source, embed)
 
 
 def trigger_bot_direct_build(payload: dict):
-    """Direct local HTTP Handshake to Bot runner for automated background build."""
+    """Dispatches auto-build handshake request to Render bot runner."""
     try:
-        res = requests.post(BOT_HANDSHAKE_URL, json=payload, timeout=5)
+        res = requests.post(BOT_HANDSHAKE_URL, json=payload, timeout=3)
         print(f"[Bot Handshake Dispatch] Status: {res.status_code}")
         return res.status_code == 200
     except Exception as e:
-        print(f"[Bot Handshake Local Error] Could not connect to bot runner on {BOT_HANDSHAKE_URL}: {e}")
+        print(f"[Bot Handshake Notice] Could not reach bot runner on {BOT_HANDSHAKE_URL} (it may be sleeping): {e}")
         return False
 
 
@@ -353,7 +350,7 @@ def callback():
 
             try:
                 log_event_via_bot(
-                    channel_source=WEBSITE_WEBHOOK_URL or DESIGN_CHANNEL_ID,
+                    channel_source=PREMIUM_DESIGN_CHANNEL_ID,
                     title="[Website Login Logged]",
                     user_data=user_data,
                     action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
@@ -503,7 +500,7 @@ def submit_design():
     blueprint_url = f"{get_base_url()}/blueprint/{filename}"
     build_command_text = f"`/build url: {blueprint_url}`"
 
-    target_channel = PREMIUM_DESIGN_CHANNEL_ID if has_premium else (DESIGN_CHANNEL_ID or DESIGN_WEBHOOK_URL)
+    target_channel = PREMIUM_DESIGN_CHANNEL_ID if has_premium else DESIGN_CHANNEL_ID
     log_title = "👑 [TE PREMIUM] Blueprint Submitted" if has_premium else "[New Blueprint Submitted]"
 
     extra_fields = {
@@ -516,9 +513,10 @@ def submit_design():
         "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`"
     }
 
-    # Post initial log directly via Bot Token
+    # 1. ALWAYS post the Discord log directly from Vercel via Bot Token
+    log_success = False
     try:
-        log_event_via_bot(
+        log_success = log_event_via_bot(
             channel_source=target_channel,
             title=log_title,
             user_data=user,
@@ -529,7 +527,7 @@ def submit_design():
     except Exception as err:
         print(f"[Submit Log Error] {err}")
 
-    # DIRECT HANDSHAKE: Trigger bot background build directly via local HTTP POST
+    # 2. Trigger auto-build handshake to Render bot runner
     if has_premium:
         handshake_payload = {
             "user_id": str(user.get("id")),
@@ -545,7 +543,8 @@ def submit_design():
         "success": True,
         "message": "Blueprint successfully submitted!",
         "url": blueprint_url,
-        "is_premium": has_premium
+        "is_premium": has_premium,
+        "logged": log_success
     })
 
 
