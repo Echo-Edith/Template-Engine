@@ -195,6 +195,49 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
+    # --- PUBLIC TE PREMIUM INFORMATION COMMAND ---
+    @app_commands.command(name="premium", description="View features, perks, and pricing for TE Premium status.")
+    async def premium_info(self, interaction: discord.Interaction):
+        website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
+        
+        embed = discord.Embed(
+            title="👑 Echo Studio — TE Premium Membership",
+            description=(
+                "Unlock full automated Discord infrastructure deployment, priority processing, and exclusive perks!\n\n"
+                "💰 **Price:** `299 Robux / Month`"
+            ),
+            color=0xF1C40F,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        embed.add_field(
+            name="⚡ 1. Fully Automated Auto-Builds",
+            value="Skip manual deployment! Your server categories, channels, and roles build automatically in seconds.",
+            inline=False
+        )
+        embed.add_field(
+            name="🎯 2. Unlimited Server Layouts",
+            value="Generate and deploy as many AI server layouts as you want without restrictions.",
+            inline=False
+        )
+        embed.add_field(
+            name="🚀 3. Priority Processing Queue",
+            value="Your layout submissions bypass the standard manual review queue for instant execution.",
+            inline=False
+        )
+        embed.add_field(
+            name="🌟 4. Exclusive Discord Gold Role",
+            value=f"Receive the **{PREMIUM_ROLE_NAME}** gold role across all official Echo Studio servers.",
+            inline=False
+        )
+        
+        embed.set_footer(text="Echo Studio Infrastructure • Upgrade Today")
+
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Open Dashboard", url=website_url, style=discord.ButtonStyle.link))
+        
+        await interaction.response.send_message(embed=embed, view=view)
+
     # --- DIRECT HANDSHAKE & BACKUP LISTENERS ---
     async def handle_direct_handshake_build(self, user_id: str, target_server_id: str, blueprint_url: str, blueprint_data: dict, log_channel_id: str):
         """Executes auto-build directly from website API handshake."""
@@ -397,10 +440,10 @@ class BotCog(commands.Cog):
         embed.set_footer(text="Echo Studio Infrastructure")
         await interaction.followup.send(embed=embed)
 
-    # --- TE PREMIUM COMMANDS ---
-    premium_group = app_commands.Group(name="premium", description="[ADMIN ONLY] Manage TE Premium Subscriptions")
+    # --- ADMIN TE PREMIUM MANAGEMENT GROUP ---
+    admin_premium_group = app_commands.Group(name="managepremium", description="[ADMIN ONLY] Manage TE Premium Subscriptions")
 
-    @premium_group.command(name="add", description="Grant TE Premium to a user & assign gold role (Default: 30 days)")
+    @admin_premium_group.command(name="add", description="Grant TE Premium to a user & assign gold role (Default: 30 days)")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(user="User to grant TE Premium", length="Duration (e.g. 30d, 60d, 1y). Default: 30d")
     async def premium_add(self, interaction: discord.Interaction, user: discord.User, length: str = "30d"):
@@ -421,7 +464,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="TE Premium Infrastructure")
         await interaction.followup.send(embed=embed, ephemeral=False)
 
-    @premium_group.command(name="remove", description="Revoke TE Premium status & remove gold role from a user")
+    @admin_premium_group.command(name="remove", description="Revoke TE Premium status & remove gold role from a user")
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(user="User to revoke TE Premium from")
     async def premium_remove(self, interaction: discord.Interaction, user: discord.User):
@@ -438,7 +481,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="TE Premium Infrastructure")
         await interaction.followup.send(embed=embed, ephemeral=False)
 
-    @premium_group.command(name="check", description="Check TE Premium status of a user")
+    @admin_premium_group.command(name="check", description="Check TE Premium status of a user")
     @app_commands.describe(user="User to check")
     async def premium_check(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
@@ -494,7 +537,7 @@ class BotCog(commands.Cog):
         msg = await ctx.send(embed=embed)
         try:
             try:
-                self.bot.tree.add_command(self.premium_group)
+                self.bot.tree.add_command(self.admin_premium_group)
             except Exception:
                 pass
 
@@ -575,6 +618,6 @@ async def setup(bot):
     cog = BotCog(bot)
     await bot.add_cog(cog)
     try:
-        bot.tree.add_command(cog.premium_group)
+        bot.tree.add_command(cog.admin_premium_group)
     except Exception:
         pass
