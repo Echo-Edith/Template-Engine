@@ -32,10 +32,10 @@ CLIENT_SECRET = (os.getenv("DISCORD_CLIENT_SECRET") or "").strip()
 RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
-SYSTEM_LOG_WEBHOOK_URL = os.getenv("SYSTEM_LOG_WEBHOOK_URL")
-WEBSITE_WEBHOOK_URL = os.getenv("WEBSITE_WEBHOOK_URL", SYSTEM_LOG_WEBHOOK_URL)
-DESIGN_WEBHOOK_URL = os.getenv("DESIGN_WEBHOOK_URL", SYSTEM_LOG_WEBHOOK_URL)
-PREMIUM_DESIGN_WEBHOOK_URL = os.getenv("PREMIUM_DESIGN_WEBHOOK_URL", DESIGN_WEBHOOK_URL)
+SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
+WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
+DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
+PREMIUM_DESIGN_WEBHOOK_URL = (os.getenv("PREMIUM_DESIGN_WEBHOOK_URL") or DESIGN_WEBHOOK_URL).strip()
 
 MONGO_URI = os.getenv("MONGO_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -72,7 +72,7 @@ def is_user_premium(user_id: str) -> bool:
         return False
     user_id_str = str(user_id)
     now = datetime.now(timezone.utc)
-    
+
     if db_premium is not None:
         try:
             doc = db_premium.find_one({"user_id": user_id_str})
@@ -134,6 +134,8 @@ def calculate_account_age(discord_id: str) -> str:
 
 
 def is_user_banned(user_id):
+    if not user_id:
+        return None
     user_id_str = str(user_id)
     if db_bans is not None:
         try:
@@ -143,8 +145,9 @@ def is_user_banned(user_id):
     return WEBSITE_BANS.get(user_id_str)
 
 
-def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None, target_server_id: str = None, blueprint_url: str = None):
+def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None, target_server_id: str = None, blueprint_url: str = None, attach_button: bool = False):
     if not webhook_url:
+        print("[Log Warning] Webhook URL is empty, skipping dispatch.")
         return
 
     user_data = user_data or {}
@@ -174,8 +177,8 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
                 field_val = val_str
             elif k == "Build Command":
                 field_val = f"`{val_str}`"
-            elif len(val_str) > 80:
-                field_val = f"```json\n{val_str[:800]}\n...```"
+            elif len(val_str) > 800:
+                field_val = f"```json\n{val_str[:750]}\n...```"
             else:
                 field_val = f"`{val_str}`"
 
@@ -197,7 +200,7 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
         }]
     }
 
-    if target_server_id and blueprint_url:
+    if attach_button and target_server_id and blueprint_url:
         payload["components"] = [
             {
                 "type": 1,
@@ -213,7 +216,9 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
         ]
 
     try:
-        requests.post(webhook_url, json=payload, timeout=5)
+        res = requests.post(webhook_url, json=payload, timeout=8)
+        if res.status_code not in (200, 204):
+            print(f"[Log Warning] Webhook response status {res.status_code}: {res.text}")
     except Exception as e:
         print(f"[Log Error] Webhook post failure: {e}")
 
@@ -302,13 +307,16 @@ def callback():
                 "avatar": avatar_url
             }
 
-            log_webhook_event(
-                webhook_url=WEBSITE_WEBHOOK_URL,
-                title="[Website Login Logged]",
-                user_data=user_data,
-                action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
-                color=0x3b82f6
-            )
+            try:
+                log_webhook_event(
+                    webhook_url=WEBSITE_WEBHOOK_URL,
+                    title="[Website Login Logged]",
+                    user_data=user_data,
+                    action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
+                    color=0x3b82f6
+                )
+            except Exception as le:
+                print(f"[Login Webhook Error] {le}")
     except Exception as e:
         print(f"[OAuth Callback Error] {e}")
 
@@ -325,7 +333,8 @@ def verify_captcha():
     try:
         verify_res = requests.post(
             "https://www.google.com/recaptcha/api/siteverify",
-            data={"secret": RECAPTCHA_SECRET_KEY, "response": token}
+            data={"secret": RECAPTCHA_SECRET_KEY, "response": token},
+            timeout=5
         ).json()
         return jsonify({"success": verify_res.get("success", False)})
     except Exception:
@@ -425,7 +434,7 @@ def submit_design():
         }), 401
 
     data = request.get_json() or {}
-    target_server_id = data.get("target_server_id", "Not Provided")
+    target_server_id = str(data.get("target_server_id", "Not Provided")).strip()
     server_name = data.get("server_name", "Custom Server")
     invite_link = data.get("invite_link", "Not Provided")
     prompt = data.get("prompt", "Not Provided")
@@ -434,7 +443,7 @@ def submit_design():
     roles_count = data.get("roles_count", 0)
 
     layout = data.get("layout") or data.get("build_file") or data.get("file")
-    has_premium = is_user_premium(user["id"])
+    has_premium = is_user_premium(user.get("id"))
 
     file_id = f"blueprint_{int(datetime.now().timestamp() * 1000)}"
     filename = f"{file_id}.json"
@@ -457,21 +466,25 @@ def submit_design():
         "Server Name": server_name,
         "Target Server ID": target_server_id,
         "Invite Link": invite_link,
-        "Prompt Description": prompt,
+        "Prompt Description": prompt[:500] if isinstance(prompt, str) else str(prompt),
         "Build Command": build_command_text,
         "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`"
     }
 
-    log_webhook_event(
-        webhook_url=target_webhook,
-        title=log_title,
-        user_data=user,
-        action_desc="User submitted a server layout blueprint to staff.",
-        color=0xf1c40f if has_premium else 0x2ecc71,
-        extra_fields=extra_fields,
-        target_server_id=target_server_id,
-        blueprint_url=blueprint_url
-    )
+    try:
+        log_webhook_event(
+            webhook_url=target_webhook,
+            title=log_title,
+            user_data=user,
+            action_desc="User submitted a server layout blueprint to staff.",
+            color=0xf1c40f if has_premium else 0x2ecc71,
+            extra_fields=extra_fields,
+            target_server_id=target_server_id,
+            blueprint_url=blueprint_url,
+            attach_button=has_premium
+        )
+    except Exception as err:
+        print(f"[Submit Webhook Error] {err}")
 
     return jsonify({
         "success": True,
