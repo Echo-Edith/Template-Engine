@@ -7,23 +7,18 @@ from pymongo import MongoClient
 from google import genai
 from google.genai import types
 
-# Set absolute directory paths for Vercel Serverless runtime
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 
-# Initialize Flask application instance
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-key-fallback").strip()
 
-# Expose WSGI application entry points for Vercel Serverless Builder
 application = app
 handler = app
 
-# Session cookie configuration for modern HTTPS proxies (Vercel & Render)
 app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
-# Serverless environments (like Vercel) write to /tmp
 BLUEPRINTS_DIR = "/tmp/blueprints" if os.getenv("VERCEL") else os.path.join(os.getcwd(), "blueprints")
 os.makedirs(BLUEPRINTS_DIR, exist_ok=True)
 
@@ -159,7 +154,8 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
     premium_tag = "👑 **[TE PREMIUM MEMBER]**" if has_premium else "Standard User"
 
     user_info_block = (
-        f"**User:** <@{user_id}> ({premium_tag})\n"
+        f"**User:** <@{user_id}>\n"
+        f"**Membership:** {premium_tag}\n"
         f"**Username:** `{username}`\n"
         f"**User ID:** `{user_id}`\n"
         f"**Account Age:** `{account_age}`"
@@ -215,10 +211,21 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
             }
         ]
 
+    # Critical Fix: Ensure ?with_components=true parameter is present for interactive components
+    target_url = webhook_url
+    if attach_button and "with_components" not in target_url:
+        sep = "&" if "?" in target_url else "?"
+        target_url = f"{target_url}{sep}with_components=true"
+
     try:
-        res = requests.post(webhook_url, json=payload, timeout=8)
+        res = requests.post(target_url, json=payload, timeout=8)
         if res.status_code not in (200, 204):
-            print(f"[Log Warning] Webhook response status {res.status_code}: {res.text}")
+            print(f"[Log Warning] Webhook primary dispatch returned status {res.status_code}: {res.text}")
+            # Fallback retry without buttons if Discord rejected custom components
+            if attach_button:
+                payload.pop("components", None)
+                fallback_url = webhook_url
+                requests.post(fallback_url, json=payload, timeout=5)
     except Exception as e:
         print(f"[Log Error] Webhook post failure: {e}")
 
