@@ -500,9 +500,3 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-```
-
-### Summary of Fixes Made:
-1. **MongoDB Database Call Fixed**: Changed `mongo_client.get_default_database()` to explicitly fall back to `mongo_client.get_database("static_studio_db")` if the `MONGO_URI` doesn't define a default database name.
-2. **Exception Shields**: Wrapped MongoDB calls in `try/except` blocks in `is_user_premium()` and `is_user_banned()` to prevent page routing crashes if MongoDB drops or is misconfigured.
-3. **Safe User ID Dict Access**: Updated `session.get("user")` calls to use `.get("id")` defensively.
