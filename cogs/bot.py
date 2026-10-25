@@ -10,9 +10,12 @@ from discord import app_commands
 from pymongo import MongoClient
 
 PREMIUM_SCAN_CHANNEL_ID = 1563544108696477802
+BOT_OWNER_ID = 1219266886143967245
 
 MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
+db_build_access = None
+
 if MONGO_URI:
     try:
         mongo_client = MongoClient(MONGO_URI)
@@ -21,10 +24,13 @@ if MONGO_URI:
         except Exception:
             db = mongo_client["static_studio_db"]
         db_premium = db["premium_users"]
+        db_build_access = db["build_authorized_users"]
     except Exception as e:
-        print(f"[Bot Mongo Warning] Could not connect to MongoDB for Premium: {e}")
+        print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
 
 LOCAL_PREMIUM_USERS = {}
+LOCAL_AUTHORIZED_BUILDERS = set()
+
 PREMIUM_ROLE_NAME = "Template Engine Premium"
 PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)
 
@@ -86,53 +92,45 @@ def remove_user_premium(user_id: str):
         LOCAL_PREMIUM_USERS.pop(user_id_str, None)
 
 
-def get_all_active_premiums():
-    now = datetime.now(timezone.utc)
-    active = []
-    if db_premium is not None:
-        docs = db_premium.find()
-        for doc in docs:
-            uid = doc.get("user_id")
-            exp_raw = doc.get("expires_at")
-            if uid and exp_raw:
-                exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
-                if exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                if exp > now:
-                    active.append((uid, exp))
-    else:
-        for uid, exp in LOCAL_PREMIUM_USERS.items():
-            if exp > now:
-                active.append((uid, exp))
-    return active
+def is_user_authorized_for_build(user_id: str) -> bool:
+    user_id_str = str(user_id)
+    if int(user_id_str) == BOT_OWNER_ID:
+        return True
+    if is_user_premium(user_id_str):
+        return True
+    if db_build_access is not None:
+        return db_build_access.find_one({"user_id": user_id_str}) is not None
+    return user_id_str in LOCAL_AUTHORIZED_BUILDERS
 
 
-def get_all_expired_premiums():
-    now = datetime.now(timezone.utc)
-    expired = []
-    if db_premium is not None:
-        docs = db_premium.find()
-        for doc in docs:
-            uid = doc.get("user_id")
-            exp_raw = doc.get("expires_at")
-            if uid and exp_raw:
-                exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
-                if exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                if exp <= now:
-                    expired.append(uid)
+def toggle_user_build_authorization(user_id: str) -> bool:
+    user_id_str = str(user_id)
+    
+    if db_build_access is not None:
+        exists = db_build_access.find_one({"user_id": user_id_str}) is not None
+        if exists:
+            db_build_access.delete_one({"user_id": user_id_str})
+            return False
+        else:
+            db_build_access.update_one(
+                {"user_id": user_id_str},
+                {"$set": {"user_id": user_id_str, "added_at": datetime.now(timezone.utc).isoformat()}},
+                upsert=True
+            )
+            return True
     else:
-        for uid, exp in LOCAL_PREMIUM_USERS.items():
-            if exp <= now:
-                expired.append(uid)
-    return expired
+        if user_id_str in LOCAL_AUTHORIZED_BUILDERS:
+            LOCAL_AUTHORIZED_BUILDERS.remove(user_id_str)
+            return False
+        else:
+            LOCAL_AUTHORIZED_BUILDERS.add(user_id_str)
+            return True
 
 
 class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.check_premium_expirations.start()
-        self.processed_message_ids = set()
 
     def cog_unload(self):
         self.check_premium_expirations.cancel()
@@ -186,7 +184,24 @@ class BotCog(commands.Cog):
 
     @tasks.loop(minutes=1.0)
     async def check_premium_expirations(self):
-        expired_ids = get_all_expired_premiums()
+        now = datetime.now(timezone.utc)
+        expired_ids = []
+        if db_premium is not None:
+            docs = db_premium.find()
+            for doc in docs:
+                uid = doc.get("user_id")
+                exp_raw = doc.get("expires_at")
+                if uid and exp_raw:
+                    exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if exp <= now:
+                        expired_ids.append(uid)
+        else:
+            for uid, exp in list(LOCAL_PREMIUM_USERS.items()):
+                if exp <= now:
+                    expired_ids.append(uid)
+
         for uid in expired_ids:
             remove_user_premium(uid)
             await self.remove_premium_role(uid)
@@ -194,6 +209,39 @@ class BotCog(commands.Cog):
     @check_premium_expirations.before_loop
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
+
+    def build_permission_overwrites(
+        self,
+        base_overwrite: discord.PermissionOverwrite = None,
+        c_type: str = "text",
+        view_permission: bool = None,
+        send_permission: bool = None,
+        manage_permission: bool = None,
+        embed_permission: bool = None,
+        attach_permission: bool = None,
+        history_permission: bool = None
+    ) -> discord.PermissionOverwrite:
+        ow = base_overwrite or discord.PermissionOverwrite()
+
+        if view_permission is not None:
+            ow.read_messages = view_permission
+            ow.view_channel = view_permission
+        if send_permission is not None:
+            if c_type == "voice":
+                ow.connect = send_permission
+                ow.speak = send_permission
+            else:
+                ow.send_messages = send_permission
+        if manage_permission is not None:
+            ow.manage_channels = manage_permission
+        if embed_permission is not None:
+            ow.embed_links = embed_permission
+        if attach_permission is not None:
+            ow.attach_files = attach_permission
+        if history_permission is not None:
+            ow.read_message_history = history_permission
+
+        return ow
 
     # --- PUBLIC TE PREMIUM INFORMATION COMMAND ---
     @app_commands.command(name="premium", description="View features, perks, and pricing for TE Premium status.")
@@ -209,10 +257,9 @@ class BotCog(commands.Cog):
             color=0xF1C40F,
             timestamp=datetime.now(timezone.utc)
         )
-        
         embed.add_field(
             name="⚡ 1. Fully Automated Auto-Builds",
-            value="Skip manual deployment! Your server categories, channels, and roles build automatically in seconds.",
+            value="Skip manual deployment! Server categories, channels, and roles build automatically in seconds.",
             inline=False
         )
         embed.add_field(
@@ -222,15 +269,14 @@ class BotCog(commands.Cog):
         )
         embed.add_field(
             name="🚀 3. Priority Processing Queue",
-            value="Your layout submissions bypass the standard manual review queue for instant execution.",
+            value="Bypass standard review queues for instant execution.",
             inline=False
         )
         embed.add_field(
             name="🌟 4. Exclusive Discord Gold Role",
-            value=f"Receive the **{PREMIUM_ROLE_NAME}** gold role across all official Echo Studio servers.",
+            value=f"Receive the **{PREMIUM_ROLE_NAME}** gold role across official Echo Studio servers.",
             inline=False
         )
-        
         embed.set_footer(text="Echo Studio Infrastructure • Upgrade Today")
 
         view = discord.ui.View()
@@ -238,336 +284,312 @@ class BotCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed, view=view)
 
-    # --- DIRECT HANDSHAKE & BACKUP LISTENERS ---
-    async def handle_direct_handshake_build(self, user_id: str, target_server_id: str, blueprint_url: str, blueprint_data: dict, log_channel_id: str):
-        """Executes auto-build directly from website API handshake."""
-        await self.bot.wait_until_ready()
-
-        target_channel = self.bot.get_channel(int(log_channel_id)) if log_channel_id and str(log_channel_id).isdigit() else self.bot.get_channel(PREMIUM_SCAN_CHANNEL_ID)
-
-        guild = None
-        try:
-            guild_id = int(target_server_id)
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                guild = await self.bot.fetch_guild(guild_id)
-        except Exception:
-            guild = None
-
-        if not guild:
-            client_id = os.getenv("DISCORD_CLIENT_ID", str(self.bot.user.id if self.bot.user else ""))
-            invite_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=8&scope=bot%20applications.commands&guild_id={target_server_id}"
-
-            if target_channel:
-                try:
-                    embed = discord.Embed(
-                        title="⚠️ [Auto-Build Pending - Bot Missing]",
-                        description=f"Bot isn't in target server `{target_server_id}`! Direct message sent to user with invite link.",
-                        color=0xeab308
-                    )
-                    await target_channel.send(embed=embed)
-                except Exception: pass
-
-            if user_id and str(user_id).isdigit():
-                try:
-                    usr = await self.bot.fetch_user(int(user_id))
-                    if usr:
-                        dm_embed = discord.Embed(
-                            title="⚠️ Action Required: Add Bot to Complete Server Build",
-                            description=(
-                                f"Your TE Premium design for server ID `{target_server_id}` is ready to deploy, but the bot hasn't joined that server yet!\n\n"
-                                f"👉 **[Click Here to Add Bot & Start Auto-Build]({invite_url})**"
-                            ),
-                            color=0xeab308
-                        )
-                        dm_embed.set_footer(text="Echo Studio Infrastructure")
-                        await usr.send(embed=dm_embed)
-                except Exception as e:
-                    print(f"[DM Error] Could not send direct message: {e}")
-            return
-
-        try:
-            await self.execute_blueprint_build(guild, blueprint_data)
-            if target_channel:
-                embed = discord.Embed(
-                    title="⚡ [Auto-Build Complete]",
-                    description=f"✅ Successfully built server **{guild.name}** (`{target_server_id}`) automatically!",
-                    color=0x2ecc71
-                )
-                await target_channel.send(embed=embed)
-        except Exception as build_err:
-            if target_channel:
-                embed = discord.Embed(
-                    title="❌ [Auto-Build Failed]",
-                    description=f"An error occurred while deploying channels/roles to `{target_server_id}`: `{str(build_err)}`",
-                    color=0xf43f5e
-                )
-                await target_channel.send(embed=embed)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        """Fallback listener: If handshake times out while Render wakes up, scan log channel when online."""
-        if message.channel.id != PREMIUM_SCAN_CHANNEL_ID:
-            return
-
-        if message.id in self.processed_message_ids:
-            return
-
-        if not message.embeds:
-            return
-
-        embed = message.embeds[0]
-        title_text = str(embed.title or "").upper()
-
-        if "TE PREMIUM" in title_text or "BLUEPRINT SUBMITTED" in title_text:
-            self.processed_message_ids.add(message.id)
-
-            target_server_id = None
-            blueprint_url = None
-            user_id = None
-
-            for field in embed.fields:
-                f_name = str(field.name or "").lower()
-                f_val = str(field.value or "").strip("`")
-
-                if "target server" in f_name or "server id" in f_name:
-                    target_server_id = f_val
-                elif "blueprint" in f_name or "file" in f_name:
-                    match = re.search(r'https?://[^\s>]+', field.value)
-                    if match:
-                        blueprint_url = match.group(0)
-                    else:
-                        blueprint_url = f_val
-                elif "user information" in f_name:
-                    match = re.search(r'<@!?(\d+)>', field.value)
-                    if match:
-                        user_id = match.group(1)
-
-            if target_server_id and blueprint_url:
-                blueprint_data = None
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(blueprint_url, timeout=10) as resp:
-                            if resp.status == 200:
-                                blueprint_data = await resp.json()
-                except Exception as fe:
-                    print(f"[Fallback Fetch Error] {fe}")
-
-                if blueprint_data:
-                    await self.handle_direct_handshake_build(
-                        user_id=user_id,
-                        target_server_id=target_server_id,
-                        blueprint_url=blueprint_url,
-                        blueprint_data=blueprint_data,
-                        log_channel_id=str(PREMIUM_SCAN_CHANNEL_ID)
-                    )
-
-    def slugify_channel_name(self, name: str, emoji: str = "") -> str:
-        if not name:
-            name = ""
-        emoji_pattern = re.compile(
-            r'[\U00010000-\U0010ffff\u2600-\u27BF\u2300-\u23FF\u2B05-\u2B07\u2934-\u2935\u3297-\u3299]+',
-            flags=re.UNICODE
-        )
-        clean_name = emoji_pattern.sub('', name)
-        clean_name = re.sub(r'[^a-zA-Z0-9\s\-_]', '', clean_name).strip().lower()
-        clean_name = re.sub(r'[\s_]+', '-', clean_name).strip("-") or "unnamed-channel"
-
-        if emoji and emoji.strip():
-            return f"{emoji.strip()}│{clean_name}"
-        return clean_name
-
-    async def wipe_guild_infrastructure(self, guild: discord.Guild, leave_fallback_channel: bool = False):
-        for channel in guild.channels:
-            try:
-                await channel.delete(reason="Server Nuke/Rebuild Execution")
-            except Exception as e:
-                print(f"Failed to delete channel {channel.name}: {e}")
-
-        for role in guild.roles:
-            if not role.is_default() and not role.is_bot_managed() and not role.is_premium_subscriber():
-                try:
-                    await role.delete(reason="Server Nuke/Rebuild Execution")
-                except Exception as e:
-                    print(f"Failed to delete role {role.name}: {e}")
-
-        if leave_fallback_channel:
-            try:
-                await guild.create_text_channel(name="nuked", topic="Server wiped clean by Owner execution.")
-            except Exception as e:
-                print(f"Failed to create fallback channel: {e}")
-
-    # --- SYSTEM UPDATE & HOT RELOAD COMMAND ---
-    @app_commands.command(name="update", description="[OWNER ONLY] Hot-reloads all bot cogs and re-syncs slash commands.")
-    async def update_system(self, interaction: discord.Interaction):
-        app_info = await self.bot.application_info()
-        if interaction.user.id != app_info.owner.id:
-            await interaction.response.send_message("❌ This command is restricted to the bot owner.", ephemeral=True)
-            return
-
+    # --- TOGGLE TE PREMIUM STATUS (GRANT / REVOKE) ---
+    @app_commands.command(name="premium-set", description="[ADMIN ONLY] Toggle TE Premium status for a user (Grants or Revokes).")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(user="User to toggle TE Premium status for", length="Duration if granting (e.g. 30d, 60d). Default: 30d")
+    async def premium_set(self, interaction: discord.Interaction, user: discord.User, length: str = "30d"):
         await interaction.response.defer(thinking=True)
-        logs = []
+        user_id_str = str(user.id)
+        
+        if is_user_premium(user_id_str):
+            remove_user_premium(user_id_str)
+            await self.remove_premium_role(user_id_str)
+            embed = discord.Embed(
+                title="[TE Premium Revoked]",
+                description=f"Revoked TE Premium status from {user.mention} and removed the gold role.",
+                color=0xf43f5e
+            )
+        else:
+            td = parse_duration_to_timedelta(length)
+            set_user_premium(user_id_str, td)
+            exp_date = datetime.now(timezone.utc) + td
+            await self.assign_premium_role(user_id_str)
+            embed = discord.Embed(
+                title="[TE Premium Activated]",
+                description=f"Granted TE Premium status to {user.mention} and assigned the gold role!",
+                color=0xF1C40F
+            )
+            embed.add_field(name="Expires On", value=f"<t:{int(exp_date.timestamp())}:F>", inline=True)
 
-        try:
-            await self.bot.reload_extension("cogs.bot")
-            logs.append("✅ Extension `cogs.bot` reloaded successfully.")
-        except Exception as e:
-            logs.append(f"❌ Failed to reload extension `cogs.bot`: {e}")
-
-        try:
-            synced = await self.bot.tree.sync()
-            logs.append(f"✅ Synced {len(synced)} global application command(s).")
-        except Exception as e:
-            logs.append(f"❌ Application command sync error: {e}")
-
-        website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{website_url.rstrip('/')}/health", timeout=5) as resp:
-                    if resp.status == 200:
-                        logs.append(f"✅ Website portal alive at `{website_url}`.")
-                    else:
-                        logs.append(f"⚠️ Website responded with status code `{resp.status}`.")
-        except Exception as e:
-            logs.append(f"⚠️ Could not reach website health endpoint: {e}")
-
-        embed = discord.Embed(
-            title="🔄 [System Update Complete]",
-            description="\n".join(logs),
-            color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc)
-        )
-        embed.set_footer(text="Echo Studio Infrastructure")
+        embed.set_footer(text="TE Premium Infrastructure")
         await interaction.followup.send(embed=embed)
 
-    # --- ADMIN TE PREMIUM MANAGEMENT GROUP ---
-    admin_premium_group = app_commands.Group(name="managepremium", description="[ADMIN ONLY] Manage TE Premium Subscriptions")
+    # --- TOGGLE BUILD AUTHORIZATION (OWNER ONLY) ---
+    @app_commands.command(name="build-allow", description="[OWNER ONLY] Toggle /build permission for a user ID.")
+    @app_commands.describe(user="User to grant or revoke /build command permission")
+    async def build_allow_toggle(self, interaction: discord.Interaction, user: discord.User):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("❌ This command is restricted strictly to the bot owner.", ephemeral=True)
+            return
 
-    @admin_premium_group.command(name="add", description="Grant TE Premium to a user & assign gold role (Default: 30 days)")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(user="User to grant TE Premium", length="Duration (e.g. 30d, 60d, 1y). Default: 30d")
-    async def premium_add(self, interaction: discord.Interaction, user: discord.User, length: str = "30d"):
         await interaction.response.defer(thinking=True)
-        td = parse_duration_to_timedelta(length)
-        set_user_premium(str(user.id), td)
-        exp_date = datetime.now(timezone.utc) + td
+        user_id_str = str(user.id)
+        is_now_authorized = toggle_user_build_authorization(user_id_str)
 
-        await self.assign_premium_role(str(user.id))
-
-        embed = discord.Embed(
-            title="[TE Premium Activated]",
-            description=f"Granted TE Premium status to {user.mention} and assigned the **{PREMIUM_ROLE_NAME}** gold role!",
-            color=0xF1C40F
-        )
-        embed.add_field(name="User", value=user.mention, inline=True)
-        embed.add_field(name="Expires On", value=f"<t:{int(exp_date.timestamp())}:F>", inline=True)
-        embed.set_footer(text="TE Premium Infrastructure")
-        await interaction.followup.send(embed=embed, ephemeral=False)
-
-    @admin_premium_group.command(name="remove", description="Revoke TE Premium status & remove gold role from a user")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(user="User to revoke TE Premium from")
-    async def premium_remove(self, interaction: discord.Interaction, user: discord.User):
-        await interaction.response.defer(thinking=True)
-        remove_user_premium(str(user.id))
-
-        await self.remove_premium_role(str(user.id))
-
-        embed = discord.Embed(
-            title="[TE Premium Revoked]",
-            description=f"Revoked TE Premium status from {user.mention} and removed the **{PREMIUM_ROLE_NAME}** role.",
-            color=0xf43f5e
-        )
-        embed.set_footer(text="TE Premium Infrastructure")
-        await interaction.followup.send(embed=embed, ephemeral=False)
-
-    @admin_premium_group.command(name="check", description="Check TE Premium status of a user")
-    @app_commands.describe(user="User to check")
-    async def premium_check(self, interaction: discord.Interaction, user: discord.User = None):
-        target = user or interaction.user
-        is_prem = is_user_premium(str(target.id))
-
-        if is_prem:
+        if is_now_authorized:
             embed = discord.Embed(
-                title="[TE Premium Active]",
-                description=f"{target.mention} holds active TE Premium membership! 👑",
-                color=0xF1C40F
+                title="[Build Permission Granted]",
+                description=f"✅ User {user.mention} (`{user_id_str}`) is now authorized to run `/build` commands.",
+                color=0x2ecc71
             )
         else:
             embed = discord.Embed(
-                title="[Standard User]",
-                description=f"{target.mention} does not have active TE Premium.",
-                color=0x95a5a6
+                title="[Build Permission Revoked]",
+                description=f"🚫 User {user.mention} (`{user_id_str}`) permission for `/build` has been revoked.",
+                color=0xf43f5e
             )
-        embed.set_footer(text="TE Premium Infrastructure")
-        await interaction.response.send_message(embed=embed, ephemeral=False)
 
-    @app_commands.command(name="premiums", description="[ADMIN ONLY] List all active TE Premium subscribers.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def premiums_list(self, interaction: discord.Interaction):
-        active_list = get_all_active_premiums()
+        embed.set_footer(text="Echo Studio Infrastructure")
+        await interaction.followup.send(embed=embed)
 
-        if not active_list:
-            embed = discord.Embed(
-                title="[Active TE Premiums]",
-                description="There are currently no active TE Premium subscribers.",
-                color=0x3b82f6
+    # --- FULLY FEATURED MANUAL CHANNEL MANAGEMENT COMMANDS ---
+    @app_commands.command(name="create-channel", description="Create a text, voice, or category channel with granular permission options.")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.choices(type=[
+        app_commands.Choice(name="Text Channel", value="text"),
+        app_commands.Choice(name="Voice Channel", value="voice"),
+        app_commands.Choice(name="Category Channel", value="category")
+    ])
+    @app_commands.describe(
+        name="Mandatory channel name",
+        category="Category to place channel in (Required for Text/Voice)",
+        type="Channel type (text, voice, category)",
+        emoji="Optional emoji prefix",
+        topic="Optional text channel topic description",
+        view_permission="Optional: Allow @everyone to view channel (True/False)",
+        send_permission="Optional: Allow @everyone to send messages or connect (True/False)",
+        manage_permission="Optional: Allow @everyone to manage channel (True/False)",
+        embed_permission="Optional: Allow @everyone to embed links (True/False)",
+        attach_permission="Optional: Allow @everyone to attach files (True/False)",
+        history_permission="Optional: Allow @everyone to read message history (True/False)"
+    )
+    async def create_channel(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        category: discord.CategoryChannel,
+        type: app_commands.Choice[str] = None,
+        emoji: str = None,
+        topic: str = None,
+        view_permission: bool = None,
+        send_permission: bool = None,
+        manage_permission: bool = None,
+        embed_permission: bool = None,
+        attach_permission: bool = None,
+        history_permission: bool = None
+    ):
+        await interaction.response.defer(thinking=True)
+        c_type = (type.value if type else "text").lower().strip()
+        formatted_name = self.slugify_channel_name(name, emoji) if c_type != "category" else f"{emoji or ''} {name}".strip()
+
+        overwrites = {}
+        has_perm_options = any(x is not None for x in [
+            view_permission, send_permission, manage_permission,
+            embed_permission, attach_permission, history_permission
+        ])
+
+        if has_perm_options:
+            everyone_role = interaction.guild.default_role
+            ow = self.build_permission_overwrites(
+                c_type=c_type,
+                view_permission=view_permission,
+                send_permission=send_permission,
+                manage_permission=manage_permission,
+                embed_permission=embed_permission,
+                attach_permission=attach_permission,
+                history_permission=history_permission
             )
-            embed.set_footer(text="TE Premium Infrastructure")
-            await interaction.response.send_message(embed=embed, ephemeral=False)
-            return
+            overwrites[everyone_role] = ow
 
-        desc_lines = []
-        for uid, exp in active_list:
-            desc_lines.append(f"• <@{uid}> — Expires: <t:{int(exp.timestamp())}:R>")
-
-        embed = discord.Embed(
-            title=f"[Active TE Premiums ({len(active_list)})]",
-            description="\n".join(desc_lines[:25]),
-            color=0xF1C40F
-        )
-        embed.set_footer(text="TE Premium Infrastructure")
-        await interaction.response.send_message(embed=embed, ephemeral=False)
-
-    # --- OWNER PREFIX SYNC COMMAND (!sync) ---
-    @commands.command(name="sync")
-    @commands.is_owner()
-    async def sync_commands(self, ctx: commands.Context):
-        embed = discord.Embed(title="[Syncing Commands]", description="Registering and syncing commands globally...", color=0x3b82f6)
-        msg = await ctx.send(embed=embed)
         try:
-            try:
-                self.bot.tree.add_command(self.admin_premium_group)
-            except Exception:
-                pass
+            if c_type == "voice":
+                ch = await interaction.guild.create_voice_channel(name=formatted_name, category=category, overwrites=overwrites)
+            elif c_type == "category":
+                ch = await interaction.guild.create_category(name=formatted_name, overwrites=overwrites)
+            else:
+                ch = await interaction.guild.create_text_channel(name=formatted_name, category=category, topic=topic or "", overwrites=overwrites)
 
-            synced = await self.bot.tree.sync()
-            success_embed = discord.Embed(
-                title="[Sync Complete]",
-                description=f"✅ Successfully registered and synced {len(synced)} global command(s).",
+            embed = discord.Embed(
+                title="✅ Channel Created",
+                description=f"Successfully created channel {ch.mention} (`{ch.id}`) in **{category.name if category else 'Root'}**.",
                 color=0x2ecc71
             )
-            await msg.edit(embed=success_embed)
+            if topic: embed.add_field(name="Topic", value=topic, inline=False)
+            if view_permission is not None: embed.add_field(name="View", value=str(view_permission), inline=True)
+            if send_permission is not None: embed.add_field(name="Send/Connect", value=str(send_permission), inline=True)
+            if manage_permission is not None: embed.add_field(name="Manage", value=str(manage_permission), inline=True)
+            if embed_permission is not None: embed.add_field(name="Embed Links", value=str(embed_permission), inline=True)
+            if attach_permission is not None: embed.add_field(name="Attach Files", value=str(attach_permission), inline=True)
+            if history_permission is not None: embed.add_field(name="Read History", value=str(history_permission), inline=True)
+
+            await interaction.followup.send(embed=embed)
         except Exception as e:
-            err_embed = discord.Embed(title="[Sync Error]", description=f"❌ Failed to sync: {e}", color=0xf43f5e)
-            await msg.edit(embed=err_embed)
+            await interaction.followup.send(embed=discord.Embed(title="❌ Creation Error", description=f"Error creating channel: {e}", color=0xf43f5e))
 
-    # --- PING & WEBSITE COMMANDS ---
-    @app_commands.command(name="ping", description="Check bot latency.")
-    async def ping(self, interaction: discord.Interaction):
-        await interaction.response.send_message(embed=discord.Embed(title="[Pong]", description=f"Latency: {round(self.bot.latency * 1000)}ms", color=0x3b82f6))
+    @app_commands.command(name="edit-channel", description="Edit an existing channel's name, topic, category, or granular permissions.")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.describe(
+        channel="Target channel to edit",
+        new_name="Optional new channel name",
+        category="Optional category to move the channel to",
+        topic="Optional new topic (text channels only)",
+        emoji="Optional new emoji prefix",
+        view_permission="Optional: Allow @everyone to view channel (True/False)",
+        send_permission="Optional: Allow @everyone to send messages or connect (True/False)",
+        manage_permission="Optional: Allow @everyone to manage channel (True/False)",
+        embed_permission="Optional: Allow @everyone to embed links (True/False)",
+        attach_permission="Optional: Allow @everyone to attach files (True/False)",
+        history_permission="Optional: Allow @everyone to read message history (True/False)"
+    )
+    async def edit_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.GuildChannel,
+        new_name: str = None,
+        category: discord.CategoryChannel = None,
+        topic: str = None,
+        emoji: str = None,
+        view_permission: bool = None,
+        send_permission: bool = None,
+        manage_permission: bool = None,
+        embed_permission: bool = None,
+        attach_permission: bool = None,
+        history_permission: bool = None
+    ):
+        await interaction.response.defer(thinking=True)
+        try:
+            kwargs = {}
+            if new_name or emoji:
+                base_name = new_name or channel.name
+                kwargs["name"] = self.slugify_channel_name(base_name, emoji or "") if not isinstance(channel, discord.CategoryChannel) else f"{emoji or ''} {base_name}".strip()
+            if category is not None and not isinstance(channel, discord.CategoryChannel):
+                kwargs["category"] = category
+            if topic is not None and isinstance(channel, discord.TextChannel):
+                kwargs["topic"] = topic
 
-    @app_commands.command(name="website", description="Get the link to the dashboard.")
-    async def website(self, interaction: discord.Interaction):
-        website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
-        embed = discord.Embed(title="[Echo Studio Portal]", description="Click button below to access dashboard", color=0x8b5cf6)
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Visit Website", url=website_url, style=discord.ButtonStyle.link))
-        await interaction.response.send_message(embed=embed, view=view)
+            has_perm_options = any(x is not None for x in [
+                view_permission, send_permission, manage_permission,
+                embed_permission, attach_permission, history_permission
+            ])
 
-    # --- BUILD COMMAND ---
-    @app_commands.command(name="build", description="Nukes the server and deploys layout blueprint.")
+            if has_perm_options:
+                everyone_role = interaction.guild.default_role
+                current_overwrites = channel.overwrites_for(everyone_role)
+                c_type = "voice" if isinstance(channel, discord.VoiceChannel) else "text"
+                updated_ow = self.build_permission_overwrites(
+                    base_overwrite=current_overwrites,
+                    c_type=c_type,
+                    view_permission=view_permission,
+                    send_permission=send_permission,
+                    manage_permission=manage_permission,
+                    embed_permission=embed_permission,
+                    attach_permission=attach_permission,
+                    history_permission=history_permission
+                )
+                kwargs["overwrites"] = {**channel.overwrites, everyone_role: updated_ow}
+
+            await channel.edit(**kwargs)
+            embed = discord.Embed(
+                title="✅ Channel Updated",
+                description=f"Successfully edited channel {channel.mention}.",
+                color=0x2ecc71
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(embed=discord.Embed(title="❌ Edit Error", description=f"Error editing channel: {e}", color=0xf43f5e))
+
+    @app_commands.command(name="temp-channel", description="Create a temporary text or voice channel with granular permissions and auto-delete timer.")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.choices(type=[
+        app_commands.Choice(name="Text Channel", value="text"),
+        app_commands.Choice(name="Voice Channel", value="voice")
+    ])
+    @app_commands.describe(
+        name="Mandatory temporary channel name",
+        category="Category to place temporary channel in",
+        type="Channel type (text or voice)",
+        duration_minutes="Auto-delete timer in minutes (Default: 10)",
+        emoji="Optional emoji prefix",
+        topic="Optional topic description",
+        view_permission="Optional: Allow @everyone to view channel (True/False)",
+        send_permission="Optional: Allow @everyone to send messages or connect (True/False)",
+        manage_permission="Optional: Allow @everyone to manage channel (True/False)",
+        embed_permission="Optional: Allow @everyone to embed links (True/False)",
+        attach_permission="Optional: Allow @everyone to attach files (True/False)",
+        history_permission="Optional: Allow @everyone to read message history (True/False)"
+    )
+    async def temp_channel(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        category: discord.CategoryChannel,
+        type: app_commands.Choice[str] = None,
+        duration_minutes: int = 10,
+        emoji: str = "⏳",
+        topic: str = None,
+        view_permission: bool = None,
+        send_permission: bool = None,
+        manage_permission: bool = None,
+        embed_permission: bool = None,
+        attach_permission: bool = None,
+        history_permission: bool = None
+    ):
+        await interaction.response.defer(thinking=True)
+        c_type = (type.value if type else "text").lower().strip()
+        formatted_name = self.slugify_channel_name(name, emoji)
+
+        overwrites = {}
+        has_perm_options = any(x is not None for x in [
+            view_permission, send_permission, manage_permission,
+            embed_permission, attach_permission, history_permission
+        ])
+
+        if has_perm_options:
+            everyone_role = interaction.guild.default_role
+            ow = self.build_permission_overwrites(
+                c_type=c_type,
+                view_permission=view_permission,
+                send_permission=send_permission,
+                manage_permission=manage_permission,
+                embed_permission=embed_permission,
+                attach_permission=attach_permission,
+                history_permission=history_permission
+            )
+            overwrites[everyone_role] = ow
+
+        try:
+            desc_topic = topic or f"Temporary channel. Auto-deletes in {duration_minutes} minute(s)."
+            if c_type == "voice":
+                ch = await interaction.guild.create_voice_channel(name=formatted_name, category=category, overwrites=overwrites)
+            else:
+                ch = await interaction.guild.create_text_channel(name=formatted_name, category=category, topic=desc_topic, overwrites=overwrites)
+
+            embed = discord.Embed(
+                title="⏳ Temporary Channel Active",
+                description=f"Created temporary channel {ch.mention} in **{category.name}**. It will auto-delete in **{duration_minutes} minute(s)**.",
+                color=0xeab308
+            )
+            await interaction.followup.send(embed=embed)
+
+            async def auto_delete():
+                await asyncio.sleep(duration_minutes * 60)
+                try:
+                    await ch.delete(reason="Temporary channel duration expired")
+                except Exception: pass
+
+            asyncio.create_task(auto_delete())
+        except Exception as e:
+            await interaction.followup.send(embed=discord.Embed(title="❌ Error", description=f"Error creating temp channel: {e}", color=0xf43f5e))
+
+    # --- RESTRICTED BUILD COMMAND ---
+    @app_commands.command(name="build", description="Nukes the server and deploys layout blueprint (Requires authorization).")
     async def build_server(self, interaction: discord.Interaction, url: str = None, file: discord.Attachment = None, server_id: str = None):
+        user_id_str = str(interaction.user.id)
+        if not (interaction.user.guild_permissions.administrator or is_user_authorized_for_build(user_id_str)):
+            await interaction.response.send_message("❌ You are not authorized to execute `/build`. Contact the owner to grant permissions via `/build-allow`.", ephemeral=True)
+            return
+
         await interaction.response.send_message(embed=discord.Embed(title="[Building...]", description="Deploying blueprint...", color=0xeab308))
         blueprint_data = None
         try:
@@ -593,8 +615,77 @@ class BotCog(commands.Cog):
         await self.execute_blueprint_build(guild, blueprint_data)
         await interaction.followup.send(embed=discord.Embed(title="[Server Rebuilt]", description=f"Rebuilt server **{guild.name}**.", color=0x2ecc71))
 
+    # --- DIRECT HANDSHAKE & UTILITIES ---
+    async def handle_direct_handshake_build(self, user_id: str, target_server_id: str, blueprint_url: str, blueprint_data: dict, log_channel_id: str):
+        await self.bot.wait_until_ready()
+        target_channel = self.bot.get_channel(int(log_channel_id)) if log_channel_id and str(log_channel_id).isdigit() else self.bot.get_channel(PREMIUM_SCAN_CHANNEL_ID)
+
+        guild = None
+        try:
+            guild_id = int(target_server_id)
+            guild = self.bot.get_guild(guild_id) or await self.bot.fetch_guild(guild_id)
+        except Exception:
+            guild = None
+
+        if not guild:
+            client_id = os.getenv("DISCORD_CLIENT_ID", str(self.bot.user.id if self.bot.user else ""))
+            invite_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=8&scope=bot%20applications.commands&guild_id={target_server_id}"
+
+            if target_channel:
+                try:
+                    await target_channel.send(embed=discord.Embed(
+                        title="⚠️ [Auto-Build Pending - Bot Missing]",
+                        description=f"Bot isn't in target server `{target_server_id}`! Direct message sent to user with invite link.",
+                        color=0xeab308
+                    ))
+                except Exception: pass
+
+            if user_id and str(user_id).isdigit():
+                try:
+                    usr = await self.bot.fetch_user(int(user_id))
+                    if usr:
+                        dm_embed = discord.Embed(
+                            title="⚠️ Action Required: Add Bot to Complete Server Build",
+                            description=f"Your design for server ID `{target_server_id}` is ready!\n\n👉 **[Click Here to Add Bot & Build]({invite_url})**",
+                            color=0xeab308
+                        )
+                        await usr.send(embed=dm_embed)
+                except Exception as e:
+                    print(f"[DM Error] {e}")
+            return
+
+        try:
+            await self.execute_blueprint_build(guild, blueprint_data)
+            if target_channel:
+                await target_channel.send(embed=discord.Embed(
+                    title="[Auto-Build Complete]",
+                    description=f" Successfully built server **{guild.name}** (`{target_server_id}`) automatically!",
+                    color=0x2ecc71
+                ))
+        except Exception as build_err:
+            if target_channel:
+                await target_channel.send(embed=discord.Embed(
+                    title="[Auto-Build Failed]",
+                    description=f"Error deploying to `{target_server_id}`: `{str(build_err)}`",
+                    color=0xf43f5e
+                ))
+
+    def slugify_channel_name(self, name: str, emoji: str = "") -> str:
+        clean_name = re.sub(r'[^a-zA-Z0-9\s\-_]', '', name or "").strip().lower()
+        clean_name = re.sub(r'[\s_]+', '-', clean_name).strip("-") or "unnamed-channel"
+        return f"{emoji.strip()}│{clean_name}" if emoji and emoji.strip() else clean_name
+
+    async def wipe_guild_infrastructure(self, guild: discord.Guild):
+        for channel in guild.channels:
+            try: await channel.delete(reason="Rebuild Execution")
+            except Exception: pass
+        for role in guild.roles:
+            if not role.is_default() and not role.is_bot_managed() and not role.is_premium_subscriber():
+                try: await role.delete(reason="Rebuild Execution")
+                except Exception: pass
+
     async def execute_blueprint_build(self, guild: discord.Guild, blueprint_data: dict):
-        await self.wipe_guild_infrastructure(guild, leave_fallback_channel=False)
+        await self.wipe_guild_infrastructure(guild)
         for r_cfg in blueprint_data.get("roles", []):
             color_hex = str(r_cfg.get("color", "#8b5cf6")).replace("#", "")
             try:
@@ -606,18 +697,23 @@ class BotCog(commands.Cog):
                 category = await guild.create_category(name=str(cat_cfg.get("name", "CATEGORY")).strip())
                 for chan_cfg in cat_cfg.get("channels", []):
                     c_name = self.slugify_channel_name(chan_cfg.get("name", "channel"), chan_cfg.get("emoji", ""))
-                    c_type = chan_cfg.get("type", "text")
-                    if c_type == "voice":
+                    if chan_cfg.get("type") == "voice":
                         await guild.create_voice_channel(name=c_name, category=category)
                     else:
                         await guild.create_text_channel(name=c_name, category=category, topic=chan_cfg.get("topic", ""))
             except Exception: pass
 
+    @app_commands.command(name="ping", description="Check bot latency.")
+    async def ping(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=discord.Embed(title="[Pong]", description=f"Latency: {round(self.bot.latency * 1000)}ms", color=0x3b82f6))
+
+    @commands.command(name="sync")
+    @commands.is_owner()
+    async def sync_commands(self, ctx: commands.Context):
+        synced = await self.bot.tree.sync()
+        await ctx.send(f" Registered & synced {len(synced)} command(s).")
+
 
 async def setup(bot):
     cog = BotCog(bot)
     await bot.add_cog(cog)
-    try:
-        bot.tree.add_command(cog.admin_premium_group)
-    except Exception:
-        pass
