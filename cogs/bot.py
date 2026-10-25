@@ -198,8 +198,40 @@ class BotCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Scans log channel for TE Premium submissions and attaches the One-Click Build button."""
+        if message.author == self.bot.user:
+            return
+
+        if not message.embeds:
+            return
+
+        for embed in message.embeds:
+            if embed.title and "TE PREMIUM" in embed.title:
+                target_server_id = None
+                blueprint_url = None
+
+                for field in embed.fields:
+                    if field.name == "Target Server ID":
+                        target_server_id = field.value.replace("`", "").strip()
+                    elif field.name == "Blueprint File":
+                        blueprint_url = field.value.strip()
+
+                if target_server_id and blueprint_url:
+                    view = discord.ui.View(timeout=None)
+                    view.add_item(discord.ui.Button(
+                        label="⚡ One-Click Build Server",
+                        style=discord.ButtonStyle.green,
+                        custom_id=f"buildbtn_{target_server_id}_{blueprint_url}"
+                    ))
+                    try:
+                        await message.edit(view=view)
+                    except Exception as e:
+                        print(f"[Webhook Attach Error] Could not attach button to webhook: {e}")
+
+    @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
-        """Listens for 'One-Click Build' button interactions sent via webhooks."""
+        """Listens for 'One-Click Build' button interactions."""
         if interaction.type != discord.InteractionType.component:
             return
 
@@ -305,21 +337,6 @@ class BotCog(commands.Cog):
         if emoji and emoji.strip():
             return f"{emoji.strip()}│{clean_name}"
         return clean_name
-
-    def parse_duration_seconds(self, duration_str: str) -> int:
-        if not duration_str:
-            return 0
-        match = re.match(r"^(\d+)\s*([smhdSMHD])?$", duration_str.strip())
-        if not match:
-            return 0
-        value, unit = match.groups()
-        num = int(value)
-        unit = (unit or "s").lower()
-        if unit == "s": return num
-        elif unit == "m": return num * 60
-        elif unit == "h": return num * 3600
-        elif unit == "d": return num * 84600
-        return 0
 
     async def wipe_guild_infrastructure(self, guild: discord.Guild, leave_fallback_channel: bool = False):
         for channel in guild.channels:
@@ -463,34 +480,6 @@ class BotCog(commands.Cog):
         view.add_item(discord.ui.Button(label="Visit Website", url=website_url, style=discord.ButtonStyle.link))
         await interaction.response.send_message(embed=embed, view=view)
 
-    # --- ADMIN CHANNEL CREATION & TEMPORARY CHANNELS ---
-    @app_commands.command(name="create_channel", description="[ADMIN ONLY] Create a single custom channel.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def create_channel(
-        self, interaction: discord.Interaction, name: str, type: str, category: discord.CategoryChannel = None,
-        emoji: str = "", topic: str = "", target_role: discord.Role = None, view_channel: bool = None,
-        send_messages: bool = None, embed_links: bool = None, attach_files: bool = None, read_message_history: bool = None
-    ):
-        await interaction.response.defer(thinking=True, ephemeral=False)
-        clean_name = self.slugify_channel_name(name, emoji)
-        role = target_role or interaction.guild.default_role
-        perm_kwargs = {}
-        if view_channel is not None: perm_kwargs["view_channel"] = view_channel
-        if send_messages is not None: perm_kwargs["send_messages"] = send_messages
-        if embed_links is not None: perm_kwargs["embed_links"] = embed_links
-        if attach_files is not None: perm_kwargs["attach_files"] = attach_files
-        if read_message_history is not None: perm_kwargs["read_message_history"] = read_message_history
-        overwrites = {role: discord.PermissionOverwrite(**perm_kwargs)} if perm_kwargs else {}
-
-        try:
-            if type == "voice":
-                new_chan = await interaction.guild.create_voice_channel(name=clean_name, category=category, overwrites=overwrites)
-            else:
-                new_chan = await interaction.guild.create_text_channel(name=clean_name, category=category, topic=topic, overwrites=overwrites)
-            await interaction.followup.send(embed=discord.Embed(title="[Channel Created]", description=f"Created {new_chan.mention}", color=0x2ecc71))
-        except Exception as e:
-            await interaction.followup.send(embed=discord.Embed(title="[Creation Failed]", description=f"Error: `{e}`", color=0xf43f5e))
-
     # --- BUILD COMMAND ---
     @app_commands.command(name="build", description="Nukes the server and deploys layout blueprint.")
     async def build_server(self, interaction: discord.Interaction, url: str = None, file: discord.Attachment = None, server_id: str = None):
@@ -538,22 +527,6 @@ class BotCog(commands.Cog):
                     else:
                         await guild.create_text_channel(name=c_name, category=category, topic=chan_cfg.get("topic", ""))
             except Exception: pass
-
-    # --- OWNER-ONLY NUKE COMMAND ---
-    @app_commands.command(name="nuke", description="[OWNER ONLY] Deletes channels and roles.")
-    async def nuke_server(self, interaction: discord.Interaction, server_id: str = None):
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message(embed=discord.Embed(title="[Access Denied]", description="Owner only.", color=0xf43f5e), ephemeral=True)
-            return
-
-        target_guild_id = int(server_id.strip()) if server_id else interaction.guild_id
-        guild = self.bot.get_guild(target_guild_id)
-        if not guild:
-            await interaction.response.send_message(embed=discord.Embed(title="[Access Denied]", description="Guild not found.", color=0xf43f5e), ephemeral=True)
-            return
-
-        await interaction.response.send_message(embed=discord.Embed(title="[Nuking...]", description=f"Nuking {guild.name}...", color=0xeab308))
-        await self.wipe_guild_infrastructure(guild, leave_fallback_channel=not bool(server_id))
 
 
 async def setup(bot):
