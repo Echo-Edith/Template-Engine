@@ -146,19 +146,16 @@ def is_user_banned(user_id):
     return WEBSITE_BANS.get(user_id_str)
 
 
-def send_discord_log(target_destination: str, embed_payload: dict, components_payload: list = None) -> bool:
-    """Sends log messages reliably to either a pure Channel ID (via Bot API) or Webhook URL."""
+def send_discord_log(target_destination: str, embed_payload: dict) -> bool:
+    """Sends clean, fast log messages to Webhook URLs or Discord Channel IDs."""
     if not target_destination:
         print("[Log Warning] Target destination is empty.")
         return False
 
     body = {"embeds": [embed_payload]}
-    if components_payload:
-        body["components"] = components_payload
-
     target_str = str(target_destination).strip()
 
-    # Case A: Target is a pure Channel ID (numerical string, e.g., "1234567890")
+    # Case A: Target is a numerical Channel ID
     if target_str.isdigit():
         if not BOT_TOKEN:
             print("[Log Warning] BOT_TOKEN missing; cannot post to channel ID directly.")
@@ -175,13 +172,10 @@ def send_discord_log(target_destination: str, embed_payload: dict, components_pa
             print(f"[Log Error] Channel API post failed: {e}")
             return False
 
-    # Case B: Target is a Webhook URL (starts with http/https)
+    # Case B: Target is a Webhook URL
     if target_str.startswith("http"):
-        url = target_str
-        if components_payload and "?with_components=true" not in url:
-            url += "&with_components=true" if "?" in url else "?with_components=true"
         try:
-            res = requests.post(url, json=body, timeout=8)
+            res = requests.post(target_str, json=body, timeout=8)
             return res.status_code in (200, 204)
         except Exception as e:
             print(f"[Log Error] Webhook post failed: {e}")
@@ -190,7 +184,7 @@ def send_discord_log(target_destination: str, embed_payload: dict, components_pa
     return False
 
 
-def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None, target_server_id: str = None, blueprint_url: str = None, attach_button: bool = False):
+def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None):
     user_data = user_data or {}
     user_id = str(user_data.get("id", "0"))
     username = user_data.get("username", "Anonymous / Unauthenticated")
@@ -215,9 +209,9 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
     if extra_fields:
         for k, v in extra_fields.items():
             val_str = str(v)
-            if k == "Invite Link":
+            if k in ("Invite Link", "Build Command", "Blueprint File"):
                 field_val = val_str
-            elif k == "Build Command":
+            elif k == "Target Server ID":
                 field_val = f"`{val_str}`"
             elif len(val_str) > 800:
                 field_val = f"```json\n{val_str[:750]}\n...```"
@@ -238,23 +232,7 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    components = []
-    if attach_button and target_server_id and blueprint_url:
-        components = [
-            {
-                "type": 1,
-                "components": [
-                    {
-                        "type": 2,
-                        "style": 3,
-                        "label": "⚡ One-Click Build Server",
-                        "custom_id": f"buildbtn_{target_server_id}_{blueprint_url}"
-                    }
-                ]
-            }
-        ]
-
-    send_discord_log(channel_source, embed, components if attach_button else None)
+    send_discord_log(channel_source, embed)
 
 
 @app.route("/")
@@ -491,9 +469,8 @@ def submit_design():
         print(f"[Blueprint File Save Error] {e}")
 
     blueprint_url = f"{get_base_url()}/blueprint/{filename}"
-    build_command_text = f"/build url: {blueprint_url}"
+    build_command_text = f"`/build url: {blueprint_url}`"
 
-    # Priority Destination Selection
     if has_premium:
         target_destination = PREMIUM_DESIGN_CHANNEL_ID or PREMIUM_DESIGN_WEBHOOK_URL or DESIGN_CHANNEL_ID or DESIGN_WEBHOOK_URL
     else:
@@ -506,6 +483,7 @@ def submit_design():
         "Target Server ID": target_server_id,
         "Invite Link": invite_link,
         "Prompt Description": prompt[:500] if isinstance(prompt, str) else str(prompt),
+        "Blueprint File": blueprint_url,
         "Build Command": build_command_text,
         "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`"
     }
@@ -517,10 +495,7 @@ def submit_design():
             user_data=user,
             action_desc="User submitted a server layout blueprint to staff.",
             color=0xf1c40f if has_premium else 0x2ecc71,
-            extra_fields=extra_fields,
-            target_server_id=target_server_id,
-            blueprint_url=blueprint_url,
-            attach_button=has_premium
+            extra_fields=extra_fields
         )
     except Exception as err:
         print(f"[Submit Log Error] {err}")
