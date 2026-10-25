@@ -154,7 +154,7 @@
         }
 
         .glass-panel.layout-mode {
-            max-width: 620px;
+            max-width: 680px;
         }
 
         .page {
@@ -243,7 +243,6 @@
             opacity: 0.8;
         }
 
-        /* reCAPTCHA Glass Card Wrapper */
         .recaptcha-glass-cover {
             background: rgba(12, 10, 20, 0.5);
             border: 1px solid rgba(139, 92, 246, 0.25);
@@ -485,7 +484,6 @@
             border-radius: 50%;
         }
 
-        /* Modal Backdrop Styling */
         .modal-backdrop {
             position: fixed;
             top: 0;
@@ -514,25 +512,25 @@
             box-shadow: 0 20px 50px rgba(0,0,0,0.8);
         }
 
-        .perm-grid {
+        .perm-grid-inline {
             display: grid;
-            grid-template-columns: 1fr;
-            gap: 12px;
-            margin-top: 16px;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 10px;
+            margin-top: 12px;
         }
 
-        .perm-item {
+        .perm-item-inline {
             display: flex;
             align-items: center;
             justify-content: space-between;
             background: rgba(255, 255, 255, 0.03);
             border: 1px solid var(--glass-inner-border);
             border-radius: 10px;
-            padding: 10px 14px;
+            padding: 10px 12px;
         }
 
         .sync-channel-checkboxes {
-            max-height: 180px;
+            max-height: 220px;
             overflow-y: auto;
             background: var(--input-bg);
             border: 1px solid var(--input-border);
@@ -544,9 +542,21 @@
             display: flex;
             align-items: center;
             gap: 10px;
-            padding: 6px 4px;
-            font-size: 0.85rem;
+            padding: 8px 6px;
+            font-size: 0.88rem;
             color: var(--text-sub);
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            cursor: pointer;
+        }
+
+        .sync-item:last-child {
+            border-bottom: none;
+        }
+
+        .sync-item input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent-purple);
         }
 
         .robux-badge {
@@ -720,35 +730,35 @@
         <div id="page-permissions" class="page">
             <div class="brand-header">
                 <h1>Channel & Category Permissions</h1>
-                <p>Configure specific permissions and bulk sync across multiple channels.</p>
+                <p>Configure permissions and apply them across multiple categories or channels simultaneously.</p>
             </div>
 
             <div class="editor-card">
                 <div class="form-group">
-                    <label class="label-heading">SELECT CATEGORY OR CHANNEL TO CONFIGURE <span class="required">*</span></label>
-                    <select id="perm-target-selector" class="form-control" onchange="handleTargetSelection()">
-                        <option value="">-- Choose Category or Channel --</option>
+                    <label class="label-heading">1. TARGET ROLE <span class="required">*</span></label>
+                    <select id="perm-role-selector" class="form-control">
+                        <option value="@everyone">@everyone</option>
                     </select>
                 </div>
 
-                <div id="target-config-area" style="display: none;">
-                    <div class="form-group">
-                        <label class="label-heading">TARGET ROLE</label>
-                        <select id="perm-role-selector" class="form-control" onchange="loadPermissionsForTarget()">
-                            <option value="@everyone">@everyone</option>
-                        </select>
+                <div class="form-group">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
+                        <label class="label-heading" style="margin-bottom:0;">2. SELECT CHANNELS & CATEGORIES TO APPLY TO <span class="required">*</span></label>
+                        <div style="font-size:0.75rem; color: var(--accent-purple); cursor:pointer;" onclick="toggleSelectAllChannels(true)">Select All</div>
                     </div>
+                    <div id="sync-channel-list" class="sync-channel-checkboxes"></div>
+                </div>
 
-                    <button class="btn-glass" style="background: rgba(139, 92, 246, 0.2); border: 1px solid var(--accent-purple); margin-bottom: 16px;" onclick="openPermissionsModal()">
-                        <i class="fa-solid fa-sliders"></i> Edit Advanced Permissions Modal
-                    </button>
-
-                    <div class="form-group">
-                        <label class="label-heading">BULK SYNC PERMISSIONS TO OTHER CHANNELS/CATEGORIES</label>
-                        <p style="font-size: 0.78rem; color: var(--text-sub); margin-bottom: 8px;">Select channels/categories to immediately mirror these settings:</p>
-                        <div id="sync-channel-list" class="sync-channel-checkboxes"></div>
+                <div class="form-group" style="margin-top: 18px;">
+                    <label class="label-heading">3. CONFIGURE PERMISSIONS TO APPLY</label>
+                    <div class="perm-grid-inline" id="inline-perm-grid">
+                        <!-- Checkboxes populated via JS -->
                     </div>
                 </div>
+
+                <button class="btn-glass" style="margin-top: 18px; background: rgba(139, 92, 246, 0.25); border: 1px solid var(--accent-purple);" onclick="saveAndApplyPermissions()">
+                    <i class="fa-solid fa-check-double"></i> Save & Apply Permissions
+                </button>
             </div>
 
             <button id="submit-design-btn" class="btn-glass" onclick="handleInitialSubmitClick()">
@@ -801,24 +811,6 @@
                     Confirm & Submit
                 </button>
             </div>
-        </div>
-    </div>
-
-    <!-- ADVANCED PERMISSIONS MODAL -->
-    <div id="permissions-modal" class="modal-backdrop">
-        <div class="modal-card">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-                <h3 id="modal-title" style="font-size:1.1rem; font-weight:700;">Advanced Permissions</h3>
-                <i class="fa-solid fa-xmark" onclick="closePermissionsModal()" style="cursor:pointer; font-size:1.2rem;"></i>
-            </div>
-
-            <div class="perm-grid" id="modal-perm-grid">
-                <!-- Checkboxes populated via JS -->
-            </div>
-
-            <button class="btn-glass" style="margin-top: 20px;" onclick="saveModalPermissions()">
-                Save & Apply Permissions
-            </button>
         </div>
     </div>
 
@@ -879,9 +871,6 @@
             { id: "manage", label: "Manage Channel" }
         ];
 
-        let selectedTargetKey = "";
-        let activePermissionsBuffer = {};
-
         function proceedToGenerator() {
             if (!IS_USER_LOGGED_IN) {
                 window.location.href = "/login";
@@ -910,6 +899,7 @@
 
             if (pageId === 'page-permissions') {
                 applyPremiumTheme();
+                initPermissionsPage();
             }
 
             window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1126,156 +1116,114 @@
         }
 
         function goToPermissionsPage() {
-            populatePermissionsDropdowns();
             navigateTo('page-permissions');
         }
 
-        function populatePermissionsDropdowns() {
-            const selector = document.getElementById('perm-target-selector');
-            selector.innerHTML = `<option value="">-- Choose Category or Channel --</option>`;
-
+        function initPermissionsPage() {
+            // Populate Target Role Dropdown
             const roleSelector = document.getElementById('perm-role-selector');
             roleSelector.innerHTML = `<option value="@everyone">@everyone</option>`;
             (currentLayout.roles || []).forEach(r => {
                 roleSelector.innerHTML += `<option value="${r.name}">${r.name}</option>`;
             });
 
-            (currentLayout.categories || []).forEach((cat, cIdx) => {
-                const catName = stripEmoji(cat.name || `Category ${cIdx + 1}`);
-                selector.innerHTML += `<option value="cat-${cIdx}">📁 CATEGORY: ${catName}</option>`;
+            // Populate all Channels & Categories list for multi-select
+            populateMultiSelectChannelList();
 
-                (cat.channels || []).forEach((chan, chIdx) => {
-                    const cName = formatDiscordChannelName(chan.name);
-                    selector.innerHTML += `<option value="chan-${cIdx}-${chIdx}">&nbsp;&nbsp;&nbsp;&nbsp;# ${cName}</option>`;
-                });
-            });
-
-            document.getElementById('target-config-area').style.display = 'none';
+            // Render all permissions checkboxes inline
+            renderInlinePermissionsGrid();
         }
 
-        function handleTargetSelection() {
-            selectedTargetKey = document.getElementById('perm-target-selector').value;
-            if (!selectedTargetKey) {
-                document.getElementById('target-config-area').style.display = 'none';
-                return;
-            }
-
-            document.getElementById('target-config-area').style.display = 'block';
-            populateBulkSyncList();
-            loadPermissionsForTarget();
-        }
-
-        function getSelectedTargetObject() {
-            if (selectedTargetKey.startsWith('cat-')) {
-                const cIdx = parseInt(selectedTargetKey.split('-')[1]);
-                return currentLayout.categories[cIdx];
-            } else if (selectedTargetKey.startsWith('chan-')) {
-                const parts = selectedTargetKey.split('-');
-                return currentLayout.categories[parseInt(parts[1])]?.channels[parseInt(parts[2])];
-            }
-            return null;
-        }
-
-        function loadPermissionsForTarget() {
-            const targetObj = getSelectedTargetObject();
-            if (!targetObj) return;
-
-            if (!targetObj.permissions) targetObj.permissions = {};
-            const activeRole = document.getElementById('perm-role-selector').value;
-
-            if (!targetObj.permissions[activeRole]) {
-                targetObj.permissions[activeRole] = {
-                    view: true, send: true, embed: true, attach: true, history: true, connect: true, speak: true, manage: false
-                };
-            }
-
-            activePermissionsBuffer = { ...targetObj.permissions[activeRole] };
-        }
-
-        function populateBulkSyncList() {
+        function populateMultiSelectChannelList() {
             const syncContainer = document.getElementById('sync-channel-list');
             syncContainer.innerHTML = '';
 
             (currentLayout.categories || []).forEach((cat, cIdx) => {
                 const catKey = `cat-${cIdx}`;
-                if (catKey !== selectedTargetKey) {
-                    const catName = stripEmoji(cat.name || `Category ${cIdx + 1}`);
-                    syncContainer.innerHTML += `
-                        <label class="sync-item">
-                            <input type="checkbox" value="${catKey}" class="sync-target-cb"> 📁 CATEGORY: ${catName}
-                        </label>
-                    `;
-                }
+                const catName = stripEmoji(cat.name || `Category ${cIdx + 1}`);
+                syncContainer.innerHTML += `
+                    <label class="sync-item">
+                        <input type="checkbox" value="${catKey}" class="target-perm-cb"> 
+                        <span style="font-weight:700; color:#fff;">📁 CATEGORY: ${catName}</span>
+                    </label>
+                `;
 
                 (cat.channels || []).forEach((chan, chIdx) => {
                     const chanKey = `chan-${cIdx}-${chIdx}`;
-                    if (chanKey !== selectedTargetKey) {
-                        const cName = formatDiscordChannelName(chan.name);
-                        syncContainer.innerHTML += `
-                            <label class="sync-item">
-                                <input type="checkbox" value="${chanKey}" class="sync-target-cb"> # ${cName}
-                            </label>
-                        `;
-                    }
+                    const cName = formatDiscordChannelName(chan.name);
+                    syncContainer.innerHTML += `
+                        <label class="sync-item" style="padding-left: 24px;">
+                            <input type="checkbox" value="${chanKey}" class="target-perm-cb"> 
+                            <span># ${cName}</span>
+                        </label>
+                    `;
                 });
             });
         }
 
-        function openPermissionsModal() {
-            const grid = document.getElementById('modal-perm-grid');
+        function toggleSelectAllChannels(select) {
+            document.querySelectorAll('.target-perm-cb').forEach(cb => {
+                cb.checked = select;
+            });
+        }
+
+        function renderInlinePermissionsGrid() {
+            const grid = document.getElementById('inline-perm-grid');
             grid.innerHTML = '';
 
             DISCORD_PERMISSIONS_LIST.forEach(p => {
-                const isChecked = activePermissionsBuffer[p.id] !== false;
                 grid.innerHTML += `
-                    <div class="perm-item">
-                        <span style="font-size:0.88rem; font-weight:600;">${p.label}</span>
-                        <input type="checkbox" id="perm-cb-${p.id}" ${isChecked ? 'checked' : ''} style="width:18px; height:18px; accent-color: var(--accent-purple);">
+                    <div class="perm-item-inline">
+                        <span style="font-size:0.85rem; font-weight:600;">${p.label}</span>
+                        <input type="checkbox" id="inline-perm-cb-${p.id}" checked style="width:18px; height:18px; accent-color: var(--accent-purple);">
                     </div>
                 `;
             });
-
-            document.getElementById('permissions-modal').style.display = 'flex';
         }
 
-        function closePermissionsModal() {
-            document.getElementById('permissions-modal').style.display = 'none';
-        }
-
-        function saveModalPermissions() {
-            DISCORD_PERMISSIONS_LIST.forEach(p => {
-                const cb = document.getElementById(`perm-cb-${p.id}`);
-                if (cb) activePermissionsBuffer[p.id] = cb.checked;
-            });
-
-            const targetObj = getSelectedTargetObject();
-            const activeRole = document.getElementById('perm-role-selector').value;
-
-            if (targetObj) {
-                if (!targetObj.permissions) targetObj.permissions = {};
-                targetObj.permissions[activeRole] = { ...activePermissionsBuffer };
-
-                document.querySelectorAll('.sync-target-cb:checked').forEach(cb => {
-                    const syncKey = cb.value;
-                    let targetSyncObj = null;
-
-                    if (syncKey.startsWith('cat-')) {
-                        const cIdx = parseInt(syncKey.split('-')[1]);
-                        targetSyncObj = currentLayout.categories[cIdx];
-                    } else if (syncKey.startsWith('chan-')) {
-                        const parts = syncKey.split('-');
-                        targetSyncObj = currentLayout.categories[parseInt(parts[1])]?.channels[parseInt(parts[2])];
-                    }
-
-                    if (targetSyncObj) {
-                        if (!targetSyncObj.permissions) targetSyncObj.permissions = {};
-                        targetSyncObj.permissions[activeRole] = { ...activePermissionsBuffer };
-                    }
-                });
+        function saveAndApplyPermissions() {
+            const selectedTargets = document.querySelectorAll('.target-perm-cb:checked');
+            if (selectedTargets.length === 0) {
+                alert('Please check at least one Category or Channel from the list.');
+                return;
             }
 
-            closePermissionsModal();
-            alert('Permissions updated and synced successfully!');
+            const activeRole = document.getElementById('perm-role-selector').value;
+
+            // Construct permissions buffer from inline grid
+            const permBuffer = {};
+            DISCORD_PERMISSIONS_LIST.forEach(p => {
+                const cb = document.getElementById(`inline-perm-cb-${p.id}`);
+                permBuffer[p.id] = cb ? cb.checked : true;
+            });
+
+            // Apply to all selected target objects
+            selectedTargets.forEach(cb => {
+                const key = cb.value;
+                let targetObj = null;
+
+                if (key.startsWith('cat-')) {
+                    const cIdx = parseInt(key.split('-')[1]);
+                    targetObj = currentLayout.categories[cIdx];
+                } else if (key.startsWith('chan-')) {
+                    const parts = key.split('-');
+                    targetObj = currentLayout.categories[parseInt(parts[1])]?.channels[parseInt(parts[2])];
+                }
+
+                if (targetObj) {
+                    if (!targetObj.permissions) targetObj.permissions = {};
+                    targetObj.permissions[activeRole] = { ...permBuffer };
+                }
+            });
+
+            // Reset selection and reset permission toggles to default
+            document.querySelectorAll('.target-perm-cb').forEach(cb => cb.checked = false);
+            DISCORD_PERMISSIONS_LIST.forEach(p => {
+                const cb = document.getElementById(`inline-perm-cb-${p.id}`);
+                if (cb) cb.checked = true;
+            });
+
+            alert(`Successfully applied permissions for [${activeRole}] to ${selectedTargets.length} selected target(s)! Form reset for next config.`);
         }
 
         function updateBotInviteLink() {
@@ -1361,7 +1309,7 @@
 
                 if (resData.is_premium) {
                     if (heading) heading.innerText = "👑 TE Premium Design Dispatched!";
-                    if (desc) desc.innerText = "Your blueprint has been sent to staff channel with an interactive One-Click Build button attached!";
+                    if (desc) desc.innerText = "Your blueprint has been sent to the staff channel for deployment!";
                 } else {
                     if (heading) heading.innerText = "Blueprint Submitted to Staff!";
                     if (desc) desc.innerText = "Your blueprint has been sent to staff for deployment review.";
