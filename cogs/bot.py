@@ -10,6 +10,9 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
+# Target Channel ID for scanning TE Premium webhook submissions
+PREMIUM_SCAN_CHANNEL_ID = 1563544108696477802
+
 # MongoDB Client Setup for Premium persistence in Bot Cog
 MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
@@ -200,20 +203,36 @@ class BotCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Scans log channel for TE Premium submissions and sends the One-Click Build button."""
+        """Scans specified channel (ID: 1563544108696477802) for TE Premium webhook submissions and attaches One-Click Build button."""
+        # Always check target channel ID
+        if message.channel.id != PREMIUM_SCAN_CHANNEL_ID and not (message.embeds and any("TE PREMIUM" in (e.title or "").upper() for e in message.embeds)):
+            return
+
         if not message.embeds:
             return
 
         for embed in message.embeds:
-            if embed.title and "TE PREMIUM" in embed.title:
+            is_premium_embed = False
+            title_text = (embed.title or "").upper()
+            desc_text = (embed.description or "").upper()
+            full_dict = str(embed.to_dict()).upper()
+
+            # Check for TE Premium identifier
+            if "TE PREMIUM" in title_text or "TE PREMIUM" in desc_text or "TE PREMIUM" in full_dict:
+                is_premium_embed = True
+
+            if is_premium_embed:
                 target_server_id = None
                 blueprint_url = None
 
                 for field in embed.fields:
-                    if field.name == "Target Server ID":
-                        target_server_id = field.value.replace("`", "").strip()
-                    elif field.name == "Blueprint File":
-                        blueprint_url = field.value.strip()
+                    f_name = (field.name or "").strip()
+                    f_val = (field.value or "").strip()
+
+                    if f_name == "Target Server ID":
+                        target_server_id = f_val.replace("`", "").strip()
+                    elif f_name == "Blueprint File":
+                        blueprint_url = f_val.replace("`", "").strip()
 
                 if target_server_id and blueprint_url:
                     view = discord.ui.View(timeout=None)
@@ -227,8 +246,9 @@ class BotCog(commands.Cog):
                             content=f"👑 **[TE Premium Build Ready]** Target Server ID: `{target_server_id}`",
                             view=view
                         )
+                        print(f"[Button Dispatch Success] Attached build button for Server ID: {target_server_id} in channel {message.channel.id}")
                     except Exception as e:
-                        print(f"[Button Send Error] Could not send button to channel: {e}")
+                        print(f"[Button Send Error] Failed to dispatch button in channel {message.channel.id}: {e}")
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -370,21 +390,18 @@ class BotCog(commands.Cog):
         await interaction.response.defer(thinking=True)
         logs = []
 
-        # 1. Reload bot cog
         try:
             await self.bot.reload_extension("cogs.bot")
             logs.append("✅ Extension `cogs.bot` reloaded successfully.")
         except Exception as e:
             logs.append(f"❌ Failed to reload extension `cogs.bot`: {e}")
 
-        # 2. Re-sync Application Slash Commands
         try:
             synced = await self.bot.tree.sync()
             logs.append(f"✅ Synced {len(synced)} global application command(s).")
         except Exception as e:
             logs.append(f"❌ Application command sync error: {e}")
 
-        # 3. Notify connected website endpoint
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
         try:
             async with aiohttp.ClientSession() as session:
