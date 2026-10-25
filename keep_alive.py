@@ -29,6 +29,10 @@ BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").str
 RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
+# Channel IDs or Webhook URLs to extract Channel ID from
+DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "").strip()
+PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or DESIGN_CHANNEL_ID).strip()
+
 SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
@@ -64,14 +68,15 @@ WEBSITE_BANS = {}
 LOCAL_PREMIUM_USERS = {}
 
 
-def extract_channel_id_from_webhook(webhook_url: str) -> str:
-    """Extracts the Discord channel ID from a webhook URL."""
-    if not webhook_url:
+def extract_channel_id(channel_or_webhook_url: str) -> str:
+    """Extracts or returns a pure Discord channel ID."""
+    if not channel_or_webhook_url:
         return ""
-    match = re.search(r"/webhooks/(\d+)/", webhook_url)
+    if channel_or_webhook_url.isdigit():
+        return channel_or_webhook_url
+    match = re.search(r"/webhooks/(\d+)/", channel_or_webhook_url)
     if match:
         webhook_id = match.group(1)
-        # Attempt to inspect webhook info from Discord API if possible
         try:
             res = requests.get(f"{DISCORD_API_BASE_URL}/webhooks/{webhook_id}", timeout=4)
             if res.status_code == 200:
@@ -159,9 +164,10 @@ def is_user_banned(user_id):
     return WEBSITE_BANS.get(user_id_str)
 
 
-def send_discord_bot_message(channel_id: str, embed_payload: dict, components_payload: list = None):
-    """Sends a native message using DISCORD_BOT_TOKEN to preserve interactive buttons."""
+def send_discord_bot_log(channel_id: str, embed_payload: dict, components_payload: list = None) -> bool:
+    """Sends a native log message directly using DISCORD_BOT_TOKEN to guarantee interactive buttons."""
     if not BOT_TOKEN or not channel_id:
+        print("[Bot Log Warning] BOT_TOKEN or channel_id is missing.")
         return False
 
     headers = {
@@ -180,15 +186,20 @@ def send_discord_bot_message(channel_id: str, embed_payload: dict, components_pa
             json=body,
             timeout=8
         )
-        return res.status_code in (200, 201)
+        if res.status_code in (200, 201):
+            return True
+        else:
+            print(f"[Bot Log Error] Discord API returned {res.status_code}: {res.text}")
+            return False
     except Exception as e:
-        print(f"[Bot Post Error] {e}")
+        print(f"[Bot Log Failure] Exception while posting: {e}")
         return False
 
 
-def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None, target_server_id: str = None, blueprint_url: str = None, attach_button: bool = False):
-    if not webhook_url and not BOT_TOKEN:
-        print("[Log Warning] Webhook URL and Bot Token are empty, skipping dispatch.")
+def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None, target_server_id: str = None, blueprint_url: str = None, attach_button: bool = False):
+    channel_id = extract_channel_id(channel_source)
+    if not channel_id:
+        print("[Log Error] Could not determine channel ID for logging.")
         return
 
     user_data = user_data or {}
@@ -254,24 +265,7 @@ def log_webhook_event(webhook_url: str, title: str, user_data: dict, action_desc
             }
         ]
 
-    # Priority 1: Try posting via DISCORD_BOT_TOKEN if channel ID can be extracted
-    channel_id = extract_channel_id_from_webhook(webhook_url)
-    if channel_id and BOT_TOKEN:
-        bot_success = send_discord_bot_message(channel_id, embed, components if attach_button else None)
-        if bot_success:
-            return
-
-    # Priority 2: Fallback to standard HTTP Webhook POST
-    payload = {
-        "username": "Studio Logger",
-        "avatar_url": "https://cdn.discordapp.com/embed/avatars/0.png",
-        "embeds": [embed]
-    }
-
-    try:
-        requests.post(webhook_url, json=payload, timeout=8)
-    except Exception as e:
-        print(f"[Log Error] Webhook post failure: {e}")
+    send_discord_bot_log(channel_id, embed, components if attach_button else None)
 
 
 @app.route("/")
@@ -359,15 +353,15 @@ def callback():
             }
 
             try:
-                log_webhook_event(
-                    webhook_url=WEBSITE_WEBHOOK_URL,
+                log_event_via_bot(
+                    channel_source=WEBSITE_WEBHOOK_URL,
                     title="[Website Login Logged]",
                     user_data=user_data,
                     action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
                     color=0x3b82f6
                 )
             except Exception as le:
-                print(f"[Login Webhook Error] {le}")
+                print(f"[Login Log Error] {le}")
     except Exception as e:
         print(f"[OAuth Callback Error] {e}")
 
@@ -510,8 +504,13 @@ def submit_design():
     blueprint_url = f"{get_base_url()}/blueprint/{filename}"
     build_command_text = f"/build url: {blueprint_url}"
 
-    # Target Webhook selection
-    target_webhook = PREMIUM_DESIGN_WEBHOOK_URL if has_premium and PREMIUM_DESIGN_WEBHOOK_URL else DESIGN_WEBHOOK_URL
+    # Target Channel Selection
+    target_channel_source = (
+        PREMIUM_DESIGN_CHANNEL_ID or PREMIUM_DESIGN_WEBHOOK_URL
+        if has_premium and (PREMIUM_DESIGN_CHANNEL_ID or PREMIUM_DESIGN_WEBHOOK_URL)
+        else (DESIGN_CHANNEL_ID or DESIGN_WEBHOOK_URL)
+    )
+
     log_title = "👑 [TE PREMIUM] Blueprint Submitted" if has_premium else "[New Blueprint Submitted]"
 
     extra_fields = {
@@ -524,8 +523,8 @@ def submit_design():
     }
 
     try:
-        log_webhook_event(
-            webhook_url=target_webhook,
+        log_event_via_bot(
+            channel_source=target_channel_source,
             title=log_title,
             user_data=user,
             action_desc="User submitted a server layout blueprint to staff.",
@@ -536,7 +535,7 @@ def submit_design():
             attach_button=has_premium
         )
     except Exception as err:
-        print(f"[Submit Webhook Error] {err}")
+        print(f"[Submit Log Error] {err}")
 
     return jsonify({
         "success": True,
