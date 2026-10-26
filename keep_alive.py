@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from flask import Flask, redirect, request, session, render_template, jsonify, send_from_directory
 from pymongo import MongoClient
+import google.generativeai as genai
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
@@ -56,6 +57,12 @@ BOT_HANDSHAKE_URL = f"{BOT_SERVER_URL}/api/auto-build"
 
 MONGO_URI = os.getenv("MONGO_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"[Gemini Setup Error] {e}")
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 ROBLOX_OAUTH_AUTH_URL = "https://apis.roblox.com/oauth/v1/authorize"
@@ -298,7 +305,6 @@ def home():
     user = session.get("user")
     roblox_user = session.get("roblox_user")
 
-    # Re-hydrate from persistent MongoDB session if session missing in memory
     if not user and session.get("user_id"):
         db_record = load_user_session_db(session["user_id"])
         if db_record:
@@ -335,6 +341,52 @@ def home():
         discord_client_id=CLIENT_ID,
         roblox_store_url=ROBLOX_STORE_URL
     )
+
+
+# --- AI DESIGN & BLUEPRINT GENERATION ---
+@app.route("/generate-blueprint", methods=["POST"])
+def generate_blueprint_endpoint():
+    data = request.get_json() or {}
+    prompt = data.get("prompt", "").strip()
+
+    if not prompt:
+        return jsonify({"success": False, "error": "Prompt cannot be empty."}), 400
+
+    if not GEMINI_API_KEY:
+        return jsonify({"success": False, "error": "GEMINI_API_KEY environment variable is missing on Vercel."}), 500
+
+    system_instruction = (
+        "You are an expert Discord Server Architect. Your job is to output a valid JSON object representing a full Discord server blueprint based on the user request. "
+        "Strictly return ONLY raw JSON without markdown formatting, code blocks, or markdown backticks. "
+        "JSON structure MUST follow:\n"
+        "{\n"
+        '  "server_name": "String",\n'
+        '  "roles": [{"name": "Role Name", "color": "#HEX"}],\n'
+        '  "categories": [\n'
+        '    {\n'
+        '      "name": "CATEGORY NAME",\n'
+        '      "channels": [\n'
+        '        {"name": "channel-name", "type": "text|voice|announcement", "emoji": "optional", "topic": "Description"}\n'
+        '      ]\n'
+        '    }\n'
+        '  ]\n'
+        "}"
+    )
+
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=system_instruction)
+        response = model.generate_content(prompt)
+        raw_text = response.text.strip()
+
+        # Clean markdown code blocks if present
+        clean_json_str = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
+        blueprint_json = json.loads(clean_json_str)
+
+        return jsonify({"success": True, "blueprint": blueprint_json}), 200
+    except json.JSONDecodeError:
+        return jsonify({"success": False, "error": "AI generated an invalid blueprint format. Please try again."}), 500
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Gemini API Error: {str(e)}"}), 500
 
 
 # --- DISCORD OAUTH2 LOGIN & CALLBACK ---
@@ -397,7 +449,6 @@ def callback():
             session["user"] = user_obj
             session["user_id"] = user_data["id"]
 
-            # Save persistent user record in MongoDB
             save_user_session_db(user_data["id"], user_obj, session.get("roblox_user"))
 
             log_event_via_bot(
@@ -456,7 +507,6 @@ def roblox_callback():
         tokens = token_res.json()
         access_token = tokens.get("access_token")
 
-        # Fetch Roblox User Profile Data
         u_headers = {"Authorization": f"Bearer {access_token}"}
         u_res = requests.get(ROBLOX_USERINFO_URL, headers=u_headers)
 
@@ -473,10 +523,7 @@ def roblox_callback():
             session["roblox_user"] = roblox_obj
 
             if user:
-                # Save linked Roblox user permanently to MongoDB
                 save_user_session_db(user["id"], user, roblox_obj)
-
-                # Grant 30 Days TE Premium upon linking Roblox account
                 set_user_premium(user["id"], timedelta(days=30))
 
                 log_event_via_bot(
