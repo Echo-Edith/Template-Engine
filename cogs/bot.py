@@ -288,19 +288,16 @@ class GiveawayPanelView(discord.ui.View):
         user_id = str(user.id)
         entries_dict = data.get("entries", {})
 
-        # Check unallowed roles
         unallowed_role_ids = data.get("unallowed_role_ids", [])
         if any(role.id in unallowed_role_ids for role in user.roles):
             await interaction.response.send_message("❌ You have a role that is excluded from entering this giveaway.", ephemeral=True)
             return
 
-        # Check allowed roles
         allowed_role_ids = data.get("allowed_role_ids", [])
         if allowed_role_ids and not any(role.id in allowed_role_ids for role in user.roles):
             await interaction.response.send_message("❌ You do not have the required role to enter this giveaway.", ephemeral=True)
             return
 
-        # Toggle leave if already entered
         if user_id in entries_dict:
             entries_dict.pop(user_id)
             data["entries"] = entries_dict
@@ -308,7 +305,6 @@ class GiveawayPanelView(discord.ui.View):
             await interaction.response.send_message("❌ You have left the giveaway.", ephemeral=True)
             return
 
-        # Determine entries count
         max_entry_count = data.get("max_entry", 1)
         bonus_role_ids = data.get("bonus_role_ids", [])
         has_bonus = any(role.id in bonus_role_ids for role in user.roles) or is_user_premium(user_id)
@@ -596,7 +592,6 @@ class BotCog(commands.Cog):
         winner_count = gw_data.get("winners", 1)
         prize = gw_data.get("prize") or gw_data.get("title", "Prize")
 
-        # Create weighted list based on entry count
         weighted_pool = []
         for uid, weight in entries_dict.items():
             weighted_pool.extend([uid] * weight)
@@ -662,6 +657,177 @@ class BotCog(commands.Cog):
     @check_premium_expirations.before_loop
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
+
+    # --- CHANNEL MANAGEMENT COMMAND (/channel) ---
+    @app_commands.command(name="channel", description="Create, edit, or set temporary channel behavior.")
+    @app_commands.describe(
+        action="Select channel operation mode",
+        name="Channel name (for create or edit)",
+        type="Channel type (for create: text or voice)",
+        category="Target category for channel",
+        topic="Channel topic description",
+        duration="Duration for temporary channels (e.g., 10m, 2h, 1d)"
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="Create Channel", value="create"),
+            app_commands.Choice(name="Edit Current Channel", value="edit"),
+            app_commands.Choice(name="Temporary Channel Timer", value="temporary")
+        ],
+        type=[
+            app_commands.Choice(name="Text Channel", value="text"),
+            app_commands.Choice(name="Voice Channel", value="voice")
+        ]
+    )
+    async def channel_manage(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        name: str = None,
+        type: app_commands.Choice[str] = None,
+        category: discord.CategoryChannel = None,
+        topic: str = None,
+        duration: str = "1h"
+    ):
+        if not interaction.user.guild_permissions.manage_channels and interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("Manage Channels permission required.", ephemeral=True)
+            return
+
+        act = action.value.lower()
+        guild = interaction.guild
+
+        if act == "create":
+            if not name:
+                await interaction.response.send_message("❌ Channel name is required to create a channel.", ephemeral=True)
+                return
+
+            c_type = type.value if type else "text"
+            if c_type == "voice":
+                new_ch = await guild.create_voice_channel(name=name, category=category)
+            else:
+                new_ch = await guild.create_text_channel(name=name, category=category, topic=topic or "")
+
+            embed = discord.Embed(
+                title="[CHANNEL CREATED]",
+                description=f"Successfully created channel {new_ch.mention} in category `{category.name if category else 'None'}`.",
+                color=0x2ecc71
+            )
+            embed.set_footer(text="Template Engine Channel Manager")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        elif act == "edit":
+            ch = interaction.channel
+            kwargs = {}
+            if name: kwargs["name"] = name
+            if category: kwargs["category"] = category
+            if topic and isinstance(ch, discord.TextChannel): kwargs["topic"] = topic
+
+            if not kwargs:
+                await interaction.response.send_message("❌ Provide at least one field (name, category, or topic) to edit.", ephemeral=True)
+                return
+
+            await ch.edit(**kwargs)
+            embed = discord.Embed(
+                title="[CHANNEL EDITED]",
+                description=f"Updated settings for {ch.mention}.",
+                color=0x3b82f6
+            )
+            embed.set_footer(text="Template Engine Channel Manager")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        elif act == "temporary":
+            ch = interaction.channel
+            td = parse_duration_to_timedelta(duration)
+            expires_at = datetime.now(timezone.utc) + td
+
+            init_embed = discord.Embed(
+                title="⏳ Temporary Channel Active",
+                description=(
+                    f"This channel has been set to **Temporary** and will automatically expire in **{duration}**.\n\n"
+                    f"**Scheduled Expiration:** <t:{int(expires_at.timestamp())}:F> (<t:{int(expires_at.timestamp())}:R>)"
+                ),
+                color=0xeab308
+            )
+            init_embed.set_footer(text="Template Engine Channel Manager")
+            await interaction.response.send_message(embed=init_embed)
+
+            async def handle_temp_channel_lifecycle():
+                total_seconds = td.total_seconds()
+                if total_seconds > 120:
+                    await asyncio.sleep(total_seconds - 60)
+                    warn_embed = discord.Embed(
+                        title="⚠️ Channel Expiring Soon!",
+                        description="This temporary channel will be automatically deleted in **1 minute**.",
+                        color=0xf43f5e
+                    )
+                    warn_embed.set_footer(text="Template Engine Channel Manager")
+                    try: await ch.send(embed=warn_embed)
+                    except Exception: pass
+                    await asyncio.sleep(60)
+                else:
+                    await asyncio.sleep(total_seconds)
+
+                try:
+                    del_embed = discord.Embed(
+                        title="💥 Temporary Channel Expired",
+                        description="Channel lifetime reached. Deleting channel now...",
+                        color=0xf43f5e
+                    )
+                    await ch.send(embed=del_embed)
+                    await asyncio.sleep(3)
+                    await ch.delete(reason="Temporary channel expired")
+                except Exception as e:
+                    print(f"[Temp Channel Deletion Error] {e}")
+
+            asyncio.create_task(handle_temp_channel_lifecycle())
+
+    # --- PREMIUMS LISTING COMMAND (/premiums) ---
+    @app_commands.command(name="premiums", description="List all active TE Premium members and expiration dates (Owner restricted).")
+    async def premiums_list(self, interaction: discord.Interaction):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("Restricted command. Bot owner access required.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        now = datetime.now(timezone.utc)
+        active_subscribers = []
+
+        if db_premium is not None:
+            docs = list(db_premium.find())
+            for doc in docs:
+                uid = doc.get("user_id")
+                exp_raw = doc.get("expires_at")
+                if uid and exp_raw:
+                    exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if exp > now:
+                        active_subscribers.append((uid, exp))
+        else:
+            for uid, exp in LOCAL_PREMIUM_USERS.items():
+                if exp > now:
+                    active_subscribers.append((uid, exp))
+
+        embed = discord.Embed(
+            title=f"👑 Active TE Premium Members ({len(active_subscribers)})",
+            color=0xF1C40F,
+            timestamp=now
+        )
+
+        if active_subscribers:
+            lines = []
+            for idx, (uid, exp) in enumerate(active_subscribers, start=1):
+                exp_ts = int(exp.timestamp())
+                lines.append(f"{idx}. <@{uid}> (`{uid}`) — Expires: <t:{exp_ts}:F> (<t:{exp_ts}:R>)")
+            
+            # Truncate if description exceeds 4000 characters
+            full_desc = "\n".join(lines)
+            embed.description = full_desc if len(full_desc) <= 4000 else full_desc[:3950] + "\n\n...[Truncated]"
+        else:
+            embed.description = "No active TE Premium subscribers found."
+
+        embed.set_footer(text="Template Engine Premium Audit Log")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # --- GIVEAWAY COMMANDS ---
     @app_commands.command(name="giveaway-start", description="Start a customizable giveaway with multi-entry multipliers.")
@@ -834,3 +1000,8 @@ async def setup(bot):
     bot.add_view(GiveawayPanelView())
     cog = BotCog(bot)
     await bot.add_cog(cog)
+```
+
+### Summary of Changes:
+1. **`/premiums` Command Added**: Allows bot owners to quickly view all active subscriber pings and exact expiration dates formatted with Discord's dynamic timestamp tags (`<t:TIMESTAMP:F>` and `<t:TIMESTAMP:R>`).
+2. **`/channel` Options Expanded**: Choice options now explicitly cover `create`, `edit`, and `temporary` modes with parameters for names, categories, topics, and duration timers.
