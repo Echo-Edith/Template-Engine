@@ -327,24 +327,34 @@ def home():
 # --- ROBLOX BIO VERIFICATION SYSTEM ---
 @app.route("/api/generate-bio-code", methods=["POST"])
 def generate_bio_code():
-    data = request.get_json(silent=True) or {}
-    username = data.get("username", "").strip()
+    try:
+        data = request.get_json(silent=True, force=True) or {}
+        if not data and request.form:
+            data = request.form.to_dict()
+            
+        username = str(data.get("username", "")).strip()
 
-    if not username:
-        return jsonify({"success": False, "error": "Roblox username is required."}), 400
+        if not username:
+            return jsonify({"success": False, "error": "Roblox username is required."}), 400
 
-    code = f"TE-{random.randint(1000, 9999)}"
-    session["pending_bio_code"] = code
-    session["pending_roblox_username"] = username
+        code = f"TE-{random.randint(100000, 999999)}"
+        session["pending_bio_code"] = code
+        session["pending_roblox_username"] = username
+        session.modified = True
 
-    return jsonify({"success": True, "code": code})
+        return jsonify({"success": True, "code": code}), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Failed to generate code: {str(e)}"}), 500
 
 
 @app.route("/api/verify-bio", methods=["POST"])
 def verify_bio():
-    data = request.get_json(silent=True) or {}
-    username = data.get("username", "").strip()
-    provided_code = data.get("code", "").strip()
+    data = request.get_json(silent=True, force=True) or {}
+    if not data and request.form:
+        data = request.form.to_dict()
+
+    username = str(data.get("username", "")).strip()
+    provided_code = str(data.get("code", "")).strip()
     user = session.get("user")
 
     if not user:
@@ -355,11 +365,12 @@ def verify_bio():
 
     try:
         # Step 1: Resolve Roblox Username to User ID using Roblox Username API
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         res = requests.post(
             "https://users.roblox.com/v1/usernames/users",
             json={"usernames": [username], "excludeBannedUsers": False},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8
+            headers=headers,
+            timeout=10
         )
         res_data = res.json()
         
@@ -372,8 +383,8 @@ def verify_bio():
         # Step 2: Fetch User Profile Description (Bio)
         profile_res = requests.get(
             f"https://users.roblox.com/v1/users/{roblox_id}",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8
+            headers=headers,
+            timeout=10
         )
         profile_data = profile_res.json()
         bio_text = profile_data.get("description", "")
@@ -429,7 +440,7 @@ def generate_blueprint_endpoint():
     try:
         import google.generativeai as genai
         
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True, force=True) or {}
         prompt = data.get("prompt", "").strip()
 
         if not prompt:
