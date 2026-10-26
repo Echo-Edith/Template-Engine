@@ -818,6 +818,16 @@ isCaptchaVerified = true;
 }
 checkAuthAndCaptchaStatus();
 applyPremiumTheme();
+// Direct click binding for continue button
+const continueBtn = document.getElementById('verify-continue-btn');
+if (continueBtn) {
+continueBtn.addEventListener('click', (e) => {
+e.preventDefault();
+if (!continueBtn.disabled) {
+proceedToGenerator();
+}
+});
+}
 });
 function applyPremiumTheme() {
 const btn = document.getElementById('submit-design-btn');
@@ -863,10 +873,6 @@ const DISCORD_PERMISSIONS_LIST = [
 { id: "manage", label: "Manage Channel" }
 ];
 function proceedToGenerator() {
-if (!IS_USER_LOGGED_IN || !IS_ROBLOX_LINKED) {
-checkAuthAndCaptchaStatus();
-return;
-}
 navigateTo('page-generator');
 }
 function navigateTo(pageId) {
