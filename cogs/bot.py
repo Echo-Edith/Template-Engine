@@ -188,6 +188,27 @@ def toggle_user_build_authorization(user_id: str) -> bool:
             return True
 
 
+async def check_roblox_subscription_status(roblox_id: str) -> bool:
+    """Queries Roblox Open Cloud API to verify if the given Roblox User ID owns an active subscription."""
+    if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_SUBSCRIPTION_ID:
+        return False
+    
+    url = f"https://apis.roblox.com/cloud/v2/users/{roblox_id}/subscriptions/{ROBLOX_SUBSCRIPTION_ID}"
+    headers = {"x-api-key": ROBLOX_OPEN_CLOUD_KEY}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # Check active state
+                    state = data.get("state", "").upper()
+                    return state in ["ACTIVE", "RENEWING"]
+    except Exception as e:
+        print(f"[Roblox Open Cloud Sub Check Error] {e}")
+    return False
+
+
 # --- MODAL FOR ROBLOX VERIFICATION INPUT ---
 class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
     roblox_username = discord.ui.TextInput(
@@ -202,6 +223,7 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
         await interaction.response.defer(ephemeral=True)
         user_id_str = str(interaction.user.id)
         code_data = PENDING_VERIFICATION_CODES.get(user_id_str)
+        now = datetime.now(timezone.utc)
 
         if not code_data:
             err_embed = discord.Embed(
@@ -211,6 +233,19 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
             )
             err_embed.set_footer(text="Template Engine Infrastructure")
             await interaction.followup.send(embed=err_embed, ephemeral=True)
+            return
+
+        # Check 10-minute expiration
+        created_at = code_data.get("created_at", now)
+        if (now - created_at).total_seconds() > 600:
+            PENDING_VERIFICATION_CODES.pop(user_id_str, None)
+            exp_embed = discord.Embed(
+                title="[CODE EXPIRED]",
+                description="Your verification code has expired (10-minute limit). Please click **Generate Code** again.",
+                color=0xf43f5e
+            )
+            exp_embed.set_footer(text="Template Engine Infrastructure")
+            await interaction.followup.send(embed=exp_embed, ephemeral=True)
             return
 
         code = code_data["code"]
@@ -258,6 +293,9 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
                     await interaction.followup.send(embed=err, ephemeral=True)
                     return
 
+                # Code matched - consume it
+                PENDING_VERIFICATION_CODES.pop(user_id_str, None)
+
                 # Step 4: Link Accounts & Update Nickname
                 save_user_roblox_link(
                     discord_id=user_id_str,
@@ -265,10 +303,15 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
                     roblox_id=str(roblox_id),
                     roblox_username=exact_username
                 )
+
+                # Step 5: Check Roblox Experience Subscription
+                has_active_sub = await check_roblox_subscription_status(str(roblox_id))
                 
-                now = datetime.now(timezone.utc)
-                expires_at = now + timedelta(days=30)
-                set_user_premium(user_id_str, timedelta(days=30))
+                if has_active_sub:
+                    set_user_premium(user_id_str, timedelta(days=30))
+                    expires_at = now + timedelta(days=30)
+                else:
+                    remove_user_premium(user_id_str)
 
                 new_nickname = f"{interaction.user.name} ({exact_username})"
                 if len(new_nickname) > 32:
@@ -281,47 +324,50 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
                 except Exception:
                     pass
 
-                # Direct DM to user
-                try:
-                    dm_embed = discord.Embed(
-                        title="👑 TE Premium Activated!",
-                        description=(
-                            f"Thank you for linking your Roblox account **@{exact_username}**!\n\n"
-                            f"**Perks Unlocked:**\n"
-                            f"• Instant 1-click server deployments\n"
-                            f"• Gold Glassmorphic website theme\n"
-                            f"• Advanced AI server architecture building"
-                        ),
-                        color=0xF1C40F
-                    )
-                    dm_embed.set_footer(text="Template Engine Infrastructure")
-                    await interaction.user.send(embed=dm_embed)
-                except Exception:
-                    pass
+                # Direct DM to user if subscribed
+                if has_active_sub:
+                    try:
+                        dm_embed = discord.Embed(
+                            title="👑 TE Premium Activated!",
+                            description=(
+                                f"Thank you for subscribing and linking **@{exact_username}**!\n\n"
+                                f"**Perks Unlocked:**\n"
+                                f"• Instant 1-click server deployments\n"
+                                f"• Gold Glassmorphic website theme\n"
+                                f"• Advanced AI server architecture building"
+                            ),
+                            color=0xF1C40F
+                        )
+                        dm_embed.set_footer(text="Template Engine Infrastructure")
+                        await interaction.user.send(embed=dm_embed)
+                    except Exception:
+                        pass
 
                 # Log to Subscription Channel
                 log_channel = interaction.guild.get_channel(SUBSCRIPTION_LOG_CHANNEL_ID) if interaction.guild else None
                 if log_channel:
                     log_embed = discord.Embed(
-                        title="💎 Account Verified & Premium Linked",
-                        description=f"User {interaction.user.mention} (`{interaction.user.name}`) verified via Roblox Bio!",
-                        color=0xF1C40F,
+                        title="💎 Account Verified & Synced",
+                        description=f"User {interaction.user.mention} (`{interaction.user.name}`) linked Roblox profile!",
+                        color=0xF1C40F if has_active_sub else 0x3b82f6,
                         timestamp=now
                     )
                     log_embed.add_field(name="Roblox Profile", value=f"@{exact_username} (`{roblox_id}`)", inline=True)
-                    log_embed.add_field(name="Expires At", value=f"<t:{int(expires_at.timestamp())}:R>", inline=True)
+                    log_embed.add_field(name="Subscription Status", value="👑 Active (30 Days)" if has_active_sub else "Standard Member (No Sub)", inline=True)
                     log_embed.set_footer(text="Template Engine Audit Log")
                     await log_channel.send(embed=log_embed)
 
+                status_msg = (
+                    f"Successfully verified and linked Roblox profile **@{exact_username}** (`{roblox_id}`) "
+                    f"with your Discord account!\n\n"
+                    f"• **TE Premium:** {'Activated (30 Days)' if has_active_sub else 'Inactive (Subscribe via /premium for perks)'}\n"
+                    f"• **Nickname Updated:** `{new_nickname if nickname_updated else 'Requires Manage Nicknames permission'}`\n"
+                    f"• **Website Status:** Accounts synced."
+                )
+
                 success_embed = discord.Embed(
-                    title="[ROBLOX ACCOUNT VERIFIED]",
-                    description=(
-                        f"Successfully verified and synced Roblox profile **@{exact_username}** (`{roblox_id}`) "
-                        f"with your Discord account!\n\n"
-                        f"• **TE Premium:** Activated (30 Days)\n"
-                        f"• **Nickname Updated:** `{new_nickname if nickname_updated else 'Requires Manage Nicknames permission'}`\n"
-                        f"• **Website Status:** Both accounts are now synced."
-                    ),
+                    title="[ROBLOX ACCOUNT LINKED]",
+                    description=status_msg,
                     color=0x2ecc71
                 )
                 success_embed.set_footer(text="Template Engine Infrastructure")
@@ -353,8 +399,9 @@ class VerificationPanelView(discord.ui.View):
             title="[YOUR VERIFICATION CODE]",
             description=(
                 f"Copy and paste this code into your Roblox profile **About** (Bio) section:\n\n"
-                f"```\n{code}\n```\n"
-                f"Once saved on Roblox, click the **Verify Bio** button to complete linking."
+                f"`{code}`\n\n"
+                f"⏳ **Expires in 10 minutes.**\n"
+                f"Once saved on Roblox, click **Verify Bio** to complete linking."
             ),
             color=0xF1C40F
         )
@@ -371,10 +418,10 @@ class VerificationPanelView(discord.ui.View):
             title="[HOW TO VERIFY YOUR ROBLOX ACCOUNT]",
             description=(
                 "Follow these simple steps to link your Roblox account with Discord:\n\n"
-                "1️⃣ Click **Generate Code** to receive your unique `TE-XXXXXX` code.\n"
+                "1️⃣ Click **Generate Code** to receive your single-tap code (`TE-XXXXXX`).\n"
                 "2️⃣ Go to your **Roblox Profile** → Edit Profile → **About**.\n"
                 "3️⃣ Paste the code into your bio and click **Save**.\n"
-                "4️⃣ Return here, click **Verify Bio**, and type your Roblox username.\n\n"
+                "4️⃣ Return here within 10 minutes, click **Verify Bio**, and enter your Roblox username.\n\n"
                 "✨ *Once verified, your accounts sync automatically on both Discord and the website!*"
             ),
             color=0x3b82f6
@@ -391,6 +438,7 @@ class UnsyncPanelView(discord.ui.View):
     async def unsync_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id_str = str(interaction.user.id)
         remove_user_roblox_link(user_id_str)
+        remove_user_premium(user_id_str)
 
         try:
             await interaction.user.edit(nick=None)
@@ -399,7 +447,7 @@ class UnsyncPanelView(discord.ui.View):
 
         embed = discord.Embed(
             title="[ACCOUNT UNSYNCED]",
-            description="Your Roblox account link has been removed. Server nickname reset.",
+            description="Your Roblox account link has been removed and server nickname reset.",
             color=0x2ecc71
         )
         embed.set_footer(text="Template Engine Infrastructure")
@@ -497,6 +545,12 @@ class BotCog(commands.Cog):
         for uid in expired_ids:
             remove_user_premium(uid)
             await self.remove_premium_role(uid)
+
+        # Cleanup expired pending verification codes (older than 10 mins)
+        for uid, data in list(PENDING_VERIFICATION_CODES.items()):
+            c_time = data.get("created_at")
+            if c_time and (now - c_time).total_seconds() > 600:
+                PENDING_VERIFICATION_CODES.pop(uid, None)
 
     @check_premium_expirations.before_loop
     async def before_check_expirations(self):
@@ -693,7 +747,6 @@ class BotCog(commands.Cog):
             async def handle_temp_channel_lifecycle():
                 total_seconds = td.total_seconds()
 
-                # Warning notification 1 minute prior to deletion if duration is over 2 mins
                 if total_seconds > 120:
                     await asyncio.sleep(total_seconds - 60)
                     warn_embed = discord.Embed(
@@ -710,7 +763,6 @@ class BotCog(commands.Cog):
                 else:
                     await asyncio.sleep(total_seconds)
 
-                # Final Expiration & Deletion
                 try:
                     del_embed = discord.Embed(
                         title="💥 Temporary Channel Expired",
