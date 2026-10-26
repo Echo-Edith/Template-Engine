@@ -269,7 +269,7 @@ class BotCog(commands.Cog):
                 description="You are not authorized to execute the /build command. Request permission via /build-allow.",
                 color=0xf43f5e
             )
-            err_embed.set_footer(text="Echo Studio Infrastructure")
+            err_embed.set_footer(text="Template Engine Infrastructure")
             await interaction.response.send_message(embed=err_embed, ephemeral=True)
             return
 
@@ -278,7 +278,7 @@ class BotCog(commands.Cog):
             description="Processing and deploying server blueprint...",
             color=0xeab308
         )
-        init_embed.set_footer(text="Echo Studio Infrastructure")
+        init_embed.set_footer(text="Template Engine Infrastructure")
         await interaction.response.send_message(embed=init_embed)
 
         blueprint_data = None
@@ -295,7 +295,7 @@ class BotCog(commands.Cog):
                 description=f"Error reading blueprint payload: {e}",
                 color=0xf43f5e
             )
-            err_fetch.set_footer(text="Echo Studio Infrastructure")
+            err_fetch.set_footer(text="Template Engine Infrastructure")
             await interaction.followup.send(embed=err_fetch)
             return
 
@@ -305,7 +305,7 @@ class BotCog(commands.Cog):
                 description="Valid JSON URL or attached blueprint file required.",
                 color=0xf43f5e
             )
-            err_invalid.set_footer(text="Echo Studio Infrastructure")
+            err_invalid.set_footer(text="Template Engine Infrastructure")
             await interaction.followup.send(embed=err_invalid)
             return
 
@@ -317,7 +317,7 @@ class BotCog(commands.Cog):
                 description=f"Bot is not present in target server ID {target_guild_id}.",
                 color=0xf43f5e
             )
-            err_guild.set_footer(text="Echo Studio Infrastructure")
+            err_guild.set_footer(text="Template Engine Infrastructure")
             await interaction.followup.send(embed=err_guild)
             return
 
@@ -328,7 +328,7 @@ class BotCog(commands.Cog):
             description=f"Successfully built server layout for {guild.name} ({guild.id}).",
             color=0x2ecc71
         )
-        done_embed.set_footer(text="Echo Studio Infrastructure")
+        done_embed.set_footer(text="Template Engine Infrastructure")
         await interaction.followup.send(embed=done_embed)
 
     # --- 2. /build-allow COMMAND (OWNER ONLY) ---
@@ -341,7 +341,7 @@ class BotCog(commands.Cog):
                 description="Restricted command. Bot owner access required.",
                 color=0xf43f5e
             )
-            err_owner.set_footer(text="Echo Studio Infrastructure")
+            err_owner.set_footer(text="Template Engine Infrastructure")
             await interaction.response.send_message(embed=err_owner, ephemeral=True)
             return
 
@@ -362,7 +362,7 @@ class BotCog(commands.Cog):
                 color=0xf43f5e
             )
 
-        embed.set_footer(text="Echo Studio Infrastructure")
+        embed.set_footer(text="Template Engine Infrastructure")
         await interaction.followup.send(embed=embed)
 
     # --- 3. UNIFIED /channel COMMAND (SERVER ADMINS ONLY) ---
@@ -444,7 +444,7 @@ class BotCog(commands.Cog):
         if act_val == "create":
             if not name:
                 err = discord.Embed(title="[MISSING PARAMETER]", description="Channel name parameter is required for creation.", color=0xf43f5e)
-                err.set_footer(text="Echo Studio Infrastructure")
+                err.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=err)
                 return
 
@@ -467,18 +467,18 @@ class BotCog(commands.Cog):
                     color=0x2ecc71
                 )
                 if topic: embed.add_field(name="Topic", value=topic, inline=False)
-                embed.set_footer(text="Echo Studio Infrastructure")
+                embed.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=embed)
             except Exception as e:
                 err_ch = discord.Embed(title="[CREATION ERROR]", description=f"Failed to create channel: {e}", color=0xf43f5e)
-                err_ch.set_footer(text="Echo Studio Infrastructure")
+                err_ch.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=err_ch)
 
         # ACTION: EDIT
         elif act_val == "edit":
             if not channel:
                 err = discord.Embed(title="[MISSING PARAMETER]", description="Target channel parameter is required for edit action.", color=0xf43f5e)
-                err.set_footer(text="Echo Studio Infrastructure")
+                err.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=err)
                 return
 
@@ -499,18 +499,18 @@ class BotCog(commands.Cog):
 
                 await channel.edit(**kwargs)
                 embed = discord.Embed(title="[CHANNEL UPDATED]", description=f"Successfully edited channel {channel.mention}.", color=0x2ecc71)
-                embed.set_footer(text="Echo Studio Infrastructure")
+                embed.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=embed)
             except Exception as e:
                 err_edit = discord.Embed(title="[EDIT ERROR]", description=f"Failed to edit channel: {e}", color=0xf43f5e)
-                err_edit.set_footer(text="Echo Studio Infrastructure")
+                err_edit.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=err_edit)
 
         # ACTION: TEMPORARY
         elif act_val == "temporary":
             if not name:
                 err = discord.Embed(title="[MISSING PARAMETER]", description="Channel name parameter is required for temporary channels.", color=0xf43f5e)
-                err.set_footer(text="Echo Studio Infrastructure")
+                err.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=err)
                 return
 
@@ -528,7 +528,7 @@ class BotCog(commands.Cog):
                     description=f"Created temporary channel {temp_ch.mention}. Auto-deletes in {duration_minutes} minute(s).",
                     color=0xeab308
                 )
-                embed.set_footer(text="Echo Studio Infrastructure")
+                embed.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=embed)
 
                 async def auto_delete():
@@ -540,7 +540,7 @@ class BotCog(commands.Cog):
                 asyncio.create_task(auto_delete())
             except Exception as e:
                 err_temp = discord.Embed(title="[TEMP ERROR]", description=f"Failed to create temporary channel: {e}", color=0xf43f5e)
-                err_temp.set_footer(text="Echo Studio Infrastructure")
+                err_temp.set_footer(text="Template Engine Infrastructure")
                 await interaction.followup.send(embed=err_temp)
 
     @channel_management.error
@@ -551,7 +551,7 @@ class BotCog(commands.Cog):
                 description="Administrator permission 'Manage Channels' is required to execute this command.",
                 color=0xf43f5e
             )
-            err_perm.set_footer(text="Echo Studio Infrastructure")
+            err_perm.set_footer(text="Template Engine Infrastructure")
             if interaction.response.is_done():
                 await interaction.followup.send(embed=err_perm, ephemeral=True)
             else:
@@ -580,7 +580,7 @@ class BotCog(commands.Cog):
         embed.add_field(name="3. Thread & Forum Automation", value="Enable auto-thread creation on support and topic channels.", inline=False)
         embed.add_field(name="4. Premium Design Presets", value="Access Minimalist, Corporate, Community, and Gaming presets.", inline=False)
         embed.add_field(name="5. Exclusive Gold Role Badge", value=f"Receive the {PREMIUM_ROLE_NAME} gold role across official servers.", inline=False)
-        embed.set_footer(text="Echo Studio Infrastructure")
+        embed.set_footer(text="Template Engine Infrastructure")
 
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="Subscribe via Roblox Store", url=roblox_store_url, style=discord.ButtonStyle.link))
@@ -605,7 +605,7 @@ class BotCog(commands.Cog):
                 description="Restricted command. Bot owner access required.",
                 color=0xf43f5e
             )
-            err_owner.set_footer(text="Echo Studio Infrastructure")
+            err_owner.set_footer(text="Template Engine Infrastructure")
             await interaction.response.send_message(embed=err_owner, ephemeral=True)
             return
 
@@ -645,7 +645,7 @@ class BotCog(commands.Cog):
             description=f"Latency: {latency_ms} ms",
             color=0x3b82f6
         )
-        embed.set_footer(text="Echo Studio Infrastructure")
+        embed.set_footer(text="Template Engine Infrastructure")
         await interaction.response.send_message(embed=embed)
 
     # --- 7. /nuke COMMAND (OWNER ONLY) ---
@@ -657,7 +657,7 @@ class BotCog(commands.Cog):
                 description="Restricted command. Bot owner access required.",
                 color=0xf43f5e
             )
-            err_owner.set_footer(text="Echo Studio Infrastructure")
+            err_owner.set_footer(text="Template Engine Infrastructure")
             await interaction.response.send_message(embed=err_owner, ephemeral=True)
             return
 
@@ -666,21 +666,21 @@ class BotCog(commands.Cog):
             description="Wiping guild channels and non-default roles...",
             color=0xf43f5e
         )
-        nuke_embed.set_footer(text="Echo Studio Infrastructure")
+        nuke_embed.set_footer(text="Template Engine Infrastructure")
         await interaction.response.send_message(embed=nuke_embed)
         await self.wipe_guild_infrastructure(interaction.guild)
 
     # --- 8. /website COMMAND (PUBLIC) ---
-    @app_commands.command(name="website", description="Get the official Echo Studio website link.")
+    @app_commands.command(name="website", description="Get the official Template Engine website link.")
     async def website_link(self, interaction: discord.Interaction):
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
         
         embed = discord.Embed(
-            title="[ECHO STUDIO WEBSITE]",
+            title="[TEMPLATE ENGINE WEBSITE]",
             description=f"Access the interactive layout generator and dashboard online:\n{website_url}",
             color=0x3b82f6
         )
-        embed.set_footer(text="Echo Studio Infrastructure")
+        embed.set_footer(text="Template Engine Infrastructure")
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="Open Website", url=website_url, style=discord.ButtonStyle.link))
         
@@ -709,7 +709,7 @@ class BotCog(commands.Cog):
                         description=f"Bot is missing from target server ID {target_server_id}. Direct message sent to user.",
                         color=0xeab308
                     )
-                    ch_embed.set_footer(text="Echo Studio Infrastructure")
+                    ch_embed.set_footer(text="Template Engine Infrastructure")
                     await target_channel.send(embed=ch_embed)
                 except Exception: pass
 
@@ -722,7 +722,7 @@ class BotCog(commands.Cog):
                             description=f"Your server design for ID {target_server_id} is ready.\n\nAdd bot link: {invite_url}",
                             color=0xeab308
                         )
-                        dm_embed.set_footer(text="Echo Studio Infrastructure")
+                        dm_embed.set_footer(text="Template Engine Infrastructure")
                         await usr.send(embed=dm_embed)
                 except Exception as e:
                     print(f"[DM Error] {e}")
@@ -736,7 +736,7 @@ class BotCog(commands.Cog):
                     description=f"Successfully built server layout for {guild.name} ({target_server_id}).",
                     color=0x2ecc71
                 )
-                done_embed.set_footer(text="Echo Studio Infrastructure")
+                done_embed.set_footer(text="Template Engine Infrastructure")
                 await target_channel.send(embed=done_embed)
         except Exception as build_err:
             if target_channel:
@@ -745,7 +745,7 @@ class BotCog(commands.Cog):
                     description=f"Error deploying to target server {target_server_id}: {str(build_err)}",
                     color=0xf43f5e
                 )
-                fail_embed.set_footer(text="Echo Studio Infrastructure")
+                fail_embed.set_footer(text="Template Engine Infrastructure")
                 await target_channel.send(embed=fail_embed)
 
     async def wipe_guild_infrastructure(self, guild: discord.Guild):
@@ -785,7 +785,7 @@ class BotCog(commands.Cog):
             description=f"Registered and synced {len(synced)} global slash command(s).",
             color=0x3b82f6
         )
-        sync_embed.set_footer(text="Echo Studio Infrastructure")
+        sync_embed.set_footer(text="Template Engine Infrastructure")
         await ctx.send(embed=sync_embed)
 
 
