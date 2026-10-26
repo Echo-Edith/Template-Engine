@@ -1,12 +1,11 @@
 import os
 import re
 import json
+import random
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, redirect, request, session, render_template, jsonify, send_from_directory
 from pymongo import MongoClient
-from google import genai
-from google.genai import types
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
@@ -14,20 +13,35 @@ TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-key-fallback").strip()
 
+# Enforce long-term persistent browser sessions (365 Days)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
 application = app
 handler = app
-
-app.config["SESSION_COOKIE_SECURE"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 BLUEPRINTS_DIR = "/tmp/blueprints" if os.getenv("VERCEL") else os.path.join(os.getcwd(), "blueprints")
 os.makedirs(BLUEPRINTS_DIR, exist_ok=True)
 
+# Discord Configuration
 CLIENT_ID = (os.getenv("DISCORD_CLIENT_ID") or "").strip()
 CLIENT_SECRET = (os.getenv("DISCORD_CLIENT_SECRET") or "").strip()
 BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
+
+# Roblox OAuth 2.0 Configuration
+ROBLOX_CLIENT_ID = (os.getenv("ROBLOX_CLIENT_ID") or "").strip()
+ROBLOX_CLIENT_SECRET = (os.getenv("ROBLOX_CLIENT_SECRET") or "").strip()
+ROBLOX_REDIRECT_URI = (os.getenv("ROBLOX_REDIRECT_URI") or "").strip()
+
 RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
+
+# Roblox Integration Configuration
+ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
+ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
+ROBLOX_STORE_URL = (os.getenv("ROBLOX_STORE_URL") or f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store").strip()
 
 # Target Log Channels
 DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
@@ -35,9 +49,7 @@ PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "15635441
 
 SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
-DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 
-# External Bot Runner URL for Handshake
 BOT_API_PORT = int(os.getenv("BOT_PORT", "10000"))
 BOT_SERVER_URL = (os.getenv("BOT_SERVER_URL") or f"http://127.0.0.1:{BOT_API_PORT}").rstrip("/")
 BOT_HANDSHAKE_URL = f"{BOT_SERVER_URL}/api/auto-build"
@@ -46,15 +58,13 @@ MONGO_URI = os.getenv("MONGO_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
-
-GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro"
-]
+ROBLOX_OAUTH_AUTH_URL = "https://apis.roblox.com/oauth/v1/authorize"
+ROBLOX_OAUTH_TOKEN_URL = "https://apis.roblox.com/oauth/v1/token"
+ROBLOX_USERINFO_URL = "https://apis.roblox.com/oauth/v1/userinfo"
 
 db_bans = None
 db_premium = None
+db_users = None
 
 if MONGO_URI:
     try:
@@ -65,11 +75,79 @@ if MONGO_URI:
             db = mongo_client.get_database("static_studio_db")
         db_bans = db["bans"]
         db_premium = db["premium_users"]
+        db_users = db["persistent_users"]
     except Exception as e:
         print(f"[MongoDB Warning] Could not connect to Mongo: {e}")
 
 WEBSITE_BANS = {}
 LOCAL_PREMIUM_USERS = {}
+LOCAL_PERSISTENT_USERS = {}
+
+
+@app.before_request
+def make_session_permanent():
+    session.permanent = True
+
+
+def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict = None):
+    if not discord_id:
+        return
+    discord_id_str = str(discord_id)
+    now = datetime.now(timezone.utc).isoformat()
+
+    update_payload = {
+        "discord_id": discord_id_str,
+        "discord_data": discord_data,
+        "updated_at": now
+    }
+    if roblox_data:
+        update_payload["roblox_data"] = roblox_data
+
+    if db_users is not None:
+        try:
+            db_users.update_one(
+                {"discord_id": discord_id_str},
+                {"$set": update_payload},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[User Persistence Error] {e}")
+    else:
+        existing = LOCAL_PERSISTENT_USERS.get(discord_id_str, {})
+        existing.update(update_payload)
+        LOCAL_PERSISTENT_USERS[discord_id_str] = existing
+
+
+def load_user_session_db(discord_id: str) -> dict:
+    if not discord_id:
+        return {}
+    discord_id_str = str(discord_id)
+
+    if db_users is not None:
+        try:
+            return db_users.find_one({"discord_id": discord_id_str}) or {}
+        except Exception as e:
+            print(f"[Load User Error] {e}")
+            return {}
+    return LOCAL_PERSISTENT_USERS.get(discord_id_str, {})
+
+
+def set_user_premium(user_id: str, duration_td: timedelta = timedelta(days=30)):
+    user_id_str = str(user_id)
+    now = datetime.now(timezone.utc)
+    expires_at = now + duration_td
+
+    if db_premium is not None:
+        try:
+            db_premium.update_one(
+                {"user_id": user_id_str},
+                {"$set": {"user_id": user_id_str, "expires_at": expires_at.isoformat(), "updated_at": now.isoformat()}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Set Premium Error] {e}")
+    else:
+        LOCAL_PREMIUM_USERS[user_id_str] = expires_at
 
 
 def is_user_premium(user_id: str) -> bool:
@@ -121,6 +199,12 @@ def get_redirect_uri() -> str:
     return f"{get_base_url()}/callback"
 
 
+def get_roblox_redirect_uri() -> str:
+    if ROBLOX_REDIRECT_URI and ROBLOX_REDIRECT_URI.strip():
+        return ROBLOX_REDIRECT_URI.strip()
+    return f"{get_base_url()}/roblox/callback"
+
+
 def calculate_account_age(discord_id: str) -> str:
     try:
         snowflake = int(discord_id)
@@ -151,17 +235,10 @@ def is_user_banned(user_id):
 
 
 def send_bot_native_log(channel_id: str, embed_payload: dict) -> bool:
-    """Posts directly to Discord API using BOT_TOKEN."""
     if not BOT_TOKEN:
-        print("[Bot Log Error] BOT_TOKEN is missing from Vercel Environment Variables!")
         return False
 
     target_channel = str(channel_id).strip()
-    if target_channel.startswith("http"):
-        match = re.search(r"/webhooks/(\d+)/", target_channel)
-        if match:
-            target_channel = match.group(1)
-
     url = f"{DISCORD_API_BASE_URL}/channels/{target_channel}/messages"
     headers = {
         "Authorization": f"Bot {BOT_TOKEN}",
@@ -172,45 +249,28 @@ def send_bot_native_log(channel_id: str, embed_payload: dict) -> bool:
 
     try:
         res = requests.post(url, headers=headers, json=body, timeout=8)
-        if res.status_code in (200, 201):
-            print(f"[Discord API Log Success] Posted to channel: {target_channel}")
-            return True
-        print(f"[Discord API Log Failed] Status: {res.status_code}, Resp: {res.text}")
+        return res.status_code in (200, 201)
     except Exception as e:
         print(f"[Discord API Log Exception] {e}")
 
     return False
 
 
-def send_discord_webhook_log(webhook_url: str, embed_payload: dict) -> bool:
-    """Fallback webhook log dispatcher."""
-    if not webhook_url or not str(webhook_url).startswith("http"):
-        return False
-
-    body = {"embeds": [embed_payload]}
-    try:
-        res = requests.post(str(webhook_url).strip(), json=body, timeout=5)
-        return res.status_code in (200, 204)
-    except Exception as e:
-        print(f"[Webhook Log Exception] {e}")
-        return False
-
-
 def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_desc: str, color: int = 0x8b5cf6, extra_fields: dict = None):
     user_data = user_data or {}
     user_id = str(user_data.get("id", "0"))
-    username = user_data.get("username", "Anonymous / Unauthenticated")
+    username = user_data.get("username", "Anonymous")
     account_age = calculate_account_age(user_id) if user_id != "0" else "Unknown"
 
     has_premium = is_user_premium(user_id)
-    premium_tag = "👑 **[TE PREMIUM MEMBER]**" if has_premium else "Standard User"
+    premium_tag = "[TE PREMIUM MEMBER]" if has_premium else "Standard User"
 
     user_info_block = (
-        f"**User:** <@{user_id}>\n"
-        f"**Membership:** {premium_tag}\n"
-        f"**Username:** `{username}`\n"
-        f"**User ID:** `{user_id}`\n"
-        f"**Account Age:** `{account_age}`"
+        f"User: <@{user_id}>\n"
+        f"Membership: {premium_tag}\n"
+        f"Username: `{username}`\n"
+        f"User ID: `{user_id}`\n"
+        f"Account Age: `{account_age}`"
     )
 
     fields = [
@@ -220,21 +280,7 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
 
     if extra_fields:
         for k, v in extra_fields.items():
-            val_str = str(v)
-            if k in ("Invite Link", "Build Command", "Blueprint File"):
-                field_val = val_str
-            elif k == "Target Server ID":
-                field_val = f"`{val_str}`"
-            elif len(val_str) > 800:
-                field_val = f"```json\n{val_str[:750]}\n...```"
-            else:
-                field_val = f"`{val_str}`"
-
-            fields.append({
-                "name": k,
-                "value": field_val,
-                "inline": False
-            })
+            fields.append({"name": k, "value": f"`{v}`", "inline": False})
 
     embed = {
         "title": title,
@@ -244,29 +290,24 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    # 1. Post natively to Discord Channel API via Bot Token
-    success = send_bot_native_log(channel_source, embed)
-    if success:
-        return True
-
-    # 2. Fallback to Webhook if Bot Token posting fails
-    return send_discord_webhook_log(channel_source, embed)
-
-
-def trigger_bot_direct_build(payload: dict):
-    """Dispatches auto-build handshake request to Render bot runner."""
-    try:
-        res = requests.post(BOT_HANDSHAKE_URL, json=payload, timeout=3)
-        print(f"[Bot Handshake Dispatch] Status: {res.status_code}")
-        return res.status_code == 200
-    except Exception as e:
-        print(f"[Bot Handshake Notice] Could not reach bot runner on {BOT_HANDSHAKE_URL} (it may be sleeping): {e}")
-        return False
+    send_bot_native_log(channel_source, embed)
 
 
 @app.route("/")
 def home():
     user = session.get("user")
+    roblox_user = session.get("roblox_user")
+
+    # Re-hydrate from persistent MongoDB session if session missing in memory
+    if not user and session.get("user_id"):
+        db_record = load_user_session_db(session["user_id"])
+        if db_record:
+            user = db_record.get("discord_data")
+            roblox_user = roblox_user or db_record.get("roblox_data")
+            session["user"] = user
+            if roblox_user:
+                session["roblox_user"] = roblox_user
+
     user_is_premium = False
     if user:
         user_is_premium = is_user_premium(user.get("id"))
@@ -276,26 +317,31 @@ def home():
                 "index.html",
                 is_banned=True,
                 user=user,
+                roblox_user=roblox_user,
                 is_premium=user_is_premium,
                 dev_message=ban_info.get("message_from_dev", "Suspended by developer."),
                 recaptcha_site_key=RECAPTCHA_SITE_KEY,
-                discord_client_id=CLIENT_ID
+                discord_client_id=CLIENT_ID,
+                roblox_store_url=ROBLOX_STORE_URL
             )
 
     return render_template(
         "index.html",
         is_banned=False,
         user=user,
+        roblox_user=roblox_user,
         is_premium=user_is_premium,
         recaptcha_site_key=RECAPTCHA_SITE_KEY,
-        discord_client_id=CLIENT_ID
+        discord_client_id=CLIENT_ID,
+        roblox_store_url=ROBLOX_STORE_URL
     )
 
 
+# --- DISCORD OAUTH2 LOGIN & CALLBACK ---
 @app.route("/login")
 def login():
     if not CLIENT_ID:
-        return "Error: DISCORD_CLIENT_ID is not configured in Environment Variables.", 500
+        return "Error: DISCORD_CLIENT_ID is not configured.", 500
 
     redirect_uri = get_redirect_uri()
     discord_auth_url = (
@@ -341,216 +387,114 @@ def callback():
             avatar_hash = user_data.get("avatar")
             avatar_url = f"https://cdn.discordapp.com/avatars/{user_data['id']}/{avatar_hash}.png" if avatar_hash else "https://cdn.discordapp.com/embed/avatars/0.png"
 
-            session["user"] = {
+            user_obj = {
                 "id": user_data["id"],
                 "username": user_data["username"],
                 "discriminator": user_data.get("discriminator", "0"),
                 "avatar": avatar_url
             }
 
-            try:
-                log_event_via_bot(
-                    channel_source=PREMIUM_DESIGN_CHANNEL_ID,
-                    title="[Website Login Logged]",
-                    user_data=user_data,
-                    action_desc="Authenticated via Discord OAuth2 and accessed dashboard.",
-                    color=0x3b82f6
-                )
-            except Exception as le:
-                print(f"[Login Log Error] {le}")
+            session["user"] = user_obj
+            session["user_id"] = user_data["id"]
+
+            # Save persistent user record in MongoDB
+            save_user_session_db(user_data["id"], user_obj, session.get("roblox_user"))
+
+            log_event_via_bot(
+                channel_source=PREMIUM_DESIGN_CHANNEL_ID,
+                title="[Website Login Logged]",
+                user_data=user_data,
+                action_desc="Authenticated via Discord OAuth2.",
+                color=0x3b82f6
+            )
     except Exception as e:
         print(f"[OAuth Callback Error] {e}")
 
     return redirect("/")
 
 
-@app.route("/api/verify-captcha", methods=["POST"])
-def verify_captcha():
-    data = request.get_json() or {}
-    token = data.get("token")
-    if not token or not RECAPTCHA_SECRET_KEY:
-        return jsonify({"success": True}), 200
+# --- ROBLOX OAUTH 2.0 LOGIN & CALLBACK ---
+@app.route("/roblox/login")
+def roblox_login():
+    if not ROBLOX_CLIENT_ID:
+        return "Error: ROBLOX_CLIENT_ID is not configured in Vercel environment variables.", 500
 
-    try:
-        verify_res = requests.post(
-            "https://www.google.com/recaptcha/api/siteverify",
-            data={"secret": RECAPTCHA_SECRET_KEY, "response": token},
-            timeout=5
-        ).json()
-        return jsonify({"success": verify_res.get("success", False)})
-    except Exception:
-        return jsonify({"success": True}), 200
-
-
-@app.route("/api/generate", methods=["POST"])
-def api_generate():
-    user = session.get("user")
-    if not user:
-        return jsonify({
-            "success": False,
-            "error": "Authentication required. Please log in with Discord first.",
-            "redirect": "/login"
-        }), 401
-
-    data = request.get_json() or {}
-    prompt = data.get("prompt", "")
-    server_id = data.get("server_id", "")
-
-    if not prompt:
-        return jsonify({"success": False, "error": "Prompt description is required."}), 400
-
-    if not GEMINI_API_KEY:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY missing on server."}), 500
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
-    system_instruction = (
-        "You are an expert Discord Infrastructure Architect. Output ONLY valid JSON representing a Discord server layout."
-        " Required structure:\n"
-        "{\n"
-        '  "server_name": "String",\n'
-        '  "roles": [{"name": "Role Name", "color": "#HexColor"}],\n'
-        '  "categories": [\n'
-        "    {\n"
-        '      "name": "CATEGORY NAME",\n'
-        '      "channels": [\n'
-        "        {\n"
-        '          "name": "channel-name",\n'
-        '          "type": "text|voice|announcement",\n'
-        '          "topic": "Description",\n'
-        '          "read_only": false,\n'
-        '          "permissions": {"view": true, "send": true, "embed": true, "attach": true}\n'
-        "        }\n"
-        "      ]\n"
-        "    }\n"
-        "  ]\n"
-        "}"
+    redirect_uri = get_roblox_redirect_uri()
+    roblox_auth_url = (
+        f"{ROBLOX_OAUTH_AUTH_URL}"
+        f"?client_id={ROBLOX_CLIENT_ID}"
+        f"&redirect_uri={requests.utils.quote(redirect_uri, safe='')}"
+        f"&scope=openid%20profile"
+        f"&response_type=code"
     )
-
-    last_error = None
-    layout_data = None
-    used_model = None
-
-    for model_name in GEMINI_MODELS:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=f"Create layout for: {prompt}",
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    temperature=0.7
-                )
-            )
-            layout_data = json.loads(response.text)
-            used_model = model_name
-            break
-        except Exception as e:
-            last_error = e
-            continue
-
-    if not layout_data:
-        return jsonify({
-            "success": False,
-            "error": f"All Gemini models experienced error. Last Error: {str(last_error)}"
-        }), 503
-
-    layout_data["build_meta"] = {
-        "target_server_id": server_id,
-        "prompt": prompt,
-        "model_used": used_model
-    }
-
-    return jsonify({"success": True, "data": layout_data, "model_used": used_model})
+    return redirect(roblox_auth_url)
 
 
-@app.route("/api/submit-design", methods=["POST"])
-def submit_design():
+@app.route("/roblox/callback")
+def roblox_callback():
+    code = request.args.get("code")
+    if not code:
+        return redirect("/")
+
     user = session.get("user")
-    if not user:
-        return jsonify({
-            "success": False,
-            "error": "Authentication required. Please log in with Discord first.",
-            "redirect": "/login"
-        }), 401
 
-    data = request.get_json() or {}
-    target_server_id = str(data.get("target_server_id", "Not Provided")).strip()
-    server_name = data.get("server_name", "Custom Server")
-    invite_link = data.get("invite_link", "Not Provided")
-    prompt = data.get("prompt", "Not Provided")
-    categories_count = data.get("categories_count", 0)
-    channels_count = data.get("channels_count", 0)
-    roles_count = data.get("roles_count", 0)
-
-    layout = data.get("layout") or data.get("build_file") or data.get("file")
-    has_premium = is_user_premium(user.get("id"))
-
-    file_id = f"blueprint_{int(datetime.now().timestamp() * 1000)}"
-    filename = f"{file_id}.json"
-    file_path = os.path.join(BLUEPRINTS_DIR, filename)
-
-    blueprint_content = layout if layout else data
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(blueprint_content, f, indent=2)
-    except Exception as e:
-        print(f"[Blueprint File Save Error] {e}")
-
-    blueprint_url = f"{get_base_url()}/blueprint/{filename}"
-    build_command_text = f"`/build url: {blueprint_url}`"
-
-    target_channel = PREMIUM_DESIGN_CHANNEL_ID if has_premium else DESIGN_CHANNEL_ID
-    log_title = "👑 [TE PREMIUM] Blueprint Submitted" if has_premium else "[New Blueprint Submitted]"
-
-    extra_fields = {
-        "Server Name": server_name,
-        "Target Server ID": target_server_id,
-        "Invite Link": invite_link,
-        "Prompt Description": prompt[:500] if isinstance(prompt, str) else str(prompt),
-        "Blueprint File": blueprint_url,
-        "Build Command": build_command_text,
-        "Architecture Overview": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`"
+    redirect_uri = get_roblox_redirect_uri()
+    payload = {
+        "client_id": ROBLOX_CLIENT_ID,
+        "client_secret": ROBLOX_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri
     }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-    # 1. ALWAYS post the Discord log directly from Vercel via Bot Token
-    log_success = False
     try:
-        log_success = log_event_via_bot(
-            channel_source=target_channel,
-            title=log_title,
-            user_data=user,
-            action_desc="User submitted a server layout blueprint.",
-            color=0xf1c40f if has_premium else 0x2ecc71,
-            extra_fields=extra_fields
-        )
-    except Exception as err:
-        print(f"[Submit Log Error] {err}")
+        token_res = requests.post(ROBLOX_OAUTH_TOKEN_URL, data=payload, headers=headers)
+        if token_res.status_code != 200:
+            return f"Roblox OAuth Error ({token_res.status_code}): {token_res.text}", 400
 
-    # 2. Trigger auto-build handshake to Render bot runner
-    if has_premium:
-        handshake_payload = {
-            "user_id": str(user.get("id")),
-            "target_server_id": target_server_id,
-            "blueprint_url": blueprint_url,
-            "blueprint_data": blueprint_content,
-            "log_channel_id": target_channel,
-            "user_data": user
-        }
-        trigger_bot_direct_build(handshake_payload)
+        tokens = token_res.json()
+        access_token = tokens.get("access_token")
 
-    return jsonify({
-        "success": True,
-        "message": "Blueprint successfully submitted!",
-        "url": blueprint_url,
-        "is_premium": has_premium,
-        "logged": log_success
-    })
+        # Fetch Roblox User Profile Data
+        u_headers = {"Authorization": f"Bearer {access_token}"}
+        u_res = requests.get(ROBLOX_USERINFO_URL, headers=u_headers)
 
+        if u_res.status_code == 200:
+            r_data = u_res.json()
+            roblox_user_id = str(r_data.get("sub", ""))
+            roblox_username = r_data.get("preferred_username") or r_data.get("name") or "Roblox User"
 
-@app.route("/blueprint/<path:filename>")
-def serve_blueprint(filename):
-    return send_from_directory(BLUEPRINTS_DIR, filename, mimetype="application/json")
+            roblox_obj = {
+                "id": roblox_user_id,
+                "username": roblox_username
+            }
+
+            session["roblox_user"] = roblox_obj
+
+            if user:
+                # Save linked Roblox user permanently to MongoDB
+                save_user_session_db(user["id"], user, roblox_obj)
+
+                # Grant 30 Days TE Premium upon linking Roblox account
+                set_user_premium(user["id"], timedelta(days=30))
+
+                log_event_via_bot(
+                    channel_source=PREMIUM_DESIGN_CHANNEL_ID,
+                    title="[Roblox Account Linked & TE Premium Granted]",
+                    user_data=user,
+                    action_desc=f"Successfully linked Roblox OAuth account `{roblox_username}` (`{roblox_user_id}`). TE Premium granted.",
+                    color=0xf1c40f,
+                    extra_fields={
+                        "Roblox Username": roblox_username,
+                        "Roblox User ID": roblox_user_id,
+                        "Subscription ID": ROBLOX_SUBSCRIPTION_ID
+                    }
+                )
+    except Exception as e:
+        print(f"[Roblox Callback Exception] {e}")
+
+    return redirect("/")
 
 
 @app.route("/logout")
