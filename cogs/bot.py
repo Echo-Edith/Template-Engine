@@ -15,6 +15,7 @@ BOT_OWNER_ID = 1219266886143967245
 MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
 db_build_access = None
+db_users = None
 
 if MONGO_URI:
     try:
@@ -25,11 +26,14 @@ if MONGO_URI:
             db = mongo_client["static_studio_db"]
         db_premium = db["premium_users"]
         db_build_access = db["build_authorized_users"]
+        db_users = db["persistent_users"]
     except Exception as e:
         print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
 
 LOCAL_PREMIUM_USERS = {}
 LOCAL_AUTHORIZED_BUILDERS = set()
+LOCAL_PERSISTENT_USERS = {}
+PENDING_VERIFICATION_CODES = {}
 
 PREMIUM_ROLE_NAME = "Template Engine Premium"
 PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)
@@ -92,6 +96,53 @@ def remove_user_premium(user_id: str):
         LOCAL_PREMIUM_USERS.pop(user_id_str, None)
 
 
+def save_user_roblox_link(discord_id: str, discord_username: str, roblox_id: str, roblox_username: str):
+    discord_id_str = str(discord_id)
+    now = datetime.now(timezone.utc).isoformat()
+    roblox_data = {"id": str(roblox_id), "username": roblox_username}
+
+    if db_users is not None:
+        try:
+            db_users.update_one(
+                {"discord_id": discord_id_str},
+                {
+                    "$set": {
+                        "discord_id": discord_id_str,
+                        "discord_data": {"id": discord_id_str, "username": discord_username},
+                        "roblox_data": roblox_data,
+                        "updated_at": now
+                    }
+                },
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo User Sync Error] {e}")
+    else:
+        existing = LOCAL_PERSISTENT_USERS.get(discord_id_str, {})
+        existing.update({
+            "discord_id": discord_id_str,
+            "discord_data": {"id": discord_id_str, "username": discord_username},
+            "roblox_data": roblox_data,
+            "updated_at": now
+        })
+        LOCAL_PERSISTENT_USERS[discord_id_str] = existing
+
+
+def remove_user_roblox_link(discord_id: str):
+    discord_id_str = str(discord_id)
+    if db_users is not None:
+        try:
+            db_users.update_one(
+                {"discord_id": discord_id_str},
+                {"$unset": {"roblox_data": ""}}
+            )
+        except Exception as e:
+            print(f"[Mongo User Unlink Error] {e}")
+    else:
+        if discord_id_str in LOCAL_PERSISTENT_USERS:
+            LOCAL_PERSISTENT_USERS[discord_id_str].pop("roblox_data", None)
+
+
 def is_user_authorized_for_build(user_id: str) -> bool:
     user_id_str = str(user_id)
     if int(user_id_str) == BOT_OWNER_ID:
@@ -125,6 +176,189 @@ def toggle_user_build_authorization(user_id: str) -> bool:
         else:
             LOCAL_AUTHORIZED_BUILDERS.add(user_id_str)
             return True
+
+
+# --- MODAL FOR ROBLOX VERIFICATION INPUT ---
+class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
+    roblox_username = discord.ui.TextInput(
+        label="Exact Roblox Username",
+        placeholder="e.g. Builderman",
+        required=True,
+        min_length=3,
+        max_length=30
+    )
+
+    async on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user_id_str = str(interaction.user.id)
+        code_data = PENDING_VERIFICATION_CODES.get(user_id_str)
+
+        if not code_data:
+            err_embed = discord.Embed(
+                title="[CODE NOT FOUND]",
+                description="Please click **Generate Code** first before verifying.",
+                color=0xf43f5e
+            )
+            err_embed.set_footer(text="Template Engine Infrastructure")
+            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            return
+
+        code = code_data["code"]
+        target_username = self.roblox_username.value.strip()
+
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                # Step 1: Resolve Roblox Username to User ID
+                async with session.post(
+                    "https://users.roblox.com/v1/usernames/users",
+                    json={"usernames": [target_username], "excludeBannedUsers": False}
+                ) as res:
+                    res_data = await res.json()
+
+                if not res_data.get("data") or len(res_data["data"]) == 0:
+                    err = discord.Embed(
+                        title="[ROBLOX USER NOT FOUND]",
+                        description=f"Roblox account `@{target_username}` was not found.",
+                        color=0xf43f5e
+                    )
+                    err.set_footer(text="Template Engine Infrastructure")
+                    await interaction.followup.send(embed=err, ephemeral=True)
+                    return
+
+                roblox_id = res_data["data"][0]["id"]
+                exact_username = res_data["data"][0]["name"]
+
+                # Step 2: Fetch Profile Bio
+                async with session.get(f"https://users.roblox.com/v1/users/{roblox_id}") as profile_res:
+                    profile_data = await profile_res.json()
+                    bio_text = profile_data.get("description", "")
+
+                # Step 3: Check Verification Code
+                if code not in bio_text:
+                    err = discord.Embed(
+                        title="[VERIFICATION FAILED]",
+                        description=(
+                            f"Code `{code}` was not found in the bio for `@{exact_username}`.\n\n"
+                            f"Please ensure you saved the code in your Roblox profile bio and try again."
+                        ),
+                        color=0xf43f5e
+                    )
+                    err.set_footer(text="Template Engine Infrastructure")
+                    await interaction.followup.send(embed=err, ephemeral=True)
+                    return
+
+                # Step 4: Link Accounts & Update Nickname
+                save_user_roblox_link(
+                    discord_id=user_id_str,
+                    discord_username=interaction.user.name,
+                    roblox_id=str(roblox_id),
+                    roblox_username=exact_username
+                )
+                set_user_premium(user_id_str, timedelta(days=30))
+
+                new_nickname = f"{interaction.user.name} ({exact_username})"
+                if len(new_nickname) > 32:
+                    new_nickname = new_nickname[:29] + "..."
+
+                nickname_updated = False
+                try:
+                    await interaction.user.edit(nick=new_nickname)
+                    nickname_updated = True
+                except Exception:
+                    pass
+
+                success_embed = discord.Embed(
+                    title="[ROBLOX ACCOUNT VERIFIED]",
+                    description=(
+                        f"Successfully verified and synced Roblox profile **@{exact_username}** (`{roblox_id}`) "
+                        f"with your Discord account!\n\n"
+                        f"• **TE Premium:** Activated (30 Days)\n"
+                        f"• **Nickname Updated:** `{new_nickname if nickname_updated else 'Requires Manage Nicknames permission'}`\n"
+                        f"• **Website Status:** Both accounts are now synced."
+                    ),
+                    color=0x2ecc71
+                )
+                success_embed.set_footer(text="Template Engine Infrastructure")
+                await interaction.followup.send(embed=success_embed, ephemeral=True)
+
+        except Exception as e:
+            err = discord.Embed(
+                title="[VERIFICATION ERROR]",
+                description=f"An error occurred while contacting Roblox servers: {e}",
+                color=0xf43f5e
+            )
+            err.set_footer(text="Template Engine Infrastructure")
+            await interaction.followup.send(embed=err, ephemeral=True)
+
+
+# --- INTERACTIVE VIEWS FOR DISCORD VERIFICATION ---
+class VerificationPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Generate Code", style=discord.ButtonStyle.primary, custom_id="btn_gen_code", emoji="🔑")
+    async def generate_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id_str = str(interaction.user.id)
+        import random
+        code = f"TE-{random.randint(100000, 999999)}"
+        PENDING_VERIFICATION_CODES[user_id_str] = {"code": code, "created_at": datetime.now(timezone.utc)}
+
+        embed = discord.Embed(
+            title="[YOUR VERIFICATION CODE]",
+            description=(
+                f"Copy and paste this code into your Roblox profile **About** (Bio) section:\n\n"
+                f"```\n{code}\n```\n"
+                f"Once saved on Roblox, click the **Verify Bio** button to complete linking."
+            ),
+            color=0xF1C40F
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Verify Bio", style=discord.ButtonStyle.success, custom_id="btn_verify_bio", emoji="✅")
+    async def verify_bio_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RobloxVerifyModal())
+
+    @discord.ui.button(label="Help & Instructions", style=discord.ButtonStyle.secondary, custom_id="btn_help_bio", emoji="❓")
+    async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        help_embed = discord.Embed(
+            title="[HOW TO VERIFY YOUR ROBLOX ACCOUNT]",
+            description=(
+                "Follow these simple steps to link your Roblox account with Discord:\n\n"
+                "1️⃣ Click **Generate Code** to receive your unique `TE-XXXXXX` code.\n"
+                "2️⃣ Go to your **Roblox Profile** → Edit Profile → **About**.\n"
+                "3️⃣ Paste the code into your bio and click **Save**.\n"
+                "4️⃣ Return here, click **Verify Bio**, and type your Roblox username.\n\n"
+                "✨ *Once verified, your accounts sync automatically on both Discord and the website!*"
+            ),
+            color=0x3b82f6
+        )
+        help_embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=help_embed, ephemeral=True)
+
+
+class UnsyncPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Unsync Account", style=discord.ButtonStyle.danger, custom_id="btn_unsync_acc", emoji="🔗")
+    async def unsync_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id_str = str(interaction.user.id)
+        remove_user_roblox_link(user_id_str)
+
+        try:
+            await interaction.user.edit(nick=None)
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title="[ACCOUNT UNSYNCED]",
+            description="Your Roblox account link has been removed. Server nickname reset.",
+            color=0x2ecc71
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class BotCog(commands.Cog):
@@ -254,7 +488,89 @@ class BotCog(commands.Cog):
                 return f"{clean_emoji}-{clean_name}"
         return clean_name
 
-    # --- 1. /build COMMAND (AUTHORIZED USER IDs ONLY) ---
+    # --- 1. /verification-set COMMAND (OWNER ONLY) ---
+    @app_commands.command(name="verification-set", description="Post the Roblox verification panel in a channel (Owner restricted).")
+    @app_commands.describe(
+        location="Target channel to post verification panel",
+        title="Custom title for the verification panel",
+        description="Custom body text for the verification panel"
+    )
+    async def verification_set(
+        self,
+        interaction: discord.Interaction,
+        location: discord.TextChannel,
+        title: str = "Roblox Account Verification",
+        description: str = "Click Generate Code to link your Roblox profile and sync account benefits."
+    ):
+        if interaction.user.id != BOT_OWNER_ID:
+            err_owner = discord.Embed(
+                title="[RESTRICTED COMMAND]",
+                description="Restricted command. Bot owner access required.",
+                color=0xf43f5e
+            )
+            err_owner.set_footer(text="Template Engine Infrastructure")
+            await interaction.response.send_message(embed=err_owner, ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=0x8b5cf6
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+
+        await location.send(embed=embed, view=VerificationPanelView())
+
+        confirm_embed = discord.Embed(
+            title="[VERIFICATION PANEL DEPLOYED]",
+            description=f"Successfully deployed verification panel to {location.mention}.",
+            color=0x2ecc71
+        )
+        confirm_embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=confirm_embed, ephemeral=True)
+
+    # --- 2. /un-sync-set COMMAND (OWNER ONLY) ---
+    @app_commands.command(name="un-sync-set", description="Post the Roblox account unsync panel in a channel (Owner restricted).")
+    @app_commands.describe(
+        location="Target channel to post unsync panel",
+        title="Custom title for the unsync panel",
+        description="Custom body text for the unsync panel"
+    )
+    async def unsync_set(
+        self,
+        interaction: discord.Interaction,
+        location: discord.TextChannel,
+        title: str = "Unsync Roblox Account",
+        description: str = "Click the button below to unlink your Roblox account and reset your nickname."
+    ):
+        if interaction.user.id != BOT_OWNER_ID:
+            err_owner = discord.Embed(
+                title="[RESTRICTED COMMAND]",
+                description="Restricted command. Bot owner access required.",
+                color=0xf43f5e
+            )
+            err_owner.set_footer(text="Template Engine Infrastructure")
+            await interaction.response.send_message(embed=err_owner, ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=0xf43f5e
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+
+        await location.send(embed=embed, view=UnsyncPanelView())
+
+        confirm_embed = discord.Embed(
+            title="[UNSYNC PANEL DEPLOYED]",
+            description=f"Successfully deployed unsync panel to {location.mention}.",
+            color=0x2ecc71
+        )
+        confirm_embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=confirm_embed, ephemeral=True)
+
+    # --- 3. /build COMMAND (AUTHORIZED USER IDs ONLY) ---
     @app_commands.command(name="build", description="Deploys layout blueprint (Requires build authorization).")
     @app_commands.describe(
         url="Optional URL to blueprint JSON",
@@ -331,7 +647,7 @@ class BotCog(commands.Cog):
         done_embed.set_footer(text="Template Engine Infrastructure")
         await interaction.followup.send(embed=done_embed)
 
-    # --- 2. /build-allow COMMAND (OWNER ONLY) ---
+    # --- 4. /build-allow COMMAND (OWNER ONLY) ---
     @app_commands.command(name="build-allow", description="Toggle /build command authorization for a specific user.")
     @app_commands.describe(user="Target user to grant or revoke authorization")
     async def build_allow_toggle(self, interaction: discord.Interaction, user: discord.User):
@@ -365,199 +681,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="Template Engine Infrastructure")
         await interaction.followup.send(embed=embed)
 
-    # --- 3. UNIFIED /channel COMMAND (SERVER ADMINS ONLY) ---
-    @app_commands.command(name="channel", description="Create, edit, or set temporary channels with permission controls.")
-    @app_commands.checks.has_permissions(manage_channels=True)
-    @app_commands.choices(
-        action=[
-            app_commands.Choice(name="Create Channel", value="create"),
-            app_commands.Choice(name="Edit Channel", value="edit"),
-            app_commands.Choice(name="Temporary Channel", value="temporary")
-        ],
-        type=[
-            app_commands.Choice(name="Text Channel", value="text"),
-            app_commands.Choice(name="Voice Channel", value="voice"),
-            app_commands.Choice(name="Announcement Channel", value="announcement"),
-            app_commands.Choice(name="Thread Channel", value="threads")
-        ]
-    )
-    @app_commands.describe(
-        action="Action type: create, edit, or temporary",
-        name="Channel name",
-        category="Category channel placement",
-        channel="Target channel (Required for edit action)",
-        type="Channel type (text, voice, announcement, threads)",
-        emoji="Optional prefix string (Leave empty for none)",
-        topic="Channel topic description",
-        duration_minutes="Temporary auto-delete timer in minutes (Default: 10)",
-        view_permission="Allow @everyone to view channel (True/False)",
-        send_permission="Allow @everyone to send messages/connect (True/False)",
-        manage_permission="Allow @everyone to manage channel (True/False)",
-        embed_permission="Allow @everyone to embed links (True/False)",
-        attach_permission="Allow @everyone to attach files (True/False)",
-        history_permission="Allow @everyone to read message history (True/False)"
-    )
-    async def channel_management(
-        self,
-        interaction: discord.Interaction,
-        action: app_commands.Choice[str],
-        name: str = None,
-        category: discord.CategoryChannel = None,
-        channel: discord.abc.GuildChannel = None,
-        type: app_commands.Choice[str] = None,
-        emoji: str = None,
-        topic: str = None,
-        duration_minutes: int = 10,
-        view_permission: bool = None,
-        send_permission: bool = None,
-        manage_permission: bool = None,
-        embed_permission: bool = None,
-        attach_permission: bool = None,
-        history_permission: bool = None
-    ):
-        await interaction.response.defer(thinking=True)
-        act_val = action.value.lower()
-        c_type = (type.value if type else "text").lower().strip()
-
-        overwrites = {}
-        has_perm_options = any(x is not None for x in [
-            view_permission, send_permission, manage_permission,
-            embed_permission, attach_permission, history_permission
-        ])
-
-        if has_perm_options:
-            everyone_role = interaction.guild.default_role
-            base_ow = channel.overwrites_for(everyone_role) if channel else None
-            ow = self.build_permission_overwrites(
-                base_overwrite=base_ow,
-                c_type=c_type,
-                view_permission=view_permission,
-                send_permission=send_permission,
-                manage_permission=manage_permission,
-                embed_permission=embed_permission,
-                attach_permission=attach_permission,
-                history_permission=history_permission
-            )
-            overwrites[everyone_role] = ow
-
-        # ACTION: CREATE
-        if act_val == "create":
-            if not name:
-                err = discord.Embed(title="[MISSING PARAMETER]", description="Channel name parameter is required for creation.", color=0xf43f5e)
-                err.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=err)
-                return
-
-            formatted_name = self.slugify_channel_name(name, emoji or "")
-
-            try:
-                if c_type == "voice":
-                    created_ch = await interaction.guild.create_voice_channel(name=formatted_name, category=category, overwrites=overwrites)
-                elif c_type == "announcement":
-                    created_ch = await interaction.guild.create_text_channel(name=formatted_name, category=category, topic=topic or "", news=True, overwrites=overwrites)
-                elif c_type == "threads":
-                    target_parent = channel if isinstance(channel, discord.TextChannel) else await interaction.guild.create_text_channel(name=formatted_name, category=category, topic=topic or "", overwrites=overwrites)
-                    created_ch = await target_parent.create_thread(name=formatted_name, auto_archive_duration=1440)
-                else:
-                    created_ch = await interaction.guild.create_text_channel(name=formatted_name, category=category, topic=topic or "", overwrites=overwrites)
-
-                embed = discord.Embed(
-                    title="[CHANNEL CREATED]",
-                    description=f"Successfully created channel {created_ch.mention} ({created_ch.id}).",
-                    color=0x2ecc71
-                )
-                if topic: embed.add_field(name="Topic", value=topic, inline=False)
-                embed.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=embed)
-            except Exception as e:
-                err_ch = discord.Embed(title="[CREATION ERROR]", description=f"Failed to create channel: {e}", color=0xf43f5e)
-                err_ch.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=err_ch)
-
-        # ACTION: EDIT
-        elif act_val == "edit":
-            if not channel:
-                err = discord.Embed(title="[MISSING PARAMETER]", description="Target channel parameter is required for edit action.", color=0xf43f5e)
-                err.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=err)
-                return
-
-            try:
-                kwargs = {}
-                if name or emoji:
-                    base_n = name or channel.name
-                    kwargs["name"] = self.slugify_channel_name(base_n, emoji or "")
-                if category is not None and not isinstance(channel, discord.CategoryChannel):
-                    kwargs["category"] = category
-                if topic is not None and isinstance(channel, discord.TextChannel):
-                    kwargs["topic"] = topic
-
-                if has_perm_options:
-                    everyone_role = interaction.guild.default_role
-                    updated_ow = overwrites[everyone_role]
-                    kwargs["overwrites"] = {**channel.overwrites, everyone_role: updated_ow}
-
-                await channel.edit(**kwargs)
-                embed = discord.Embed(title="[CHANNEL UPDATED]", description=f"Successfully edited channel {channel.mention}.", color=0x2ecc71)
-                embed.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=embed)
-            except Exception as e:
-                err_edit = discord.Embed(title="[EDIT ERROR]", description=f"Failed to edit channel: {e}", color=0xf43f5e)
-                err_edit.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=err_edit)
-
-        # ACTION: TEMPORARY
-        elif act_val == "temporary":
-            if not name:
-                err = discord.Embed(title="[MISSING PARAMETER]", description="Channel name parameter is required for temporary channels.", color=0xf43f5e)
-                err.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=err)
-                return
-
-            formatted_name = self.slugify_channel_name(name, emoji or "temp")
-            desc_topic = topic or f"Temporary channel. Auto-deletes in {duration_minutes} minute(s)."
-
-            try:
-                if c_type == "voice":
-                    temp_ch = await interaction.guild.create_voice_channel(name=formatted_name, category=category, overwrites=overwrites)
-                else:
-                    temp_ch = await interaction.guild.create_text_channel(name=formatted_name, category=category, topic=desc_topic, overwrites=overwrites)
-
-                embed = discord.Embed(
-                    title="[TEMPORARY CHANNEL CREATED]",
-                    description=f"Created temporary channel {temp_ch.mention}. Auto-deletes in {duration_minutes} minute(s).",
-                    color=0xeab308
-                )
-                embed.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=embed)
-
-                async def auto_delete():
-                    await asyncio.sleep(duration_minutes * 60)
-                    try:
-                        await temp_ch.delete(reason="Temporary channel duration expired")
-                    except Exception: pass
-
-                asyncio.create_task(auto_delete())
-            except Exception as e:
-                err_temp = discord.Embed(title="[TEMP ERROR]", description=f"Failed to create temporary channel: {e}", color=0xf43f5e)
-                err_temp.set_footer(text="Template Engine Infrastructure")
-                await interaction.followup.send(embed=err_temp)
-
-    @channel_management.error
-    async def channel_management_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingPermissions):
-            err_perm = discord.Embed(
-                title="[PERMISSION DENIED]",
-                description="Administrator permission 'Manage Channels' is required to execute this command.",
-                color=0xf43f5e
-            )
-            err_perm.set_footer(text="Template Engine Infrastructure")
-            if interaction.response.is_done():
-                await interaction.followup.send(embed=err_perm, ephemeral=True)
-            else:
-                await interaction.response.send_message(embed=err_perm, ephemeral=True)
-
-    # --- 4. /premium COMMAND (PUBLIC) ---
+    # --- 5. /premium COMMAND (PUBLIC) ---
     @app_commands.command(name="premium", description="View features, perks, and subscription link for TE Premium.")
     async def premium_info(self, interaction: discord.Interaction):
         roblox_place_id = os.getenv("ROBLOX_PLACE_ID", "6094950399")
@@ -587,7 +711,7 @@ class BotCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed, view=view)
 
-    # --- 5. /premium-set COMMAND (OWNER ONLY) ---
+    # --- 6. /premium-set COMMAND (OWNER ONLY) ---
     @app_commands.command(name="premium-set", description="Grant or remove TE Premium status for a user.")
     @app_commands.describe(
         user="Target user to modify TE Premium status for",
@@ -636,7 +760,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="TE Premium Infrastructure")
         await interaction.followup.send(embed=embed)
 
-    # --- 6. /ping COMMAND (PUBLIC) ---
+    # --- 7. /ping COMMAND (PUBLIC) ---
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping(self, interaction: discord.Interaction):
         latency_ms = round(self.bot.latency * 1000)
@@ -648,7 +772,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="Template Engine Infrastructure")
         await interaction.response.send_message(embed=embed)
 
-    # --- 7. /nuke COMMAND (OWNER ONLY) ---
+    # --- 8. /nuke COMMAND (OWNER ONLY) ---
     @app_commands.command(name="nuke", description="Delete all channels and roles in the server (Owner restricted).")
     async def nuke_server(self, interaction: discord.Interaction):
         if interaction.user.id != BOT_OWNER_ID:
@@ -670,7 +794,7 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=nuke_embed)
         await self.wipe_guild_infrastructure(interaction.guild)
 
-    # --- 8. /website COMMAND (PUBLIC) ---
+    # --- 9. /website COMMAND (PUBLIC) ---
     @app_commands.command(name="website", description="Get the official Template Engine website link.")
     async def website_link(self, interaction: discord.Interaction):
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
