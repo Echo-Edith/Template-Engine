@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "super-secret-key-fallback").strip()
+app.secret_key = (os.getenv("FLASK_SECRET_KEY") or "super-secret-key-fallback-12345").strip()
 
 # Enforce long-term persistent browser sessions (365 Days)
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
@@ -56,13 +56,6 @@ BOT_SERVER_URL = (os.getenv("BOT_SERVER_URL") or f"http://127.0.0.1:{BOT_API_POR
 BOT_HANDSHAKE_URL = f"{BOT_SERVER_URL}/api/auto-build"
 
 MONGO_URI = os.getenv("MONGO_URI")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print(f"[Gemini Setup Error] {e}")
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 ROBLOX_OAUTH_AUTH_URL = "https://apis.roblox.com/oauth/v1/authorize"
@@ -293,7 +286,7 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
         "title": title,
         "color": color,
         "fields": fields,
-        "footer": {"text": "Echo Studio Infrastructure"},
+        "footer": {"text": "Template Engine Infrastructure"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -302,49 +295,53 @@ def log_event_via_bot(channel_source: str, title: str, user_data: dict, action_d
 
 @app.route("/")
 def home():
-    user = session.get("user")
-    roblox_user = session.get("roblox_user")
+    try:
+        user = session.get("user")
+        roblox_user = session.get("roblox_user")
 
-    if not user and session.get("user_id"):
-        db_record = load_user_session_db(session["user_id"])
-        if db_record:
-            user = db_record.get("discord_data")
-            roblox_user = roblox_user or db_record.get("roblox_data")
-            session["user"] = user
-            if roblox_user:
-                session["roblox_user"] = roblox_user
+        if not user and session.get("user_id"):
+            db_record = load_user_session_db(session["user_id"])
+            if db_record:
+                user = db_record.get("discord_data")
+                roblox_user = roblox_user or db_record.get("roblox_data")
+                session["user"] = user
+                if roblox_user:
+                    session["roblox_user"] = roblox_user
 
-    user_is_premium = False
-    if user:
-        user_is_premium = is_user_premium(user.get("id"))
-        ban_info = is_user_banned(user.get("id"))
-        if ban_info:
-            return render_template(
-                "index.html",
-                is_banned=True,
-                user=user,
-                roblox_user=roblox_user,
-                is_premium=user_is_premium,
-                dev_message=ban_info.get("message_from_dev", "Suspended by developer."),
-                recaptcha_site_key=RECAPTCHA_SITE_KEY,
-                discord_client_id=CLIENT_ID,
-                roblox_store_url=ROBLOX_STORE_URL
-            )
+        user_is_premium = False
+        if user:
+            user_is_premium = is_user_premium(user.get("id"))
+            ban_info = is_user_banned(user.get("id"))
+            if ban_info:
+                return render_template(
+                    "index.html",
+                    is_banned=True,
+                    user=user,
+                    roblox_user=roblox_user,
+                    is_premium=user_is_premium,
+                    dev_message=ban_info.get("message_from_dev", "Suspended by developer."),
+                    recaptcha_site_key=RECAPTCHA_SITE_KEY,
+                    discord_client_id=CLIENT_ID,
+                    roblox_store_url=ROBLOX_STORE_URL
+                )
 
-    return render_template(
-        "index.html",
-        is_banned=False,
-        user=user,
-        roblox_user=roblox_user,
-        is_premium=user_is_premium,
-        recaptcha_site_key=RECAPTCHA_SITE_KEY,
-        discord_client_id=CLIENT_ID,
-        roblox_store_url=ROBLOX_STORE_URL
-    )
+        return render_template(
+            "index.html",
+            is_banned=False,
+            user=user,
+            roblox_user=roblox_user,
+            is_premium=user_is_premium,
+            recaptcha_site_key=RECAPTCHA_SITE_KEY,
+            discord_client_id=CLIENT_ID,
+            roblox_store_url=ROBLOX_STORE_URL
+        )
+    except Exception as e:
+        return f"Template Engine Engine Error: {str(e)}", 500
 
 
 # --- AI DESIGN & BLUEPRINT GENERATION ---
 @app.route("/generate-blueprint", methods=["POST"])
+
 def generate_blueprint_endpoint():
     try:
         data = request.get_json(silent=True) or {}
