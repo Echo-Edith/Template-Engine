@@ -26,7 +26,7 @@ return;
 }
 if (!IS_ROBLOX_LINKED) {
 if (btn) btn.disabled = true;
-if (label) label.innerText = "Link Roblox Account First";
+if (label) label.innerText = "Verify Roblox via Discord First (/verification-set)";
 return;
 }
 if (!isCaptchaVerified && RECAPTCHA_SITE_KEY && RECAPTCHA_SITE_KEY.length > 5) {
@@ -251,23 +251,6 @@ margin-bottom: 20px;
 }
 .btn-discord {
 background: linear-gradient(135deg, rgba(88, 101, 242, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%) !important;
-}
-.code-display-box {
-background: rgba(10, 10, 18, 0.8);
-border: 1px dashed var(--accent-gold);
-border-radius: 12px;
-padding: 14px;
-text-align: center;
-margin-bottom: 12px;
-}
-.code-text {
-font-family: monospace;
-font-size: 1.3rem;
-font-weight: bold;
-color: var(--accent-gold);
-letter-spacing: 2px;
-margin-bottom: 8px;
-display: block;
 }
 .recaptcha-glass-cover {
 background: rgba(12, 10, 20, 0.5);
@@ -609,7 +592,7 @@ display: inline-block;
 <div id="page-landing" class="page active">
 <div class="brand-header">
 <h1>Template Engine</h1>
-<p>Log in with Discord and verify Roblox to access layout architecture tools.</p>
+<p>Log in with Discord and sync your Roblox account via bot to unlock layout tools.</p>
 </div>
 <!-- DISCORD AUTH CARD -->
 {% if user %}
@@ -638,35 +621,23 @@ display: inline-block;
 <span style="font-size:0.75rem; color: var(--accent-gold);">Roblox Verified & Synced</span>
 </div>
 </div>
-<a href="/logout-roblox" class="logout-link" style="color: var(--accent-red);"><i class="fa-solid fa-right-from-bracket"></i> Unlink</a>
+<i class="fa-solid fa-circle-check" style="color: #2ecc71;"></i>
+</div>
+{% else %}
+{% if user %}
+<div class="editor-card" style="margin-bottom: 12px; text-align:center; background: rgba(255,255,255,0.02);">
+<i class="fa-solid fa-link" style="color: var(--accent-purple); font-size: 1.2rem; margin-bottom: 8px;"></i>
+<span style="font-weight: 600; font-size: 0.88rem; display:block; margin-bottom: 4px;">Roblox Sync Required</span>
+<p style="font-size:0.78rem; color: var(--text-sub);">Use <code>/verification-set</code> in Discord server to link your Roblox bio.</p>
 </div>
 {% endif %}
-<!-- AUTHENTICATION ACTIONS / BIO VERIFICATION BOX -->
+{% endif %}
+<!-- AUTHENTICATION ACTIONS GRID -->
 <div class="auth-actions-grid">
 {% if not user %}
 <a href="/login" class="btn-glass btn-discord">
 <i class="fa-brands fa-discord fa-lg"></i> Log In with Discord
 </a>
-{% elif not roblox_user %}
-<div class="editor-card" style="margin-bottom: 0; background: rgba(255,255,255,0.02);">
-<label class="label-heading">Link Roblox Account (Bio Verification)</label>
-<div class="form-group" style="margin-bottom: 10px;">
-<input type="text" id="roblox-username-input" class="form-control" placeholder="Enter your exact Roblox Username">
-</div>
-<div class="code-display-box" id="verification-code-box" style="display:none;">
-<span style="font-size:0.75rem; color:var(--text-sub); display:block; margin-bottom:4px;">Paste this code into your Roblox Profile Bio:</span>
-<span id="generated-code-text" class="code-text">TE-XXXX</span>
-<button class="btn-glass" style="padding: 8px; font-size: 0.8rem; background: rgba(241,196,15,0.2); border: 1px solid var(--accent-gold); color: #f1c40f;" onclick="copyVerificationCode()">
-<i class="fa-solid fa-copy"></i> Copy Code
-</button>
-</div>
-<button id="start-verify-btn" class="btn-glass btn-premium" onclick="generateBioCode()">
-Generate Verification Code
-</button>
-<button id="confirm-verify-btn" class="btn-glass" style="display:none; margin-top: 8px; background: rgba(46,204,113,0.8);" onclick="confirmBioVerification()">
-Check My Bio & Link Account
-</button>
-</div>
 {% endif %}
 {% if roblox_store_url and not is_premium %}
 <a href="{{ roblox_store_url }}" target="_blank" class="btn-glass btn-premium">
@@ -848,56 +819,6 @@ isCaptchaVerified = true;
 checkAuthAndCaptchaStatus();
 applyPremiumTheme();
 });
-let currentVerificationCode = "";
-async function generateBioCode() {
-const username = document.getElementById('roblox-username-input').value.trim();
-if (!username) {
-alert('Please enter your Roblox username first.');
-return;
-}
-try {
-const res = await fetch('/api/generate-bio-code', {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ username })
-});
-const data = await res.json();
-if (data.success) {
-currentVerificationCode = data.code;
-document.getElementById('generated-code-text').innerText = data.code;
-document.getElementById('verification-code-box').style.display = 'block';
-document.getElementById('start-verify-btn').style.display = 'none';
-document.getElementById('confirm-verify-btn').style.display = 'flex';
-} else {
-alert('Error: ' + data.error);
-}
-} catch(e) {
-alert('Failed to generate verification code.');
-}
-}
-function copyVerificationCode() {
-navigator.clipboard.writeText(currentVerificationCode);
-alert('Verification code copied to clipboard! Paste it into your Roblox profile bio.');
-}
-async function confirmBioVerification() {
-const username = document.getElementById('roblox-username-input').value.trim();
-try {
-const res = await fetch('/api/verify-bio', {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ username, code: currentVerificationCode })
-});
-const data = await res.json();
-if (data.success) {
-alert('Roblox account verified and linked successfully!');
-window.location.reload();
-} else {
-alert('Verification failed: ' + data.error + ' (Make sure the code is saved in your Roblox profile bio)');
-}
-} catch(e) {
-alert('Verification request failed.');
-}
-}
 function applyPremiumTheme() {
 const btn = document.getElementById('submit-design-btn');
 const label = document.getElementById('submit-btn-label');
