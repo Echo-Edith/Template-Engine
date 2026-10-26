@@ -30,11 +30,6 @@ CLIENT_ID = (os.getenv("DISCORD_CLIENT_ID") or "").strip()
 CLIENT_SECRET = (os.getenv("DISCORD_CLIENT_SECRET") or "").strip()
 BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
 
-# Roblox OAuth 2.0 Configuration
-ROBLOX_CLIENT_ID = (os.getenv("ROBLOX_CLIENT_ID") or "").strip()
-ROBLOX_CLIENT_SECRET = (os.getenv("ROBLOX_CLIENT_SECRET") or "").strip()
-ROBLOX_REDIRECT_URI = (os.getenv("ROBLOX_REDIRECT_URI") or "").strip()
-
 RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
@@ -52,14 +47,10 @@ WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_UR
 
 BOT_API_PORT = int(os.getenv("BOT_PORT", "10000"))
 BOT_SERVER_URL = (os.getenv("BOT_SERVER_URL") or f"http://127.0.0.1:{BOT_API_PORT}").rstrip("/")
-BOT_HANDSHAKE_URL = f"{BOT_SERVER_URL}/api/auto-build"
 
 MONGO_URI = os.getenv("MONGO_URI")
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
-ROBLOX_OAUTH_AUTH_URL = "https://apis.roblox.com/oauth/v1/authorize"
-ROBLOX_OAUTH_TOKEN_URL = "https://apis.roblox.com/oauth/v1/token"
-ROBLOX_USERINFO_URL = "https://apis.roblox.com/oauth/v1/userinfo"
 
 db_bans = None
 db_premium = None
@@ -99,7 +90,7 @@ def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict 
         "discord_data": discord_data,
         "updated_at": now
     }
-    if roblox_data:
+    if roblox_data is not None:
         update_payload["roblox_data"] = roblox_data
 
     if db_users is not None:
@@ -196,12 +187,6 @@ def get_redirect_uri() -> str:
     if configured and configured.strip():
         return configured.strip()
     return f"{get_base_url()}/callback"
-
-
-def get_roblox_redirect_uri() -> str:
-    if ROBLOX_REDIRECT_URI and ROBLOX_REDIRECT_URI.strip():
-        return ROBLOX_REDIRECT_URI.strip()
-    return f"{get_base_url()}/roblox/callback"
 
 
 def calculate_account_age(discord_id: str) -> str:
@@ -338,6 +323,96 @@ def home():
         return f"Template Engine Engine Error: {str(e)}", 500
 
 
+# --- ROBLOX BIO VERIFICATION SYSTEM ---
+@app.route("/api/generate-bio-code", methods=["POST"])
+def generate_bio_code():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "").strip()
+
+    if not username:
+        return jsonify({"success": False, "error": "Username required."}), 400
+
+    code = f"TE-{random.randint(1000, 9999)}"
+    session["pending_bio_code"] = code
+    session["pending_roblox_username"] = username
+
+    return jsonify({"success": True, "code": code})
+
+
+@app.route("/api/verify-bio", methods=["POST"])
+def verify_bio():
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "").strip()
+    provided_code = data.get("code", "").strip()
+    user = session.get("user")
+
+    if not user:
+        return jsonify({"success": False, "error": "You must be logged in with Discord first."}), 401
+
+    if not username or not provided_code:
+        return jsonify({"success": False, "error": "Missing username or verification code."}), 400
+
+    try:
+        # Step 1: Resolve Roblox Username to User ID
+        res = requests.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [username], "excludeBannedUsers": True}, timeout=5)
+        res_data = res.json()
+        
+        if not res_data.get("data") or len(res_data["data"]) == 0:
+            return jsonify({"success": False, "error": f"Roblox user '{username}' not found."}), 404
+
+        roblox_id = res_data["data"][0]["id"]
+        exact_username = res_data["data"][0]["name"]
+
+        # Step 2: Fetch User Profile Information (Bio/About)
+        profile_res = requests.get(f"https://users.roblox.com/v1/users/{roblox_id}", timeout=5)
+        profile_data = profile_res.json()
+        bio_text = profile_data.get("description", "")
+
+        # Step 3: Check if the exact code exists in their bio
+        if provided_code not in bio_text:
+            return jsonify({
+                "success": False, 
+                "error": f"Code '{provided_code}' was not found in profile bio for @{exact_username}. Please make sure you saved changes."
+            }), 400
+
+        # Verification successful: Save Roblox session & grant TE Premium
+        roblox_obj = {
+            "id": str(roblox_id),
+            "username": exact_username
+        }
+        session["roblox_user"] = roblox_obj
+
+        save_user_session_db(user["id"], user, roblox_obj)
+        set_user_premium(user["id"], timedelta(days=30))
+
+        log_event_via_bot(
+            channel_source=PREMIUM_DESIGN_CHANNEL_ID,
+            title="[Roblox Bio Verified & TE Premium Granted]",
+            user_data=user,
+            action_desc=f"Successfully verified Roblox profile bio code for `@{exact_username}` (`{roblox_id}`). TE Premium activated.",
+            color=0xf1c40f,
+            extra_fields={
+                "Roblox Username": exact_username,
+                "Roblox User ID": str(roblox_id),
+                "Verification Code": provided_code
+            }
+        )
+
+        return jsonify({"success": True, "message": "Account linked successfully!"})
+
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Roblox API verification failed: {str(e)}"}), 500
+
+
+@app.route("/logout-roblox")
+def logout_roblox():
+    session.pop("roblox_user", None)
+    user = session.get("user")
+    if user:
+        save_user_session_db(user["id"], user, roblox_data={})
+    return redirect("/")
+
+
 # --- AI DESIGN & BLUEPRINT GENERATION ---
 @app.route("/generate-blueprint", methods=["POST"])
 def generate_blueprint_endpoint():
@@ -378,7 +453,6 @@ def generate_blueprint_endpoint():
         response = model.generate_content(prompt)
         raw_text = response.text.strip() if response and hasattr(response, "text") else ""
 
-        # Safe extraction of JSON payload
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if json_match:
             clean_json_str = json_match.group(0)
@@ -466,86 +540,6 @@ def callback():
             )
     except Exception as e:
         print(f"[OAuth Callback Error] {e}")
-
-    return redirect("/")
-
-
-# --- ROBLOX OAUTH 2.0 LOGIN & CALLBACK ---
-@app.route("/roblox/login")
-def roblox_login():
-    if not ROBLOX_CLIENT_ID:
-        return "Error: ROBLOX_CLIENT_ID is not configured in Vercel environment variables.", 500
-
-    redirect_uri = get_roblox_redirect_uri()
-    roblox_auth_url = (
-        f"{ROBLOX_OAUTH_AUTH_URL}"
-        f"?client_id={ROBLOX_CLIENT_ID}"
-        f"&redirect_uri={requests.utils.quote(redirect_uri, safe='')}"
-        f"&scope=openid%20profile"
-        f"&response_type=code"
-    )
-    return redirect(roblox_auth_url)
-
-
-@app.route("/roblox/callback")
-def roblox_callback():
-    code = request.args.get("code")
-    if not code:
-        return redirect("/")
-
-    user = session.get("user")
-
-    redirect_uri = get_roblox_redirect_uri()
-    payload = {
-        "client_id": ROBLOX_CLIENT_ID,
-        "client_secret": ROBLOX_CLIENT_SECRET,
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri
-    }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-
-    try:
-        token_res = requests.post(ROBLOX_OAUTH_TOKEN_URL, data=payload, headers=headers)
-        if token_res.status_code != 200:
-            return f"Roblox OAuth Error ({token_res.status_code}): {token_res.text}", 400
-
-        tokens = token_res.json()
-        access_token = tokens.get("access_token")
-
-        u_headers = {"Authorization": f"Bearer {access_token}"}
-        u_res = requests.get(ROBLOX_USERINFO_URL, headers=u_headers)
-
-        if u_res.status_code == 200:
-            r_data = u_res.json()
-            roblox_user_id = str(r_data.get("sub", ""))
-            roblox_username = r_data.get("preferred_username") or r_data.get("name") or "Roblox User"
-
-            roblox_obj = {
-                "id": roblox_user_id,
-                "username": roblox_username
-            }
-
-            session["roblox_user"] = roblox_obj
-
-            if user:
-                save_user_session_db(user["id"], user, roblox_obj)
-                set_user_premium(user["id"], timedelta(days=30))
-
-                log_event_via_bot(
-                    channel_source=PREMIUM_DESIGN_CHANNEL_ID,
-                    title="[Roblox Account Linked & TE Premium Granted]",
-                    user_data=user,
-                    action_desc=f"Successfully linked Roblox OAuth account `{roblox_username}` (`{roblox_user_id}`). TE Premium granted.",
-                    color=0xf1c40f,
-                    extra_fields={
-                        "Roblox Username": roblox_username,
-                        "Roblox User ID": roblox_user_id,
-                        "Subscription ID": ROBLOX_SUBSCRIPTION_ID
-                    }
-                )
-    except Exception as e:
-        print(f"[Roblox Callback Exception] {e}")
 
     return redirect("/")
 
