@@ -4,7 +4,7 @@ import json
 import random
 import requests
 from datetime import datetime, timezone, timedelta
-from flask import Flask, redirect, request, session, render_template, jsonify, send_from_directory
+from flask import Flask, redirect, request, session, render_template, jsonify
 from pymongo import MongoClient
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -45,9 +45,6 @@ PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "15635441
 SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 
-BOT_API_PORT = int(os.getenv("BOT_PORT", "10000"))
-BOT_SERVER_URL = (os.getenv("BOT_SERVER_URL") or f"http://127.0.0.1:{BOT_API_PORT}").rstrip("/")
-
 MONGO_URI = os.getenv("MONGO_URI")
 
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
@@ -85,13 +82,18 @@ def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict 
     discord_id_str = str(discord_id)
     now = datetime.now(timezone.utc).isoformat()
 
+    existing = load_user_session_db(discord_id_str)
+    
     update_payload = {
         "discord_id": discord_id_str,
-        "discord_data": discord_data,
+        "discord_data": discord_data or existing.get("discord_data", {}),
         "updated_at": now
     }
+    
     if roblox_data is not None:
         update_payload["roblox_data"] = roblox_data
+    elif "roblox_data" in existing:
+        update_payload["roblox_data"] = existing["roblox_data"]
 
     if db_users is not None:
         try:
@@ -103,9 +105,7 @@ def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict 
         except Exception as e:
             print(f"[User Persistence Error] {e}")
     else:
-        existing = LOCAL_PERSISTENT_USERS.get(discord_id_str, {})
-        existing.update(update_payload)
-        LOCAL_PERSISTENT_USERS[discord_id_str] = existing
+        LOCAL_PERSISTENT_USERS[discord_id_str] = update_payload
 
 
 def load_user_session_db(discord_id: str) -> dict:
@@ -283,12 +283,13 @@ def home():
         user = session.get("user")
         roblox_user = session.get("roblox_user")
 
-        if not user and session.get("user_id"):
+        if session.get("user_id"):
             db_record = load_user_session_db(session["user_id"])
             if db_record:
-                user = db_record.get("discord_data")
+                user = user or db_record.get("discord_data")
                 roblox_user = roblox_user or db_record.get("roblox_data")
-                session["user"] = user
+                if user:
+                    session["user"] = user
                 if roblox_user:
                     session["roblox_user"] = roblox_user
 
@@ -320,7 +321,7 @@ def home():
             roblox_store_url=ROBLOX_STORE_URL
         )
     except Exception as e:
-        return f"Template Engine Engine Error: {str(e)}", 500
+        return f"Template Engine Error: {str(e)}", 500
 
 
 # --- ROBLOX BIO VERIFICATION SYSTEM ---
@@ -330,7 +331,7 @@ def generate_bio_code():
     username = data.get("username", "").strip()
 
     if not username:
-        return jsonify({"success": False, "error": "Username required."}), 400
+        return jsonify({"success": False, "error": "Roblox username is required."}), 400
 
     code = f"TE-{random.randint(1000, 9999)}"
     session["pending_bio_code"] = code
@@ -353,29 +354,38 @@ def verify_bio():
         return jsonify({"success": False, "error": "Missing username or verification code."}), 400
 
     try:
-        # Step 1: Resolve Roblox Username to User ID
-        res = requests.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [username], "excludeBannedUsers": True}, timeout=5)
+        # Step 1: Resolve Roblox Username to User ID using Roblox Username API
+        res = requests.post(
+            "https://users.roblox.com/v1/usernames/users",
+            json={"usernames": [username], "excludeBannedUsers": False},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
         res_data = res.json()
         
         if not res_data.get("data") or len(res_data["data"]) == 0:
-            return jsonify({"success": False, "error": f"Roblox user '{username}' not found."}), 404
+            return jsonify({"success": False, "error": f"Roblox user '{username}' was not found."}), 404
 
         roblox_id = res_data["data"][0]["id"]
         exact_username = res_data["data"][0]["name"]
 
-        # Step 2: Fetch User Profile Information (Bio/About)
-        profile_res = requests.get(f"https://users.roblox.com/v1/users/{roblox_id}", timeout=5)
+        # Step 2: Fetch User Profile Description (Bio)
+        profile_res = requests.get(
+            f"https://users.roblox.com/v1/users/{roblox_id}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
         profile_data = profile_res.json()
         bio_text = profile_data.get("description", "")
 
-        # Step 3: Check if the exact code exists in their bio
+        # Step 3: Verify Code Presence in Bio
         if provided_code not in bio_text:
             return jsonify({
                 "success": False, 
-                "error": f"Code '{provided_code}' was not found in profile bio for @{exact_username}. Please make sure you saved changes."
+                "error": f"Code '{provided_code}' was not found in profile bio for @{exact_username}. Make sure you saved changes on Roblox."
             }), 400
 
-        # Verification successful: Save Roblox session & grant TE Premium
+        # Step 4: Link Roblox Account & Sync into Database
         roblox_obj = {
             "id": str(roblox_id),
             "username": exact_username
@@ -387,9 +397,9 @@ def verify_bio():
 
         log_event_via_bot(
             channel_source=PREMIUM_DESIGN_CHANNEL_ID,
-            title="[Roblox Bio Verified & TE Premium Granted]",
+            title="[Roblox Account Synced & Verified]",
             user_data=user,
-            action_desc=f"Successfully verified Roblox profile bio code for `@{exact_username}` (`{roblox_id}`). TE Premium activated.",
+            action_desc=f"Successfully verified Roblox profile bio code for `@{exact_username}` (`{roblox_id}`). Accounts linked & TE Premium granted.",
             color=0xf1c40f,
             extra_fields={
                 "Roblox Username": exact_username,
@@ -398,10 +408,10 @@ def verify_bio():
             }
         )
 
-        return jsonify({"success": True, "message": "Account linked successfully!"})
+        return jsonify({"success": True, "message": "Roblox account verified & linked successfully!"})
 
     except Exception as e:
-        return jsonify({"success": False, "error": f"Roblox API verification failed: {str(e)}"}), 500
+        return jsonify({"success": False, "error": f"Roblox verification request failed: {str(e)}"}), 500
 
 
 @app.route("/logout-roblox")
@@ -427,7 +437,7 @@ def generate_blueprint_endpoint():
 
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            return jsonify({"success": False, "error": "GEMINI_API_KEY environment variable is missing on Vercel."}), 500
+            return jsonify({"success": False, "error": "GEMINI_API_KEY environment variable is missing on server."}), 500
 
         genai.configure(api_key=api_key)
 
