@@ -346,47 +346,56 @@ def home():
 # --- AI DESIGN & BLUEPRINT GENERATION ---
 @app.route("/generate-blueprint", methods=["POST"])
 def generate_blueprint_endpoint():
-    data = request.get_json() or {}
-    prompt = data.get("prompt", "").strip()
-
-    if not prompt:
-        return jsonify({"success": False, "error": "Prompt cannot be empty."}), 400
-
-    if not GEMINI_API_KEY:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY environment variable is missing on Vercel."}), 500
-
-    system_instruction = (
-        "You are an expert Discord Server Architect. Your job is to output a valid JSON object representing a full Discord server blueprint based on the user request. "
-        "Strictly return ONLY raw JSON without markdown formatting, code blocks, or markdown backticks. "
-        "JSON structure MUST follow:\n"
-        "{\n"
-        '  "server_name": "String",\n'
-        '  "roles": [{"name": "Role Name", "color": "#HEX"}],\n'
-        '  "categories": [\n'
-        '    {\n'
-        '      "name": "CATEGORY NAME",\n'
-        '      "channels": [\n'
-        '        {"name": "channel-name", "type": "text|voice|announcement", "emoji": "optional", "topic": "Description"}\n'
-        '      ]\n'
-        '    }\n'
-        '  ]\n'
-        "}"
-    )
-
     try:
+        data = request.get_json(silent=True) or {}
+        prompt = data.get("prompt", "").strip()
+
+        if not prompt:
+            return jsonify({"success": False, "error": "Prompt cannot be empty."}), 400
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return jsonify({"success": False, "error": "GEMINI_API_KEY environment variable is missing on Vercel."}), 500
+
+        genai.configure(api_key=api_key)
+
+        system_instruction = (
+            "You are an expert Discord Server Architect. Your job is to output a valid JSON object representing a full Discord server blueprint based on the user request. "
+            "Strictly return ONLY raw JSON without markdown formatting, code blocks, or markdown backticks. "
+            "JSON structure MUST follow:\n"
+            "{\n"
+            '  "server_name": "String",\n'
+            '  "roles": [{"name": "Role Name", "color": "#HEX"}],\n'
+            '  "categories": [\n'
+            '    {\n'
+            '      "name": "CATEGORY NAME",\n'
+            '      "channels": [\n'
+            '        {"name": "channel-name", "type": "text|voice|announcement", "emoji": "", "topic": "Description"}\n'
+            '      ]\n'
+            '    }\n'
+            '  ]\n'
+            "}"
+        )
+
         model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=system_instruction)
         response = model.generate_content(prompt)
-        raw_text = response.text.strip()
+        raw_text = response.text.strip() if response and hasattr(response, "text") else ""
 
-        # Clean markdown code blocks if present
-        clean_json_str = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
+        # Safe extraction of JSON payload
+        json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if json_match:
+            clean_json_str = json_match.group(0)
+        else:
+            clean_json_str = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
+
         blueprint_json = json.loads(clean_json_str)
 
         return jsonify({"success": True, "blueprint": blueprint_json}), 200
+
     except json.JSONDecodeError:
         return jsonify({"success": False, "error": "AI generated an invalid blueprint format. Please try again."}), 500
     except Exception as e:
-        return jsonify({"success": False, "error": f"Gemini API Error: {str(e)}"}), 500
+        return jsonify({"success": False, "error": f"AI Engine Exception: {str(e)}"}), 500
 
 
 # --- DISCORD OAUTH2 LOGIN & CALLBACK ---
