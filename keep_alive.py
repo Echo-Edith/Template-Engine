@@ -34,11 +34,13 @@ RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
 # Roblox Integration Configuration
+ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
 ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
 ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
 ROBLOX_STORE_URL = (os.getenv("ROBLOX_STORE_URL") or f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store").strip()
 
-# Target Log Channels
+# Target Channels
+SUBSCRIPTION_LOG_CHANNEL_ID = (os.getenv("SUBSCRIPTION_LOG_CHANNEL_ID") or "1564262413514182739").strip()
 DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
 PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
 
@@ -52,6 +54,7 @@ DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 db_bans = None
 db_premium = None
 db_users = None
+db_stats = None
 
 if MONGO_URI:
     try:
@@ -63,6 +66,7 @@ if MONGO_URI:
         db_bans = db["bans"]
         db_premium = db["premium_users"]
         db_users = db["persistent_users"]
+        db_stats = db["stats"]
     except Exception as e:
         print(f"[MongoDB Warning] Could not connect to Mongo: {e}")
 
@@ -120,24 +124,6 @@ def load_user_session_db(discord_id: str) -> dict:
             print(f"[Load User Error] {e}")
             return {}
     return LOCAL_PERSISTENT_USERS.get(discord_id_str, {})
-
-
-def set_user_premium(user_id: str, duration_td: timedelta = timedelta(days=30)):
-    user_id_str = str(user_id)
-    now = datetime.now(timezone.utc)
-    expires_at = now + duration_td
-
-    if db_premium is not None:
-        try:
-            db_premium.update_one(
-                {"user_id": user_id_str},
-                {"$set": {"user_id": user_id_str, "expires_at": expires_at.isoformat(), "updated_at": now.isoformat()}},
-                upsert=True
-            )
-        except Exception as e:
-            print(f"[Set Premium Error] {e}")
-    else:
-        LOCAL_PREMIUM_USERS[user_id_str] = expires_at
 
 
 def is_user_premium(user_id: str) -> bool:
@@ -290,7 +276,7 @@ def home():
                 roblox_user = roblox_user or db_record.get("roblox_data")
                 if user:
                     session["user"] = user
-                if roblox_user:
+                if roblox_user and roblox_user.get("username"):
                     session["roblox_user"] = roblox_user
 
         user_is_premium = False
@@ -322,116 +308,6 @@ def home():
         )
     except Exception as e:
         return f"Template Engine Error: {str(e)}", 500
-
-
-# --- ROBLOX BIO VERIFICATION SYSTEM ---
-@app.route("/api/generate-bio-code", methods=["POST"])
-def generate_bio_code():
-    try:
-        data = request.get_json(silent=True, force=True) or {}
-        if not data and request.form:
-            data = request.form.to_dict()
-            
-        username = str(data.get("username", "")).strip()
-
-        if not username:
-            return jsonify({"success": False, "error": "Roblox username is required."}), 400
-
-        code = f"TE-{random.randint(100000, 999999)}"
-        session["pending_bio_code"] = code
-        session["pending_roblox_username"] = username
-        session.modified = True
-
-        return jsonify({"success": True, "code": code}), 200
-    except Exception as e:
-        return jsonify({"success": False, "error": f"Failed to generate code: {str(e)}"}), 500
-
-
-@app.route("/api/verify-bio", methods=["POST"])
-def verify_bio():
-    data = request.get_json(silent=True, force=True) or {}
-    if not data and request.form:
-        data = request.form.to_dict()
-
-    username = str(data.get("username", "")).strip()
-    provided_code = str(data.get("code", "")).strip()
-    user = session.get("user")
-
-    if not user:
-        return jsonify({"success": False, "error": "You must be logged in with Discord first."}), 401
-
-    if not username or not provided_code:
-        return jsonify({"success": False, "error": "Missing username or verification code."}), 400
-
-    try:
-        # Step 1: Resolve Roblox Username to User ID using Roblox Username API
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        res = requests.post(
-            "https://users.roblox.com/v1/usernames/users",
-            json={"usernames": [username], "excludeBannedUsers": False},
-            headers=headers,
-            timeout=10
-        )
-        res_data = res.json()
-        
-        if not res_data.get("data") or len(res_data["data"]) == 0:
-            return jsonify({"success": False, "error": f"Roblox user '{username}' was not found."}), 404
-
-        roblox_id = res_data["data"][0]["id"]
-        exact_username = res_data["data"][0]["name"]
-
-        # Step 2: Fetch User Profile Description (Bio)
-        profile_res = requests.get(
-            f"https://users.roblox.com/v1/users/{roblox_id}",
-            headers=headers,
-            timeout=10
-        )
-        profile_data = profile_res.json()
-        bio_text = profile_data.get("description", "")
-
-        # Step 3: Verify Code Presence in Bio
-        if provided_code not in bio_text:
-            return jsonify({
-                "success": False, 
-                "error": f"Code '{provided_code}' was not found in profile bio for @{exact_username}. Make sure you saved changes on Roblox."
-            }), 400
-
-        # Step 4: Link Roblox Account & Sync into Database
-        roblox_obj = {
-            "id": str(roblox_id),
-            "username": exact_username
-        }
-        session["roblox_user"] = roblox_obj
-
-        save_user_session_db(user["id"], user, roblox_obj)
-        set_user_premium(user["id"], timedelta(days=30))
-
-        log_event_via_bot(
-            channel_source=PREMIUM_DESIGN_CHANNEL_ID,
-            title="[Roblox Account Synced & Verified]",
-            user_data=user,
-            action_desc=f"Successfully verified Roblox profile bio code for `@{exact_username}` (`{roblox_id}`). Accounts linked & TE Premium granted.",
-            color=0xf1c40f,
-            extra_fields={
-                "Roblox Username": exact_username,
-                "Roblox User ID": str(roblox_id),
-                "Verification Code": provided_code
-            }
-        )
-
-        return jsonify({"success": True, "message": "Roblox account verified & linked successfully!"})
-
-    except Exception as e:
-        return jsonify({"success": False, "error": f"Roblox verification request failed: {str(e)}"}), 500
-
-
-@app.route("/logout-roblox")
-def logout_roblox():
-    session.pop("roblox_user", None)
-    user = session.get("user")
-    if user:
-        save_user_session_db(user["id"], user, roblox_data={})
-    return redirect("/")
 
 
 # --- AI DESIGN & BLUEPRINT GENERATION ---
@@ -481,6 +357,13 @@ def generate_blueprint_endpoint():
             clean_json_str = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
 
         blueprint_json = json.loads(clean_json_str)
+
+        # Track blueprint count in DB stats
+        if db_stats is not None:
+            try:
+                db_stats.update_one({"metric": "global"}, {"$inc": {"blueprints_generated": 1}}, upsert=True)
+            except Exception:
+                pass
 
         return jsonify({"success": True, "blueprint": blueprint_json}), 200
 
@@ -549,6 +432,10 @@ def callback():
 
             session["user"] = user_obj
             session["user_id"] = user_data["id"]
+
+            db_record = load_user_session_db(user_data["id"])
+            if db_record.get("roblox_data"):
+                session["roblox_user"] = db_record["roblox_data"]
 
             save_user_session_db(user_data["id"], user_obj, session.get("roblox_user"))
 
