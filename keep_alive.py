@@ -6,7 +6,6 @@ import requests
 from datetime import datetime, timezone, timedelta
 from flask import Flask, redirect, request, session, render_template, jsonify, send_from_directory
 from pymongo import MongoClient
-import google.generativeai as genai
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
@@ -341,9 +340,10 @@ def home():
 
 # --- AI DESIGN & BLUEPRINT GENERATION ---
 @app.route("/generate-blueprint", methods=["POST"])
-
 def generate_blueprint_endpoint():
     try:
+        import google.generativeai as genai
+        
         data = request.get_json(silent=True) or {}
         prompt = data.get("prompt", "").strip()
 
