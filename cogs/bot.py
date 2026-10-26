@@ -9,13 +9,22 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
+# Target Log, Welcome, and Analytics Channels
+SUBSCRIPTION_LOG_CHANNEL_ID = 1564262413514182739
+WELCOME_CHANNEL_ID = 1564262763310616799
+MONTHLY_ANALYTICS_CHANNEL_ID = 1564263447057670154
 PREMIUM_SCAN_CHANNEL_ID = 1563544108696477802
 BOT_OWNER_ID = 1219266886143967245
 
 MONGO_URI = os.getenv("MONGO_URI")
+ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
+ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
+ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
+
 db_premium = None
 db_build_access = None
 db_users = None
+db_stats = None
 
 if MONGO_URI:
     try:
@@ -27,6 +36,7 @@ if MONGO_URI:
         db_premium = db["premium_users"]
         db_build_access = db["build_authorized_users"]
         db_users = db["persistent_users"]
+        db_stats = db["stats"]
     except Exception as e:
         print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
 
@@ -188,7 +198,7 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
         max_length=30
     )
 
-    async on_submit(self, interaction: discord.Interaction):
+    async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         user_id_str = str(interaction.user.id)
         code_data = PENDING_VERIFICATION_CODES.get(user_id_str)
@@ -255,6 +265,9 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
                     roblox_id=str(roblox_id),
                     roblox_username=exact_username
                 )
+                
+                now = datetime.now(timezone.utc)
+                expires_at = now + timedelta(days=30)
                 set_user_premium(user_id_str, timedelta(days=30))
 
                 new_nickname = f"{interaction.user.name} ({exact_username})"
@@ -267,6 +280,38 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
                     nickname_updated = True
                 except Exception:
                     pass
+
+                # Direct DM to user
+                try:
+                    dm_embed = discord.Embed(
+                        title="👑 TE Premium Activated!",
+                        description=(
+                            f"Thank you for linking your Roblox account **@{exact_username}**!\n\n"
+                            f"**Perks Unlocked:**\n"
+                            f"• Instant 1-click server deployments\n"
+                            f"• Gold Glassmorphic website theme\n"
+                            f"• Advanced AI server architecture building"
+                        ),
+                        color=0xF1C40F
+                    )
+                    dm_embed.set_footer(text="Template Engine Infrastructure")
+                    await interaction.user.send(embed=dm_embed)
+                except Exception:
+                    pass
+
+                # Log to Subscription Channel
+                log_channel = interaction.guild.get_channel(SUBSCRIPTION_LOG_CHANNEL_ID) if interaction.guild else None
+                if log_channel:
+                    log_embed = discord.Embed(
+                        title="💎 Account Verified & Premium Linked",
+                        description=f"User {interaction.user.mention} (`{interaction.user.name}`) verified via Roblox Bio!",
+                        color=0xF1C40F,
+                        timestamp=now
+                    )
+                    log_embed.add_field(name="Roblox Profile", value=f"@{exact_username} (`{roblox_id}`)", inline=True)
+                    log_embed.add_field(name="Expires At", value=f"<t:{int(expires_at.timestamp())}:R>", inline=True)
+                    log_embed.set_footer(text="Template Engine Audit Log")
+                    await log_channel.send(embed=log_embed)
 
                 success_embed = discord.Embed(
                     title="[ROBLOX ACCOUNT VERIFIED]",
@@ -365,9 +410,22 @@ class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.check_premium_expirations.start()
+        self.monthly_summary_task.start()
 
     def cog_unload(self):
         self.check_premium_expirations.cancel()
+        self.monthly_summary_task.cancel()
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
+        if not channel:
+            channel = member.guild.system_channel
+        if channel:
+            try:
+                await channel.send(f"Welcome, {member.mention}")
+            except Exception as e:
+                print(f"[Welcome Error] {e}")
 
     async def get_or_create_premium_role(self, guild: discord.Guild) -> discord.Role:
         role = discord.utils.get(guild.roles, name=PREMIUM_ROLE_NAME)
@@ -442,6 +500,36 @@ class BotCog(commands.Cog):
 
     @check_premium_expirations.before_loop
     async def before_check_expirations(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=24.0)
+    async def monthly_summary_task(self):
+        now = datetime.now(timezone.utc)
+        if now.day == 1:
+            channel = self.bot.get_channel(MONTHLY_ANALYTICS_CHANNEL_ID)
+            if not channel:
+                return
+
+            active_prem = db_premium.count_documents({"expires_at": {"$gt": now.isoformat()}}) if db_premium is not None else len(LOCAL_PREMIUM_USERS)
+            total_blueprints = db_stats.find_one({"metric": "global"}).get("blueprints_generated", 0) if db_stats is not None else 0
+            
+            total_earnings_robux = active_prem * 299
+            total_earnings_usd = round(total_earnings_robux * 0.0035, 2)
+
+            embed = discord.Embed(
+                title=f"📊 Monthly Analytics Summary — {now.strftime('%B %Y')}",
+                color=0xF1C40F,
+                timestamp=now
+            )
+            embed.add_field(name="Active Premium Subscribers", value=f"`{active_prem}`", inline=True)
+            embed.add_field(name="Estimated Monthly Revenue", value=f"`{total_earnings_robux} Robux` (~`${total_earnings_usd} USD`)", inline=True)
+            embed.add_field(name="Total Server Layouts Generated", value=f"`{total_blueprints}`", inline=False)
+            embed.set_footer(text="Template Engine Automated Analytics")
+
+            await channel.send(embed=embed)
+
+    @monthly_summary_task.before_loop
+    async def before_monthly_summary(self):
         await self.bot.wait_until_ready()
 
     def build_permission_overwrites(
@@ -570,7 +658,83 @@ class BotCog(commands.Cog):
         confirm_embed.set_footer(text="Template Engine Infrastructure")
         await interaction.response.send_message(embed=confirm_embed, ephemeral=True)
 
-    # --- 3. /build COMMAND (AUTHORIZED USER IDs ONLY) ---
+    # --- 3. /channel COMMAND (TEMPORARY CHANNEL CONFIGURATION WITH NOTIFICATIONS) ---
+    @app_commands.command(name="channel", description="Configure channel type or set a temporary channel timer.")
+    @app_commands.describe(
+        type="Select channel behavior",
+        duration="Duration for temporary channels (e.g., 10m, 2h, 1d)"
+    )
+    @app_commands.choices(type=[
+        app_commands.Choice(name="Temporary Channel", value="temporary"),
+        app_commands.Choice(name="Standard Channel", value="standard")
+    ])
+    async def set_channel_type(self, interaction: discord.Interaction, type: app_commands.Choice[str], duration: str = "1h"):
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("Manage Channels permission required.", ephemeral=True)
+            return
+
+        ch = interaction.channel
+        if type.value == "temporary":
+            td = parse_duration_to_timedelta(duration)
+            expires_at = datetime.now(timezone.utc) + td
+
+            init_embed = discord.Embed(
+                title="⏳ Temporary Channel Configured",
+                description=(
+                    f"This channel has been set to **Temporary** and will automatically expire in **{duration}**.\n\n"
+                    f"**Scheduled Expiration:** <t:{int(expires_at.timestamp())}:F> (<t:{int(expires_at.timestamp())}:R>)"
+                ),
+                color=0xeab308
+            )
+            init_embed.set_footer(text="Template Engine Channel Manager")
+            await interaction.response.send_message(embed=init_embed)
+
+            # Asynchronous timer for expiration warning & deletion
+            async def handle_temp_channel_lifecycle():
+                total_seconds = td.total_seconds()
+
+                # Warning notification 1 minute prior to deletion if duration is over 2 mins
+                if total_seconds > 120:
+                    await asyncio.sleep(total_seconds - 60)
+                    warn_embed = discord.Embed(
+                        title="⚠️ Channel Expiring Soon!",
+                        description="This temporary channel will be automatically deleted in **1 minute**.",
+                        color=0xf43f5e
+                    )
+                    warn_embed.set_footer(text="Template Engine Channel Manager")
+                    try:
+                        await ch.send(embed=warn_embed)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(60)
+                else:
+                    await asyncio.sleep(total_seconds)
+
+                # Final Expiration & Deletion
+                try:
+                    del_embed = discord.Embed(
+                        title="💥 Temporary Channel Expired",
+                        description="Channel lifetime reached. Deleting channel now...",
+                        color=0xf43f5e
+                    )
+                    await ch.send(embed=del_embed)
+                    await asyncio.sleep(3)
+                    await ch.delete(reason="Temporary channel expired")
+                except Exception as e:
+                    print(f"[Temp Channel Deletion Error] {e}")
+
+            asyncio.create_task(handle_temp_channel_lifecycle())
+
+        else:
+            std_embed = discord.Embed(
+                title="📌 Standard Channel Active",
+                description="This channel is set to **Standard** and will persist indefinitely.",
+                color=0x2ecc71
+            )
+            std_embed.set_footer(text="Template Engine Channel Manager")
+            await interaction.response.send_message(embed=std_embed)
+
+    # --- 4. /build COMMAND (AUTHORIZED USER IDs ONLY) ---
     @app_commands.command(name="build", description="Deploys layout blueprint (Requires build authorization).")
     @app_commands.describe(
         url="Optional URL to blueprint JSON",
@@ -647,7 +811,7 @@ class BotCog(commands.Cog):
         done_embed.set_footer(text="Template Engine Infrastructure")
         await interaction.followup.send(embed=done_embed)
 
-    # --- 4. /build-allow COMMAND (OWNER ONLY) ---
+    # --- 5. /build-allow COMMAND (OWNER ONLY) ---
     @app_commands.command(name="build-allow", description="Toggle /build command authorization for a specific user.")
     @app_commands.describe(user="Target user to grant or revoke authorization")
     async def build_allow_toggle(self, interaction: discord.Interaction, user: discord.User):
@@ -681,7 +845,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="Template Engine Infrastructure")
         await interaction.followup.send(embed=embed)
 
-    # --- 5. /premium COMMAND (PUBLIC) ---
+    # --- 6. /premium COMMAND (PUBLIC) ---
     @app_commands.command(name="premium", description="View features, perks, and subscription link for TE Premium.")
     async def premium_info(self, interaction: discord.Interaction):
         roblox_place_id = os.getenv("ROBLOX_PLACE_ID", "6094950399")
@@ -711,7 +875,7 @@ class BotCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed, view=view)
 
-    # --- 6. /premium-set COMMAND (OWNER ONLY) ---
+    # --- 7. /premium-set COMMAND (OWNER ONLY) ---
     @app_commands.command(name="premium-set", description="Grant or remove TE Premium status for a user.")
     @app_commands.describe(
         user="Target user to modify TE Premium status for",
@@ -760,7 +924,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="TE Premium Infrastructure")
         await interaction.followup.send(embed=embed)
 
-    # --- 7. /ping COMMAND (PUBLIC) ---
+    # --- 8. /ping COMMAND (PUBLIC) ---
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping(self, interaction: discord.Interaction):
         latency_ms = round(self.bot.latency * 1000)
@@ -772,7 +936,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="Template Engine Infrastructure")
         await interaction.response.send_message(embed=embed)
 
-    # --- 8. /nuke COMMAND (OWNER ONLY) ---
+    # --- 9. /nuke COMMAND (OWNER ONLY) ---
     @app_commands.command(name="nuke", description="Delete all channels and roles in the server (Owner restricted).")
     async def nuke_server(self, interaction: discord.Interaction):
         if interaction.user.id != BOT_OWNER_ID:
@@ -794,19 +958,20 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=nuke_embed)
         await self.wipe_guild_infrastructure(interaction.guild)
 
-    # --- 9. /website COMMAND (PUBLIC) ---
-    @app_commands.command(name="website", description="Get the official Template Engine website link.")
+    # --- 10. /website COMMAND (PUBLIC) ---
+    @app_commands.command(name="website", description="Get the official Template Engine website button.")
     async def website_link(self, interaction: discord.Interaction):
         website_url = os.getenv("WEBSITE_URL", os.getenv("DASHBOARD_URL", "https://templateengine-xi.vercel.app"))
         
         embed = discord.Embed(
             title="[TEMPLATE ENGINE WEBSITE]",
-            description=f"Access the interactive layout generator and dashboard online:\n{website_url}",
+            description="Click the button below to access the online layout generator and server architecture dashboard.",
             color=0x3b82f6
         )
         embed.set_footer(text="Template Engine Infrastructure")
+        
         view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Open Website", url=website_url, style=discord.ButtonStyle.link))
+        view.add_item(discord.ui.Button(label="Open Website", url=website_url, style=discord.ButtonStyle.link, emoji="🌐"))
         
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -914,5 +1079,8 @@ class BotCog(commands.Cog):
 
 
 async def setup(bot):
+    # Register persistent UI views on bot startup so buttons survive redeployments
+    bot.add_view(VerificationPanelView())
+    bot.add_view(UnsyncPanelView())
     cog = BotCog(bot)
     await bot.add_cog(cog)
