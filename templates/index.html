@@ -13,6 +13,7 @@
 const RECAPTCHA_SITE_KEY = "{{ recaptcha_site_key or '' }}".trim();
 const DISCORD_CLIENT_ID = "{{ discord_client_id or '' }}".trim();
 const IS_USER_LOGGED_IN = {{ 'true' if user else 'false' }};
+const IS_ROBLOX_LINKED = {{ 'true' if roblox_user else 'false' }};
 const IS_TE_PREMIUM = {{ 'true' if is_premium else 'false' }};
 let isCaptchaVerified = false;
 function checkAuthAndCaptchaStatus() {
@@ -21,6 +22,11 @@ const label = document.getElementById('continue-btn-label');
 if (!IS_USER_LOGGED_IN) {
 if (btn) btn.disabled = true;
 if (label) label.innerText = "Log In with Discord First";
+return;
+}
+if (!IS_ROBLOX_LINKED) {
+if (btn) btn.disabled = true;
+if (label) label.innerText = "Link Roblox Account First";
 return;
 }
 if (!isCaptchaVerified && RECAPTCHA_SITE_KEY && RECAPTCHA_SITE_KEY.length > 5) {
@@ -936,8 +942,8 @@ const DISCORD_PERMISSIONS_LIST = [
 { id: "manage", label: "Manage Channel" }
 ];
 function proceedToGenerator() {
-if (!IS_USER_LOGGED_IN) {
-window.location.href = "/login";
+if (!IS_USER_LOGGED_IN || !IS_ROBLOX_LINKED) {
+checkAuthAndCaptchaStatus();
 return;
 }
 navigateTo('page-generator');
