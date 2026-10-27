@@ -736,13 +736,13 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
-    # --- WELCOME SETUP COMMAND (OWNER RESTRICTED) ---
+    # --- WELCOME SETUP COMMAND (OWNER RESTRICTED & ADMINISTRATOR DEFAULT) ---
     @app_commands.command(name="welcome-set", description="Set welcome channel and custom welcome message format for this server.")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         channel="Target text channel for welcome messages",
         message="Custom message template (Use {user} for user ping, {server} for server name)"
     )
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def welcome_set(self, interaction: discord.Interaction, channel: discord.TextChannel, message: str = "Welcome, {user}.\nPlease read channel."):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -885,9 +885,9 @@ class BotCog(commands.Cog):
 
             asyncio.create_task(handle_temp_channel_lifecycle())
 
-    # --- PREMIUM MANAGEMENT COMMANDS (OWNER RESTRICTED) ---
+    # --- PREMIUM MANAGEMENT COMMANDS (OWNER RESTRICTED & ADMIN DEFAULT) ---
     @app_commands.command(name="premiums", description="List all active TE Premium members and expiration dates (Owner restricted).")
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
+    @app_commands.default_permissions(administrator=True)
     async def premiums_list(self, interaction: discord.Interaction):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -928,6 +928,7 @@ class BotCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="premium-set", description="Grant or remove TE Premium status for a user (Owner restricted).")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         user="Target user to grant or revoke premium",
         action="Select add or remove",
@@ -937,7 +938,6 @@ class BotCog(commands.Cog):
         app_commands.Choice(name="Add Premium", value="add"),
         app_commands.Choice(name="Remove Premium", value="remove")
     ])
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def premium_set(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], duration: str = "30d"):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -993,12 +993,12 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
 
     @app_commands.command(name="premium-description", description="Customize the /premium embed title, description, and perks (Owner restricted).")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         title="Custom title for /premium embed",
         description="Custom body description text",
         perks="Perks list (One perk per line)"
     )
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def premium_description_set(self, interaction: discord.Interaction, title: str = None, description: str = None, perks: str = None):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -1173,7 +1173,7 @@ class BotCog(commands.Cog):
 
     # --- UTILITY & ADMIN PANELS ---
     @app_commands.command(name="verification-set", description="Post Roblox verification panel.")
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
+    @app_commands.default_permissions(administrator=True)
     async def verification_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Roblox Account Verification", description: str = "Click Generate Code to link your Roblox profile."):
         if interaction.user.id != BOT_OWNER_ID: return
         embed = discord.Embed(title=title, description=description, color=0x8b5cf6)
@@ -1183,7 +1183,7 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=confirm, ephemeral=True)
 
     @app_commands.command(name="un-sync-set", description="Post Roblox unsync panel.")
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
+    @app_commands.default_permissions(administrator=True)
     async def unsync_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Unsync Roblox Account", description: str = "Unlink your Roblox account."):
         if interaction.user.id != BOT_OWNER_ID: return
         embed = discord.Embed(title=title, description=description, color=0xf43f5e)
@@ -1193,8 +1193,8 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=confirm, ephemeral=True)
 
     @app_commands.command(name="build-allow", description="Toggle /build authorization for a user (Owner restricted).")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(user="Target user to grant or revoke authorization")
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def build_allow_toggle(self, interaction: discord.Interaction, user: discord.User):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -1213,7 +1213,7 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="nuke", description="Delete all channels and roles in the server (Owner restricted).")
-    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
+    @app_commands.default_permissions(administrator=True)
     async def nuke_server(self, interaction: discord.Interaction):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -1268,7 +1268,4 @@ async def setup(bot):
     await bot.add_cog(cog)
 ```
 
-### Summary of Visibility Changes:
-- **`guild_permissions=discord.Permissions.none()`** has been set as the default permissions decorator on `/welcome-set`, `/premiums`, `/premium-set`, `/premium-description`, `/verification-set`, `/un-sync-set`, `/build-allow`, and `/nuke`.
-- Server admins across all servers will **not** see these commands in their Discord slash command menu.
-- Only your hardcoded Bot Owner ID (`1219266886143967245`) will pass the underlying code checks and be able to execute them. Make sure to run `!sync` in Discord after restarting your bot so Discord updates its global command tree!
+The updated `cogs/bot.py` file has been saved. Remember to type **`!sync`** in your server chat to update Discord's command picker.
