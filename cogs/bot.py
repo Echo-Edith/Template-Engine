@@ -253,7 +253,6 @@ async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
     if ROBLOX_OPEN_CLOUD_KEY:
         headers["x-api-key"] = ROBLOX_OPEN_CLOUD_KEY
 
-    # Target URLs to attempt (Group revenue or User revenue)
     urls = []
     if ROBLOX_GROUP_ID:
         urls.append(f"https://economy.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/revenue/summary/{tf_param}")
@@ -287,7 +286,7 @@ async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
                 "creator_rewards": 0,
                 "total": 0,
                 "pending_robux": 0,
-                "note": "Roblox returned 404/403. If using Group revenue, ensure `ROBLOX_GROUP_ID` and `ROBLOX_COOKIE` are added to your .env file."
+                "note": "Roblox returned 404/403. Ensure `ROBLOX_GROUP_ID` and `ROBLOX_COOKIE` are set in your environment variables."
             }
     except Exception as e:
         return {"error": str(e)}
@@ -860,6 +859,14 @@ class BotCog(commands.Cog):
         self.check_analytics_reports.cancel()
 
     @commands.Cog.listener()
+    async def on_ready(self):
+        try:
+            synced = await self.bot.tree.sync()
+            print(f"[BotCog OnReady] Automatically synchronized {len(synced)} slash commands globally.")
+        except Exception as e:
+            print(f"[BotCog Sync Error] Failed auto-sync: {e}")
+
+    @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         guild_id = str(member.guild.id)
         settings = get_guild_settings(guild_id)
@@ -1085,10 +1092,10 @@ class BotCog(commands.Cog):
         loading_msg = await ctx.send("🔎 *Fetching revenue summary from Roblox...*")
         rev_data = await fetch_roblox_revenue_data(tf_clean)
 
-        if "error" in rev_data:
+        if "error" in rev_data and rev_data.get("total", 0) == 0 and "note" not in rev_data:
             err_embed = discord.Embed(
                 title="[REVENUE FETCH ERROR]",
-                description=f"Failed to fetch revenue data: {rev_data['error']}",
+                description=f"Failed to fetch revenue data: {rev_data.get('error', 'Unknown Error')}",
                 color=0xf43f5e
             )
             await loading_msg.edit(content=None, embed=err_embed)
@@ -1671,11 +1678,3 @@ async def setup(bot):
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
     await bot.add_cog(BotCog(bot))
-```
-
-### Steps to Complete:
-1. Update `cogs/bot.py` with the new file above and redeploy.
-2. In your host environment variables (Render/Vercel/.env), add:
-   * **`ROBLOX_GROUP_ID`** = Your Group ID (if Template Engine is owned by a Roblox Group).
-   * **`ROBLOX_COOKIE`** = Your `.ROBLOSECURITY` cookie value (enables `economy.roblox.com` queries).
-3. Try running **`!rev 1d`** again in Discord!
