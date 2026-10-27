@@ -18,7 +18,7 @@ PREMIUM_SCAN_CHANNEL_ID = 1563544108696477802
 BOT_OWNER_ID = 1219266886143967245
 
 # Custom Gold Giveaway Banner URL
-GIVEAWAY_BANNER_URL = "https://i.ibb.co/3yn9m4T/gold-giveaway-banner.png"
+GIVEAWAY_BANNER_URL = "https://res.cloudinary.com/dtz0urit6/image/upload/f_png,q_auto/cloudinary-tools-uploads/qxpfnwtebf6jqybaayjo.png"
 
 MONGO_URI = os.getenv("MONGO_URI")
 ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
@@ -391,7 +391,7 @@ class OwnerWelcomeModal(discord.ui.Modal, title="Set Custom Welcome Message"):
         style=discord.TextStyle.paragraph,
         placeholder="e.g. Welcome, {user} to {server}!",
         required=True,
-        default="Welcome, {user}"
+        default="Welcome, {user}.\nPlease read channel."
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -685,7 +685,7 @@ class BotCog(commands.Cog):
         settings = get_guild_settings(guild_id)
 
         target_ch_id = settings.get("welcome_channel_id") or str(WELCOME_CHANNEL_ID)
-        welcome_tpl = settings.get("welcome_message") or "Welcome, {user}"
+        welcome_tpl = settings.get("welcome_message") or "Welcome, {user}.\nPlease read channel."
 
         channel = member.guild.get_channel(int(target_ch_id)) if target_ch_id.isdigit() else None
         if not channel:
@@ -1041,16 +1041,25 @@ class BotCog(commands.Cog):
         unallowed_ids = [int(x.strip()) for x in unallowed_roles.split(",") if x.strip().isdigit()] if unallowed_roles else []
         bonus_ids = [int(x.strip()) for x in allowed_roles_max_entry.split(",") if x.strip().isdigit()] if allowed_roles_max_entry else []
 
-        # DYNO STYLE UI EMBED STRUCTURE
+        # DYNO STYLE EXACT EMBED STRUCTURE
+        embed_desc = ""
+        if prize:
+            embed_desc += f"**{prize}**\n"
+        if description:
+            embed_desc += f"{description}\n"
+        if embed_desc:
+            embed_desc += "\n"
+
+        embed_desc += (
+            f"**Time Remaining**\n"
+            f"<t:{int(end_time.timestamp())}:R> (<t:{int(end_time.timestamp())}:F>)\n\n"
+            f"**Hosted By**\n"
+            f"{interaction.user.mention}"
+        )
+
         embed = discord.Embed(
             title=title,
-            description=(
-                f"{description or ''}\n\n"
-                f"**Time Remaining**\n"
-                f"<t:{int(end_time.timestamp())}:R> (<t:{int(end_time.timestamp())}:F>)\n\n"
-                f"**Hosted By**\n"
-                f"{interaction.user.mention}"
-            ),
+            description=embed_desc,
             color=0x3b82f6
         )
         embed.set_image(url=GIVEAWAY_BANNER_URL)
