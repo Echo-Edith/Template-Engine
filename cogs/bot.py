@@ -631,6 +631,7 @@ class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via O
     </Item>
 </roblox>"""
 
+        # Corrected Open Cloud Place Publishing Endpoint
         url = f"https://apis.roblox.com/v1/universes/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/versions?versionType=Published"
         headers = {
             "x-api-key": ROBLOX_OPEN_CLOUD_KEY,
