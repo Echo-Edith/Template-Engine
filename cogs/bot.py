@@ -298,13 +298,58 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
         await interaction.followup.send(embed=err, ephemeral=True)
         return
 
+    # XML Place Structure with a Physical Baseplate & SpawnLocation to prevent Void Death Loops
     rbxlx_template = f"""<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
     <External>null</External>
     <External>nil</External>
     <Item class="Workspace" referent="RBX0">
         <Properties>
             <string name="Name">Workspace</string>
+            <float name="FallenPartsDestroyHeight">-100000</float>
         </Properties>
+        <Item class="Part" referent="RBX_BASEPLATE">
+            <Properties>
+                <string name="Name">Baseplate</string>
+                <bool name="Anchored">true</bool>
+                <bool name="CanCollide">true</bool>
+                <CoordinateFrame name="CFrame">
+                    <X>0</X>
+                    <Y>0</Y>
+                    <Z>0</Z>
+                    <R00>1</R00><R01>0</R01><R02>0</R02>
+                    <R10>0</R10><R11>1</R11><R12>0</R12>
+                    <R20>0</R20><R21>0</R21><R22>1</R22>
+                </CoordinateFrame>
+                <Vector3 name="size">
+                    <X>500</X>
+                    <Y>20</Y>
+                    <Z>500</Z>
+                </Vector3>
+                <Color3uint8 name="Color3uint8">10724259</Color3uint8>
+                <float name="Transparency">0</float>
+            </Properties>
+        </Item>
+        <Item class="SpawnLocation" referent="RBX_SPAWN">
+            <Properties>
+                <string name="Name">SpawnLocation</string>
+                <bool name="Anchored">true</bool>
+                <bool name="CanCollide">true</bool>
+                <CoordinateFrame name="CFrame">
+                    <X>0</X>
+                    <Y>11</Y>
+                    <Z>0</Z>
+                    <R00>1</R00><R01>0</R01><R02>0</R02>
+                    <R10>0</R10><R11>1</R11><R12>0</R12>
+                    <R20>0</R20><R21>0</R21><R22>1</R22>
+                </CoordinateFrame>
+                <Vector3 name="size">
+                    <X>12</X>
+                    <Y>2</Y>
+                    <Z>12</Z>
+                </Vector3>
+                <float name="Transparency">0</float>
+            </Properties>
+        </Item>
     </Item>
     <Item class="StarterPlayer" referent="RBX1">
         <Properties>
@@ -327,7 +372,7 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
     url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/versions?versionType=Published"
     headers = {
         "x-api-key": ROBLOX_OPEN_CLOUD_KEY,
-        "Content-Type": "application/octet-stream"
+        "Content-Type": "application/xml"
     }
 
     try:
@@ -344,7 +389,7 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
                     embed = discord.Embed(
                         title="[PLACE PUBLISHED TO ROBLOX]",
                         description=(
-                            f"Successfully published `.rbxlx` place payload to Roblox!\n\n"
+                            f"Successfully published `.rbxlx` place payload with baseplate floor to Roblox!\n\n"
                             f"• **Place ID:** `{ROBLOX_PLACE_ID}`\n"
                             f"• **Universe ID:** `{ROBLOX_UNIVERSE_ID}`\n"
                             f"• **New Published Version:** `{version_num}`\n"
