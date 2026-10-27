@@ -10,7 +10,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
-# Target Log, Welcome, and Analytics Channels
+# Target Log and Welcome Channels
 SUBSCRIPTION_LOG_CHANNEL_ID = 1564262413514182739
 WELCOME_CHANNEL_ID = 1564262763310616799
 MONTHLY_ANALYTICS_CHANNEL_ID = 1564263447057670154
@@ -19,6 +19,11 @@ BOT_OWNER_ID = 1219266886143967245
 
 # Custom Gold Giveaway Banner URL
 GIVEAWAY_BANNER_URL = "https://res.cloudinary.com/dtz0urit6/image/upload/f_png,q_auto/cloudinary-tools-uploads/qxpfnwtebf6jqybaayjo.png"
+
+# Webhooks for Non-Premium logging
+SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
+WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
+DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
 
 MONGO_URI = os.getenv("MONGO_URI")
 ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
@@ -31,6 +36,7 @@ db_users = None
 db_stats = None
 db_giveaways = None
 db_settings = None
+db_premium_config = None
 
 if MONGO_URI:
     try:
@@ -45,6 +51,7 @@ if MONGO_URI:
         db_stats = db["stats"]
         db_giveaways = db["giveaways"]
         db_settings = db["guild_settings"]
+        db_premium_config = db["premium_config"]
     except Exception as e:
         print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
 
@@ -54,6 +61,7 @@ LOCAL_PERSISTENT_USERS = {}
 PENDING_VERIFICATION_CODES = {}
 LOCAL_GIVEAWAYS = {}
 LOCAL_GUILD_SETTINGS = {}
+LOCAL_PREMIUM_CONFIG = {}
 
 PREMIUM_ROLE_NAME = "Template Engine Premium"
 PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)
@@ -61,10 +69,10 @@ PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)
 
 def parse_duration_to_timedelta(duration_str: str) -> timedelta:
     if not duration_str or duration_str.lower() in ["inf", "infinite"]:
-        return timedelta(days=36500) # ~100 years
+        return timedelta(days=36500)
     match = re.match(r"^(\d+)\s*([smhdSMHD])?$", duration_str.strip())
     if not match:
-        return timedelta(days=1)
+        return timedelta(days=30)
     val, unit = match.groups()
     num = int(val)
     unit = (unit or "d").lower()
@@ -72,7 +80,7 @@ def parse_duration_to_timedelta(duration_str: str) -> timedelta:
     elif unit == "m": return timedelta(minutes=num)
     elif unit == "h": return timedelta(hours=num)
     elif unit == "d": return timedelta(days=num)
-    return timedelta(days=1)
+    return timedelta(days=30)
 
 
 def is_user_premium(user_id: str) -> bool:
@@ -214,7 +222,7 @@ async def check_roblox_subscription_status(roblox_id: str) -> bool:
     return False
 
 
-# --- GUILD SETTINGS HELPERS ---
+# --- GUILD & PREMIUM CONFIG HELPERS ---
 def set_guild_welcome_setting(guild_id: str, channel_id: str = None, message_template: str = None):
     g_id = str(guild_id)
     update_data = {}
@@ -234,6 +242,24 @@ def get_guild_settings(guild_id: str) -> dict:
     if db_settings is not None:
         return db_settings.find_one({"guild_id": g_id}) or {}
     return LOCAL_GUILD_SETTINGS.get(g_id, {})
+
+
+def set_premium_embed_config(title: str = None, description: str = None, perks: list = None):
+    update_data = {}
+    if title: update_data["title"] = title
+    if description: update_data["description"] = description
+    if perks is not None: update_data["perks"] = perks
+
+    if db_premium_config is not None:
+        db_premium_config.update_one({"config_key": "global"}, {"$set": update_data}, upsert=True)
+    else:
+        LOCAL_PREMIUM_CONFIG.update(update_data)
+
+
+def get_premium_embed_config() -> dict:
+    if db_premium_config is not None:
+        return db_premium_config.find_one({"config_key": "global"}) or {}
+    return LOCAL_PREMIUM_CONFIG
 
 
 # --- GIVEAWAY STORAGE HELPERS ---
@@ -269,7 +295,7 @@ class GiveawayEntriesPaginationView(discord.ui.View):
     def get_embed(self) -> discord.Embed:
         embed = discord.Embed(
             title=f"🎉 Giveaway Entries ({len(self.entries)} Total)",
-            color=0x3b82f6
+            color=0xF1C40F
         )
         start = self.current_page * self.per_page
         end = start + self.per_page
@@ -362,112 +388,6 @@ class GiveawayPanelView(discord.ui.View):
 
         pag_view = GiveawayEntriesPaginationView(unique_users)
         await interaction.response.send_message(embed=pag_view.get_embed(), view=pag_view, ephemeral=True)
-
-
-# --- OWNER DASHBOARD VIEW ---
-class OwnerWelcomeChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self):
-        super().__init__(
-            placeholder="Select Welcome Channel for this server...",
-            channel_types=[discord.ChannelType.text],
-            custom_id="select_owner_welcome_chan"
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        ch = self.values[0]
-        set_guild_welcome_setting(guild_id=str(interaction.guild.id), channel_id=str(ch.id))
-        embed = discord.Embed(
-            title="[WELCOME CHANNEL UPDATED]",
-            description=f"Welcome messages for **{interaction.guild.name}** will now be sent to {ch.mention}.",
-            color=0x2ecc71
-        )
-        embed.set_footer(text="Template Engine Owner Panel")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-class OwnerWelcomeModal(discord.ui.Modal, title="Set Custom Welcome Message"):
-    welcome_text = discord.ui.TextInput(
-        label="Welcome Message Format",
-        style=discord.TextStyle.paragraph,
-        placeholder="e.g. Welcome, {user} to {server}!",
-        required=True,
-        default="Welcome, {user}.\nPlease read channel."
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        msg_tpl = self.welcome_text.value.strip()
-        set_guild_welcome_setting(guild_id=str(interaction.guild.id), message_template=msg_tpl)
-        embed = discord.Embed(
-            title="[WELCOME MESSAGE SET]",
-            description=f"Updated welcome message template for **{interaction.guild.name}**:\n\n`{msg_tpl}`",
-            color=0x2ecc71
-        )
-        embed.set_footer(text="Template Engine Owner Panel")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-class OwnerPanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="View Active Premiums", style=discord.ButtonStyle.primary, custom_id="btn_owner_premiums", emoji="👑")
-    async def view_premiums(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("Restricted to Bot Owner.", ephemeral=True)
-            return
-
-        now = datetime.now(timezone.utc)
-        active_subscribers = []
-        if db_premium is not None:
-            docs = list(db_premium.find())
-            for doc in docs:
-                uid = doc.get("user_id")
-                exp_raw = doc.get("expires_at")
-                if uid and exp_raw:
-                    exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
-                    if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
-                    if exp > now: active_subscribers.append((uid, exp))
-        else:
-            for uid, exp in LOCAL_PREMIUM_USERS.items():
-                if exp > now: active_subscribers.append((uid, exp))
-
-        embed = discord.Embed(
-            title=f"👑 Active TE Premium Members ({len(active_subscribers)})",
-            color=0xF1C40F,
-            timestamp=now
-        )
-        if active_subscribers:
-            lines = [f"{idx}. <@{uid}> (`{uid}`) — Expires: <t:{int(exp.timestamp())}:R>" for idx, (uid, exp) in enumerate(active_subscribers, start=1)]
-            full_desc = "\n".join(lines)
-            embed.description = full_desc if len(full_desc) <= 4000 else full_desc[:3950] + "\n...[Truncated]"
-        else:
-            embed.description = "No active TE Premium subscribers found."
-
-        embed.set_footer(text="Template Engine Owner Panel")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Setup Welcome Channel", style=discord.ButtonStyle.secondary, custom_id="btn_owner_welcome_chan", emoji="⚙️")
-    async def setup_welcome_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("Restricted to Bot Owner.", ephemeral=True)
-            return
-
-        view = discord.ui.View(timeout=60)
-        view.add_item(OwnerWelcomeChannelSelect())
-        embed = discord.Embed(
-            title="[SELECT WELCOME CHANNEL]",
-            description=f"Choose the channel where welcome messages will be sent in **{interaction.guild.name}**:",
-            color=0x3b82f6
-        )
-        embed.set_footer(text="Template Engine Owner Panel")
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-    @discord.ui.button(label="Set Welcome Message", style=discord.ButtonStyle.success, custom_id="btn_owner_welcome_msg", emoji="✏️")
-    async def setup_welcome_message(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("Restricted to Bot Owner.", ephemeral=True)
-            return
-        await interaction.response.send_modal(OwnerWelcomeModal())
 
 
 # --- MODAL FOR ROBLOX VERIFICATION INPUT ---
@@ -748,7 +668,6 @@ class BotCog(commands.Cog):
         winner_count = gw_data.get("winners", 1)
         prize = gw_data.get("prize") or gw_data.get("title", "Prize")
 
-        # 100% Random Selection Weighted Pool
         weighted_pool = []
         for uid, weight in entries_dict.items():
             weighted_pool.extend([uid] * weight)
@@ -757,7 +676,6 @@ class BotCog(commands.Cog):
         if weighted_pool:
             unique_entrants = list(entries_dict.keys())
             actual_winners_count = min(winner_count, len(unique_entrants))
-            # Fair random sampling without duplicates
             winners = random.sample(unique_entrants, actual_winners_count)
 
         winner_pings = " ".join([f"<@{w}>" for w in winners]) if winners else "None"
@@ -770,17 +688,16 @@ class BotCog(commands.Cog):
                     f"**Winners:** {winner_pings}\n"
                     f"**Hosted By:** <@{gw_data.get('host_id')}>"
                 ),
-                color=0x2ecc71
+                color=0xF1C40F
             )
             end_embed.set_image(url=GIVEAWAY_BANNER_URL)
             end_embed.set_footer(text=f"{winner_count} winners | Ended")
             await msg.edit(embed=end_embed, view=None)
 
-        # Winner Announcement UI Embed with Mentions
         announcement_embed = discord.Embed(
             title="🎉 Giveaway Ended!",
             description=f"Congratulations {winner_pings}! You won **{prize}**!",
-            color=0x2ecc71
+            color=0xF1C40F
         )
         announcement_embed.set_footer(text="Template Engine Giveaways")
 
@@ -818,21 +735,27 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
-    # --- OWNER DASHBOARD PANEL COMMAND ---
-    @app_commands.command(name="owner-panel", description="Access Template Engine Owner Dashboard (Owner restricted).")
-    async def owner_panel(self, interaction: discord.Interaction):
-        if interaction.user.id != BOT_OWNER_ID:
-            err_embed = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
-            await interaction.response.send_message(embed=err_embed, ephemeral=True)
+    # --- WELCOME SETUP COMMAND ---
+    @app_commands.command(name="welcome-set", description="Set welcome channel and custom welcome message format for this server.")
+    @app_commands.describe(
+        channel="Target text channel for welcome messages",
+        message="Custom message template (Use {user} for user ping, {server} for server name)"
+    )
+    async def welcome_set(self, interaction: discord.Interaction, channel: discord.TextChannel, message: str = "Welcome, {user}.\nPlease read channel."):
+        if not interaction.user.guild_permissions.manage_guild and interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[PERMISSION DENIED]", description="Manage Server permission required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
             return
 
+        set_guild_welcome_setting(guild_id=str(interaction.guild.id), channel_id=str(channel.id), message_template=message)
+
         embed = discord.Embed(
-            title="⚙️ Template Engine Owner Dashboard",
-            description="Control active premiums, welcome configurations, and multi-server settings below.",
-            color=0xF1C40F
+            title="[WELCOME SETTINGS UPDATED]",
+            description=f"Welcome messages in **{interaction.guild.name}** will be sent to {channel.mention}.\n\n**Template:**\n`{message}`",
+            color=0x2ecc71
         )
-        embed.set_footer(text="Template Engine Owner Infrastructure")
-        await interaction.response.send_message(embed=embed, view=OwnerPanelView(), ephemeral=True)
+        embed.set_footer(text="Template Engine Configuration")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # --- CHANNEL MANAGEMENT COMMAND (/channel) ---
     @app_commands.command(name="channel", description="Create, edit, or set temporary channel behavior.")
@@ -960,7 +883,7 @@ class BotCog(commands.Cog):
 
             asyncio.create_task(handle_temp_channel_lifecycle())
 
-    # --- PREMIUMS LISTING COMMAND (/premiums) ---
+    # --- PREMIUM MANAGEMENT COMMANDS ---
     @app_commands.command(name="premiums", description="List all active TE Premium members and expiration dates (Owner restricted).")
     async def premiums_list(self, interaction: discord.Interaction):
         if interaction.user.id != BOT_OWNER_ID:
@@ -1000,6 +923,93 @@ class BotCog(commands.Cog):
 
         embed.set_footer(text="Template Engine Premium Audit Log")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="premium-set", description="Grant or remove TE Premium status for a user (Owner restricted).")
+    @app_commands.describe(
+        user="Target user to grant or revoke premium",
+        action="Select add or remove",
+        duration="Duration (e.g. 30d, 60d, inf)"
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Add Premium", value="add"),
+        app_commands.Choice(name="Remove Premium", value="remove")
+    ])
+    async def premium_set(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], duration: str = "30d"):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        user_id_str = str(user.id)
+        if action.value == "add":
+            td = parse_duration_to_timedelta(duration)
+            set_user_premium(user_id_str, td)
+            exp_time = datetime.now(timezone.utc) + td
+            embed = discord.Embed(
+                title="[TE PREMIUM GRANTED]",
+                description=f"Successfully granted TE Premium to {user.mention}.\nExpires: <t:{int(exp_time.timestamp())}:F> (<t:{int(exp_time.timestamp())}:R>)",
+                color=0x2ecc71
+            )
+        else:
+            remove_user_premium(user_id_str)
+            embed = discord.Embed(
+                title="[TE PREMIUM REVOKED]",
+                description=f"Revoked TE Premium status from {user.mention}.",
+                color=0xf43f5e
+            )
+
+        embed.set_footer(text="Template Engine Premium Manager")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="premium", description="View TE Premium features, perks, and subscription options.")
+    async def premium_public(self, interaction: discord.Interaction):
+        roblox_store_url = os.getenv("ROBLOX_STORE_URL", f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store")
+        cfg = get_premium_embed_config()
+
+        title = cfg.get("title") or "👑 Template Engine Premium"
+        base_desc = cfg.get("description") or "Upgrade to TE Premium to unlock automated server deployments, VIP badges, and custom themes."
+        perks_list = cfg.get("perks") or [
+            "Instant server layout auto-deployments",
+            "Gold Glassmorphism web dashboard access",
+            "Multi-entry multiplier on all server giveaways",
+            "Exclusive TE Premium gold role in Discord"
+        ]
+
+        perks_formatted = "\n".join([f"• {p}" for p in perks_list])
+        full_desc = f"{base_desc}\n\n**Perks Included:**\n{perks_formatted}"
+
+        embed = discord.Embed(
+            title=title,
+            description=full_desc,
+            color=0xF1C40F
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Get Premium on Roblox (299 Robux)", url=roblox_store_url, style=discord.ButtonStyle.link, emoji="🛒"))
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @app_commands.command(name="premium-description", description="Customize the /premium embed title, description, and perks (Owner restricted).")
+    @app_commands.describe(
+        title="Custom title for /premium embed",
+        description="Custom body description text",
+        perks="Perks list (One perk per line)"
+    )
+    async def premium_description_set(self, interaction: discord.Interaction, title: str = None, description: str = None, perks: str = None):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        perks_array = [line.strip() for line in perks.split("\n") if line.strip()] if perks else None
+        set_premium_embed_config(title=title, description=description, perks=perks_array)
+
+        embed = discord.Embed(
+            title="[PREMIUM EMBED CONFIG UPDATED]",
+            description="Successfully updated the `/premium` embed configuration.",
+            color=0x2ecc71
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # --- GIVEAWAY COMMANDS ---
     @app_commands.command(name="giveaway-start", description="Start a customizable giveaway with multi-entry multipliers.")
@@ -1041,7 +1051,6 @@ class BotCog(commands.Cog):
         unallowed_ids = [int(x.strip()) for x in unallowed_roles.split(",") if x.strip().isdigit()] if unallowed_roles else []
         bonus_ids = [int(x.strip()) for x in allowed_roles_max_entry.split(",") if x.strip().isdigit()] if allowed_roles_max_entry else []
 
-        # DYNO STYLE EXACT EMBED STRUCTURE
         embed_desc = ""
         if prize:
             embed_desc += f"**{prize}**\n"
@@ -1060,7 +1069,7 @@ class BotCog(commands.Cog):
         embed = discord.Embed(
             title=title,
             description=embed_desc,
-            color=0x3b82f6
+            color=0xF1C40F
         )
         embed.set_image(url=GIVEAWAY_BANNER_URL)
         embed.set_footer(text=f"{winners} winners | Ends At | {end_time.strftime('%Y/%m/%d %I:%M %p')}")
@@ -1189,12 +1198,25 @@ class BotCog(commands.Cog):
         view.add_item(discord.ui.Button(label="Open Website", url=website_url, style=discord.ButtonStyle.link))
         await interaction.response.send_message(embed=embed, view=view)
 
+    # --- PREFIX COMMAND FOR SYNCING SLASH COMMANDS ---
+    @commands.command(name="sync")
+    async def sync_prefix_command(self, ctx: commands.Context):
+        if ctx.author.id != BOT_OWNER_ID:
+            return
+
+        synced = await self.bot.tree.sync()
+        embed = discord.Embed(
+            title="[SLASH COMMANDS SYNCED]",
+            description=f"Successfully synchronized **{len(synced)}** slash commands across all guilds.",
+            color=0x2ecc71
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+        await ctx.send(embed=embed)
+
 
 async def setup(bot):
-    # Register persistent views so buttons work across restarts
     bot.add_view(VerificationPanelView())
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
-    bot.add_view(OwnerPanelView())
     cog = BotCog(bot)
     await bot.add_cog(cog)
