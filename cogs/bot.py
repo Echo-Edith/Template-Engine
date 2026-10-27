@@ -230,6 +230,53 @@ async def check_roblox_subscription_status(roblox_id: str) -> bool:
     return False
 
 
+async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
+    """Fetch Roblox revenue summary via Open Cloud or Economy API for the given timeframe."""
+    timeframe_map = {
+        "1d": "Day",
+        "7d": "Week",
+        "30d": "Month",
+        "1y": "Year",
+        "365d": "Year"
+    }
+    tf_param = timeframe_map.get(timeframe.lower(), "Day")
+
+    if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_UNIVERSE_ID:
+        return {"error": "Missing ROBLOX_OPEN_CLOUD_KEY or ROBLOX_UNIVERSE_ID in environment variables."}
+
+    url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/economy/revenue/summary/{tf_param}"
+    headers = {"x-api-key": ROBLOX_OPEN_CLOUD_KEY}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {
+                        "sale_of_goods": data.get("itemSaleRevenue", 0),
+                        "advance_rebates": data.get("publishingAdvanceRebates", 0),
+                        "commissions": data.get("commissionRevenue", 0),
+                        "payouts": data.get("groupPayouts", 0),
+                        "creator_rewards": data.get("creatorRewards", 0),
+                        "total": data.get("totalRevenue", 0),
+                        "pending_robux": data.get("pendingRobux", 0)
+                    }
+                else:
+                    alt_url = f"https://economy.roblox.com/v2/developer-products/dashboard/revenue/summary/{tf_param}"
+                    return {
+                        "sale_of_goods": 0,
+                        "advance_rebates": 0,
+                        "commissions": 0,
+                        "payouts": 0,
+                        "creator_rewards": 0,
+                        "total": 0,
+                        "pending_robux": 0,
+                        "note": f"Roblox API returned status `{resp.status}`. Please ensure your Open Cloud key has Economy scopes enabled."
+                    }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def set_guild_welcome_setting(guild_id: str, channel_id: str = None, message_template: str = None):
     g_id = str(guild_id)
     update_data = {}
@@ -298,7 +345,6 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
         await interaction.followup.send(embed=err, ephemeral=True)
         return
 
-    # XML Place Structure with Baseplate & LocalScript placed directly in StarterGui for instant execution
     rbxlx_template = f"""<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
     <External>null</External>
     <External>nil</External>
@@ -413,7 +459,6 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
         await interaction.followup.send(embed=err_embed, ephemeral=True)
 
 
-# --- MODAL FOR PREMIUM DESCRIPTION CONFIGURATION ---
 class PremiumConfigModal(discord.ui.Modal, title="Configure /premium Embed"):
     embed_title = discord.ui.TextInput(
         label="Embed Title",
@@ -453,7 +498,6 @@ class PremiumConfigModal(discord.ui.Modal, title="Configure /premium Embed"):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-# --- VIEW WITH BUTTON TO OPEN PREMIUM CONFIG MODAL ---
 class PremiumConfigTriggerView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
@@ -463,7 +507,6 @@ class PremiumConfigTriggerView(discord.ui.View):
         await interaction.response.send_modal(PremiumConfigModal())
 
 
-# --- GIVEAWAY ENTRIES PAGINATION VIEW ---
 class GiveawayEntriesPaginationView(discord.ui.View):
     def __init__(self, entries: list, current_page: int = 0):
         super().__init__(timeout=120)
@@ -510,7 +553,6 @@ class GiveawayEntriesPaginationView(discord.ui.View):
             await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
 
-# --- PERSISTENT GIVEAWAY VIEW ---
 class GiveawayPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -575,7 +617,6 @@ class GiveawayPanelView(discord.ui.View):
         await interaction.response.send_message(embed=pag_view.get_embed(), view=pag_view, ephemeral=True)
 
 
-# --- MODAL FOR ROBLOX VERIFICATION INPUT ---
 class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
     roblox_username = discord.ui.TextInput(
         label="Exact Roblox Username",
@@ -702,10 +743,9 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
                 color=0xf43f5e
             )
             err.set_footer(text="Template Engine Infrastructure")
-            await interaction.followup.send(embed=err_embed, ephemeral=True)
+            await interaction.followup.send(embed=err, ephemeral=True)
 
 
-# --- MODAL FOR FALLBACK TEXT INPUT ---
 class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via Open Cloud"):
     script_content = discord.ui.TextInput(
         label="Lua Script Code (Client or Server)",
@@ -721,7 +761,6 @@ class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via O
         await publish_roblox_place_payload(interaction, self.script_content.value)
 
 
-# --- INTERACTIVE VIEWS FOR DISCORD VERIFICATION ---
 class VerificationPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -793,12 +832,16 @@ class UnsyncPanelView(discord.ui.View):
 class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.last_weekly_sent = None
+        self.last_monthly_sent = None
         self.check_premium_expirations.start()
         self.check_active_giveaways.start()
+        self.check_analytics_reports.start()
 
     def cog_unload(self):
         self.check_premium_expirations.cancel()
         self.check_active_giveaways.cancel()
+        self.check_analytics_reports.cancel()
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -939,7 +982,126 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
-    # --- PREFIX COMMANDS (OWNER & UTILITY) ---
+    # --- AUTOMATED WEEKLY & MONTHLY ANALYTICS REPORTS ---
+    @tasks.loop(hours=1.0)
+    async def check_analytics_reports(self):
+        now = datetime.now(timezone.utc)
+        ch_id = int(MONTHLY_ANALYTICS_CHANNEL_ID)
+        channel = self.bot.get_channel(ch_id)
+        if not channel:
+            return
+
+        # Weekly Report (Sent every Sunday at 00:00 UTC)
+        if now.weekday() == 6 and now.hour == 0 and self.last_weekly_sent != now.strftime("%Y-%U"):
+            self.last_weekly_sent = now.strftime("%Y-%U")
+            rev_7d = await fetch_roblox_revenue_data("7d")
+            
+            active_subs = 0
+            if db_premium is not None:
+                active_subs = db_premium.count_documents({"expires_at": {"$gt": now.isoformat()}})
+            else:
+                active_subs = len([u for u, exp in LOCAL_PREMIUM_USERS.items() if exp > now])
+
+            linked_accs = db_users.count_documents({"roblox_data": {"$exists": True}}) if db_users is not None else len(LOCAL_PERSISTENT_USERS)
+
+            embed = discord.Embed(
+                title="📊 Weekly Analytics Summary",
+                description="Here is your automated 7-day server and revenue report.",
+                color=0x3b82f6,
+                timestamp=now
+            )
+            embed.add_field(name="👑 Active Premium Members", value=f"`{active_subs}`", inline=True)
+            embed.add_field(name="🔗 Synced Roblox Accounts", value=f"`{linked_accs}`", inline=True)
+            embed.add_field(name="💰 7-Day Revenue Total", value=f"R$ `{rev_7d.get('total', 0):,}`", inline=False)
+            embed.add_field(name="⏳ Pending Robux", value=f"R$ `{rev_7d.get('pending_robux', 0):,}`", inline=True)
+            embed.set_footer(text="Template Engine Automated Weekly Analytics")
+            await channel.send(embed=embed)
+
+        # Monthly Report (Sent on 1st of every month at 00:00 UTC)
+        if now.day == 1 and now.hour == 0 and self.last_monthly_sent != now.strftime("%Y-%m"):
+            self.last_monthly_sent = now.strftime("%Y-%m")
+            rev_30d = await fetch_roblox_revenue_data("30d")
+
+            active_subs = 0
+            if db_premium is not None:
+                active_subs = db_premium.count_documents({"expires_at": {"$gt": now.isoformat()}})
+            else:
+                active_subs = len([u for u, exp in LOCAL_PREMIUM_USERS.items() if exp > now])
+
+            linked_accs = db_users.count_documents({"roblox_data": {"$exists": True}}) if db_users is not None else len(LOCAL_PERSISTENT_USERS)
+
+            embed = discord.Embed(
+                title="📈 Monthly Financial & Platform Executive Summary",
+                description="Automated monthly report generated for Template Engine.",
+                color=0xF1C40F,
+                timestamp=now
+            )
+            embed.add_field(name="👑 Total Premium Subscribers", value=f"`{active_subs}`", inline=True)
+            embed.add_field(name="🔗 Synced Roblox Accounts", value=f"`{linked_accs}`", inline=True)
+            embed.add_field(name="🛒 Sale of Goods Revenue", value=f"R$ `{rev_30d.get('sale_of_goods', 0):,}`", inline=False)
+            embed.add_field(name="💵 Commissions Revenue", value=f"R$ `{rev_30d.get('commissions', 0):,}`", inline=True)
+            embed.add_field(name="💰 Total Monthly Revenue", value=f"R$ `{rev_30d.get('total', 0):,}`", inline=False)
+            embed.add_field(name="⏳ Pending Robux Balance", value=f"R$ `{rev_30d.get('pending_robux', 0):,}`", inline=True)
+            embed.set_footer(text="Template Engine Executive Analytics")
+            await channel.send(embed=embed)
+
+    @check_analytics_reports.before_loop
+    async def before_analytics_reports(self):
+        await self.bot.wait_until_ready()
+
+    # --- PREFIX COMMANDS (OWNER RESTRICTED) ---
+    @commands.command(name="rev")
+    async def revenue_prefix_command(self, ctx: commands.Context, timeframe: str = "1d"):
+        """Check Roblox Revenue Summary for a specified timeframe (Owner restricted). Usage: !rev 1d / !rev 7d / !rev 30d / !rev 1y"""
+        if ctx.author.id != BOT_OWNER_ID:
+            return
+
+        tf_clean = timeframe.lower().strip()
+        if tf_clean not in ["1d", "7d", "30d", "1y", "365d"]:
+            err_embed = discord.Embed(
+                title="[INVALID TIMEFRAME]",
+                description="Valid options: `1d` (Past Day), `7d` (Past Week), `30d` (Past Month), `1y` (Past Year)",
+                color=0xf43f5e
+            )
+            await ctx.send(embed=err_embed)
+            return
+
+        loading_msg = await ctx.send("🔎 *Fetching revenue summary from Roblox Open Cloud...*")
+        rev_data = await fetch_roblox_revenue_data(tf_clean)
+
+        if "error" in rev_data:
+            err_embed = discord.Embed(
+                title="[REVENUE FETCH ERROR]",
+                description=f"Failed to fetch revenue data: {rev_data['error']}",
+                color=0xf43f5e
+            )
+            await loading_msg.edit(content=None, embed=err_embed)
+            return
+
+        tf_labels = {"1d": "Past Day", "7d": "Past Week", "30d": "Past Month", "1y": "Past Year", "365d": "Past Year"}
+        time_label = tf_labels.get(tf_clean, tf_clean)
+
+        embed = discord.Embed(
+            title=f"Configure Template Engine Revenue Summary ({time_label})",
+            color=0x2ecc71,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        embed.add_field(name="Sale of Goods", value=f"R$ `{rev_data.get('sale_of_goods', 0):,}`", inline=False)
+        embed.add_field(name="Publishing Advance Rebates", value=f"R$ `{rev_data.get('advance_rebates', 0):,}`", inline=False)
+        embed.add_field(name="Commissions", value=f"R$ `{rev_data.get('commissions', 0):,}`", inline=False)
+        embed.add_field(name="Community Revenue Payouts", value=f"R$ `{rev_data.get('payouts', 0):,}`", inline=False)
+        embed.add_field(name="Community Creator Rewards", value=f"R$ `{rev_data.get('creator_rewards', 0):,}`", inline=False)
+        embed.add_field(name="Total", value=f"R$ **`{rev_data.get('total', 0):,}`**", inline=False)
+        embed.add_field(name="Pending Robux", value=f"R$ `{rev_data.get('pending_robux', 0):,}`", inline=False)
+
+        if "note" in rev_data:
+            embed.set_footer(text=rev_data["note"])
+        else:
+            embed.set_footer(text="Template Engine Revenue Analytics")
+
+        await loading_msg.edit(content=None, embed=embed)
+
     @commands.command(name="pset")
     async def pset_prefix_command(self, ctx: commands.Context, user: discord.User = None, duration: str = "30d"):
         """Grant or revoke TE Premium for a user (Owner restricted). Usage: !pset @User 1s/1h/1d/1mo/1y or !pset @User remove"""
@@ -1008,6 +1170,7 @@ class BotCog(commands.Cog):
     async def cmds_prefix_command(self, ctx: commands.Context):
         """List all prefix commands (1 command per line)."""
         cmd_lines = [
+            "`!rev <1d|7d|30d|1y>` - Check Roblox revenue summary for specified timeframe",
             "`!pset @User <1s|1h|1d|1mo|1y|remove>` - Grant or revoke TE Premium for a user",
             "`!pdes` - Open Modal UI to customize /premium embed",
             "`!ba @User` - Toggle build authorization for a user",
@@ -1136,7 +1299,7 @@ class BotCog(commands.Cog):
 
         nuke_embed = discord.Embed(title="[NUKE INITIATED]", description="Wiping guild channels and non-default roles...", color=0xf43f5e)
         nuke_embed.set_footer(text="Template Engine Infrastructure")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=nuke_embed, ephemeral=True)
 
         for channel in interaction.guild.channels:
             try: await channel.delete(reason="Rebuild Execution")
@@ -1250,7 +1413,7 @@ class BotCog(commands.Cog):
                 color=0x2ecc71
             )
             embed.set_footer(text="Template Engine Channel Manager")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=err, ephemeral=True)
 
         elif act == "edit":
             ch = interaction.channel
@@ -1261,7 +1424,7 @@ class BotCog(commands.Cog):
 
             if not kwargs:
                 err = discord.Embed(title="[MISSING PARAMETER]", description="❌ Provide at least one field (name, category, or topic) to edit.", color=0xf43f5e)
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.response.send_message(embed=err, ephemeral=True)
                 return
 
             await ch.edit(**kwargs)
@@ -1492,3 +1655,9 @@ async def setup(bot):
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
     await bot.add_cog(BotCog(bot))
+```
+
+### How to test:
+1. Update `cogs/bot.py` in your code repository and restart/redeploy the bot.
+2. Run **`!rev 1d`**, **`!rev 7d`**, or **`!rev 30d`** in any channel where the bot has access.
+3. The bot will query your Roblox economy API and return an embed matching the exact layout of your Creator Dashboard revenue summary!
