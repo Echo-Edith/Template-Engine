@@ -631,8 +631,8 @@ class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via O
     </Item>
 </roblox>"""
 
-        # Corrected Open Cloud Place Publishing Endpoint
-        url = f"https://apis.roblox.com/v1/universes/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/versions?versionType=Published"
+        # Exact Corrected Open Cloud v1 Place Publishing Endpoint
+        url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/versions?versionType=Published"
         headers = {
             "x-api-key": ROBLOX_OPEN_CLOUD_KEY,
             "Content-Type": "application/octet-stream"
@@ -641,7 +641,11 @@ class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via O
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, data=rbxlx_template.encode('utf-8')) as resp:
-                    resp_data = await resp.json() if resp.status == 200 else await resp.text()
+                    resp_text = await resp.text()
+                    try:
+                        resp_data = json.loads(resp_text)
+                    except Exception:
+                        resp_data = resp_text
 
                     if resp.status == 200:
                         version_num = resp_data.get("versionNumber", "N/A") if isinstance(resp_data, dict) else "N/A"
@@ -659,7 +663,7 @@ class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via O
                     else:
                         embed = discord.Embed(
                             title="[OPEN CLOUD PUBLISH FAILED]",
-                            description=f"Roblox Open Cloud returned status code `{resp.status}`:\n```json\n{resp_data}\n```",
+                            description=f"Roblox Open Cloud returned status code `{resp.status}`:\n```json\n{resp_text}\n```",
                             color=0xf43f5e
                         )
 
