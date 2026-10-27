@@ -262,7 +262,6 @@ async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
                         "pending_robux": data.get("pendingRobux", 0)
                     }
                 else:
-                    alt_url = f"https://economy.roblox.com/v2/developer-products/dashboard/revenue/summary/{tf_param}"
                     return {
                         "sale_of_goods": 0,
                         "advance_rebates": 0,
@@ -1413,7 +1412,7 @@ class BotCog(commands.Cog):
                 color=0x2ecc71
             )
             embed.set_footer(text="Template Engine Channel Manager")
-            await interaction.response.send_message(embed=err, ephemeral=True)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         elif act == "edit":
             ch = interaction.channel
@@ -1655,9 +1654,3 @@ async def setup(bot):
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
     await bot.add_cog(BotCog(bot))
-```
-
-### How to test:
-1. Update `cogs/bot.py` in your code repository and restart/redeploy the bot.
-2. Run **`!rev 1d`**, **`!rev 7d`**, or **`!rev 30d`** in any channel where the bot has access.
-3. The bot will query your Roblox economy API and return an embed matching the exact layout of your Creator Dashboard revenue summary!
