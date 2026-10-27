@@ -284,6 +284,94 @@ def get_giveaway_data(message_id: str) -> dict:
     return LOCAL_GIVEAWAYS.get(msg_id_str, {})
 
 
+async def publish_roblox_place_payload(interaction: discord.Interaction, lua_code: str):
+    if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_UNIVERSE_ID or not ROBLOX_PLACE_ID:
+        err = discord.Embed(
+            title="[CONFIGURATION ERROR]",
+            description=(
+                "Missing Open Cloud Credentials in Environment Variables!\n\n"
+                "Ensure `ROBLOX_OPEN_CLOUD_KEY`, `ROBLOX_UNIVERSE_ID`, and `ROBLOX_PLACE_ID` are configured."
+            ),
+            color=0xf43f5e
+        )
+        err.set_footer(text="Template Engine Infrastructure")
+        await interaction.followup.send(embed=err, ephemeral=True)
+        return
+
+    rbxlx_template = f"""<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+    <External>null</External>
+    <External>nil</External>
+    <Item class="Workspace" referent="RBX0">
+        <Properties>
+            <string name="Name">Workspace</string>
+        </Properties>
+    </Item>
+    <Item class="StarterPlayer" referent="RBX1">
+        <Properties>
+            <string name="Name">StarterPlayer</string>
+        </Properties>
+        <Item class="StarterPlayerScripts" referent="RBX2">
+            <Properties>
+                <string name="Name">StarterPlayerScripts</string>
+            </Properties>
+            <Item class="LocalScript" referent="RBX3">
+                <Properties>
+                    <string name="Name">MainClientScript</string>
+                    <ProtectedString name="Source"><![CDATA[{lua_code}]]></ProtectedString>
+                </Properties>
+            </Item>
+        </Item>
+    </Item>
+</roblox>"""
+
+    url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/versions?versionType=Published"
+    headers = {
+        "x-api-key": ROBLOX_OPEN_CLOUD_KEY,
+        "Content-Type": "application/octet-stream"
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, data=rbxlx_template.encode('utf-8')) as resp:
+                resp_text = await resp.text()
+                try:
+                    resp_data = json.loads(resp_text)
+                except Exception:
+                    resp_data = resp_text
+
+                if resp.status == 200:
+                    version_num = resp_data.get("versionNumber", "N/A") if isinstance(resp_data, dict) else "N/A"
+                    embed = discord.Embed(
+                        title="[PLACE PUBLISHED TO ROBLOX]",
+                        description=(
+                            f"Successfully published `.rbxlx` place payload to Roblox!\n\n"
+                            f"• **Place ID:** `{ROBLOX_PLACE_ID}`\n"
+                            f"• **Universe ID:** `{ROBLOX_UNIVERSE_ID}`\n"
+                            f"• **New Published Version:** `{version_num}`\n"
+                            f"• **Payload Size:** `{len(lua_code)} characters`"
+                        ),
+                        color=0x2ecc71
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="[OPEN CLOUD PUBLISH FAILED]",
+                        description=f"Roblox Open Cloud returned status code `{resp.status}`:\n```json\n{resp_text}\n```",
+                        color=0xf43f5e
+                    )
+
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        err_embed = discord.Embed(
+            title="[PUBLISH EXCEPTION]",
+            description=f"Failed to communicate with Roblox Open Cloud API: {e}",
+            color=0xf43f5e
+        )
+        err_embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.followup.send(embed=err_embed, ephemeral=True)
+
+
 # --- MODAL FOR PREMIUM DESCRIPTION CONFIGURATION ---
 class PremiumConfigModal(discord.ui.Modal, title="Configure /premium Embed"):
     embed_title = discord.ui.TextInput(
@@ -576,108 +664,20 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
             await interaction.followup.send(embed=err, ephemeral=True)
 
 
-# --- MODAL FOR LARGE LUA SCRIPT PLACE PUBLISHING ---
+# --- MODAL FOR FALLBACK TEXT INPUT ---
 class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via Open Cloud"):
     script_content = discord.ui.TextInput(
         label="Lua Script Code (Client or Server)",
         style=discord.TextStyle.paragraph,
-        placeholder="Paste your complete Lua script here (Up to 4,000 characters)...",
+        placeholder="Paste your script here...",
         required=True,
-        min_length=10,
+        min_length=5,
         max_length=4000
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-
-        if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_UNIVERSE_ID or not ROBLOX_PLACE_ID:
-            err = discord.Embed(
-                title="[CONFIGURATION ERROR]",
-                description=(
-                    "Missing Open Cloud Credentials in Environment Variables!\n\n"
-                    "Ensure `ROBLOX_OPEN_CLOUD_KEY`, `ROBLOX_UNIVERSE_ID`, and `ROBLOX_PLACE_ID` are configured."
-                ),
-                color=0xf43f5e
-            )
-            err.set_footer(text="Template Engine Infrastructure")
-            await interaction.followup.send(embed=err, ephemeral=True)
-            return
-
-        lua_code = self.script_content.value
-
-        rbxlx_template = f"""<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
-    <External>null</External>
-    <External>nil</External>
-    <Item class="Workspace" referent="RBX0">
-        <Properties>
-            <string name="Name">Workspace</string>
-        </Properties>
-    </Item>
-    <Item class="StarterPlayer" referent="RBX1">
-        <Properties>
-            <string name="Name">StarterPlayer</string>
-        </Properties>
-        <Item class="StarterPlayerScripts" referent="RBX2">
-            <Properties>
-                <string name="Name">StarterPlayerScripts</string>
-            </Properties>
-            <Item class="LocalScript" referent="RBX3">
-                <Properties>
-                    <string name="Name">MainClientScript</string>
-                    <ProtectedString name="Source"><![CDATA[{lua_code}]]></ProtectedString>
-                </Properties>
-            </Item>
-        </Item>
-    </Item>
-</roblox>"""
-
-        # Exact Corrected Open Cloud v1 Place Publishing Endpoint
-        url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/versions?versionType=Published"
-        headers = {
-            "x-api-key": ROBLOX_OPEN_CLOUD_KEY,
-            "Content-Type": "application/octet-stream"
-        }
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, data=rbxlx_template.encode('utf-8')) as resp:
-                    resp_text = await resp.text()
-                    try:
-                        resp_data = json.loads(resp_text)
-                    except Exception:
-                        resp_data = resp_text
-
-                    if resp.status == 200:
-                        version_num = resp_data.get("versionNumber", "N/A") if isinstance(resp_data, dict) else "N/A"
-                        embed = discord.Embed(
-                            title="[PLACE PUBLISHED TO ROBLOX]",
-                            description=(
-                                f"Successfully published updated `.rbxlx` place payload to Roblox!\n\n"
-                                f"• **Place ID:** `{ROBLOX_PLACE_ID}`\n"
-                                f"• **Universe ID:** `{ROBLOX_UNIVERSE_ID}`\n"
-                                f"• **New Published Version:** `{version_num}`\n"
-                                f"• **Payload Size:** `{len(lua_code)} characters`"
-                            ),
-                            color=0x2ecc71
-                        )
-                    else:
-                        embed = discord.Embed(
-                            title="[OPEN CLOUD PUBLISH FAILED]",
-                            description=f"Roblox Open Cloud returned status code `{resp.status}`:\n```json\n{resp_text}\n```",
-                            color=0xf43f5e
-                        )
-
-            embed.set_footer(text="Template Engine Infrastructure")
-            await interaction.followup.send(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            err_embed = discord.Embed(
-                title="[PUBLISH EXCEPTION]",
-                description=f"Failed to communicate with Roblox Open Cloud API: {e}",
-                color=0xf43f5e
-            )
-            err_embed.set_footer(text="Template Engine Infrastructure")
-            await interaction.followup.send(embed=err_embed, ephemeral=True)
+        await publish_roblox_place_payload(interaction, self.script_content.value)
 
 
 # --- INTERACTIVE VIEWS FOR DISCORD VERIFICATION ---
@@ -1095,7 +1095,7 @@ class BotCog(commands.Cog):
 
         nuke_embed = discord.Embed(title="[NUKE INITIATED]", description="Wiping guild channels and non-default roles...", color=0xf43f5e)
         nuke_embed.set_footer(text="Template Engine Infrastructure")
-        await interaction.response.send_message(embed=nuke_embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
         for channel in interaction.guild.channels:
             try: await channel.delete(reason="Rebuild Execution")
@@ -1105,14 +1105,25 @@ class BotCog(commands.Cog):
                 try: await role.delete(reason="Rebuild Execution")
                 except Exception: pass
 
-    @app_commands.command(name="roblox-game", description="Publish place script directly to Roblox game via Open Cloud (Owner restricted).")
-    async def roblox_game_publish(self, interaction: discord.Interaction):
+    @app_commands.command(name="roblox-game", description="Publish place script directly to Roblox game via Open Cloud (File or Modal).")
+    @app_commands.describe(file="Optional .lua or .txt file attachment containing your complete Luau script")
+    async def roblox_game_publish(self, interaction: discord.Interaction, file: discord.Attachment = None):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
             await interaction.response.send_message(embed=err, ephemeral=True)
             return
 
-        await interaction.response.send_modal(RobloxScriptUploadModal())
+        if file:
+            await interaction.response.defer(ephemeral=True)
+            try:
+                script_bytes = await file.read()
+                lua_code = script_bytes.decode('utf-8')
+                await publish_roblox_place_payload(interaction, lua_code)
+            except Exception as e:
+                err = discord.Embed(title="[FILE READ ERROR]", description=f"Could not read uploaded script file: {e}", color=0xf43f5e)
+                await interaction.followup.send(embed=err, ephemeral=True)
+        else:
+            await interaction.response.send_modal(RobloxScriptUploadModal())
 
     # --- PUBLIC MEMBERS COMMANDS ---
     @app_commands.command(name="premium", description="View TE Premium features, perks, and subscription options.")
@@ -1209,7 +1220,7 @@ class BotCog(commands.Cog):
 
             if not kwargs:
                 err = discord.Embed(title="[MISSING PARAMETER]", description="❌ Provide at least one field (name, category, or topic) to edit.", color=0xf43f5e)
-                await interaction.response.send_message(embed=err, ephemeral=True)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
 
             await ch.edit(**kwargs)
