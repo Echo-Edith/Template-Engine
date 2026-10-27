@@ -12,6 +12,8 @@ from pymongo import MongoClient
 
 # Base Configuration & Constants
 BOT_OWNER_ID = 1219266886143967245
+MAIN_OWNER_GUILD_ID = 1284513257574629458
+
 SUBSCRIPTION_LOG_CHANNEL_ID = 1564262413514182739
 MONTHLY_ANALYTICS_CHANNEL_ID = 1564263447057670154
 PREMIUM_SCAN_CHANNEL_ID = 1563544108696477802
@@ -35,6 +37,7 @@ db_stats = None
 db_giveaways = None
 db_settings = None
 db_premium_config = None
+db_allowed_guilds = None
 
 if MONGO_URI:
     try:
@@ -50,6 +53,7 @@ if MONGO_URI:
         db_giveaways = db["giveaways"]
         db_settings = db["guild_settings"]
         db_premium_config = db["premium_config"]
+        db_allowed_guilds = db["allowed_owner_guilds"]
     except Exception as e:
         print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
 
@@ -60,6 +64,7 @@ PENDING_VERIFICATION_CODES = {}
 LOCAL_GIVEAWAYS = {}
 LOCAL_GUILD_SETTINGS = {}
 LOCAL_PREMIUM_CONFIG = {}
+LOCAL_ALLOWED_OWNER_GUILDS = {str(MAIN_OWNER_GUILD_ID)}
 
 PREMIUM_ROLE_NAME = "Template Engine Premium"
 PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)
@@ -203,6 +208,44 @@ def toggle_user_build_authorization(user_id: str) -> bool:
             return True
 
 
+def get_allowed_owner_guild_ids() -> list:
+    guild_ids = {str(MAIN_OWNER_GUILD_ID)}
+    if db_allowed_guilds is not None:
+        try:
+            docs = list(db_allowed_guilds.find())
+            for d in docs:
+                if "guild_id" in d:
+                    guild_ids.add(str(d["guild_id"]))
+        except Exception as e:
+            print(f"[Mongo Allowed Guilds Error] {e}")
+    else:
+        guild_ids.update(LOCAL_ALLOWED_OWNER_GUILDS)
+    return list(guild_ids)
+
+
+def toggle_owner_guild_allow(guild_id: str) -> bool:
+    g_id = str(guild_id)
+    if db_allowed_guilds is not None:
+        exists = db_allowed_guilds.find_one({"guild_id": g_id}) is not None
+        if exists:
+            db_allowed_guilds.delete_one({"guild_id": g_id})
+            return False
+        else:
+            db_allowed_guilds.update_one(
+                {"guild_id": g_id},
+                {"$set": {"guild_id": g_id, "added_at": datetime.now(timezone.utc).isoformat()}},
+                upsert=True
+            )
+            return True
+    else:
+        if g_id in LOCAL_ALLOWED_OWNER_GUILDS:
+            LOCAL_ALLOWED_OWNER_GUILDS.remove(g_id)
+            return False
+        else:
+            LOCAL_ALLOWED_OWNER_GUILDS.add(g_id)
+            return True
+
+
 async def check_roblox_subscription_status(roblox_id: str) -> bool:
     if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_SUBSCRIPTION_ID:
         return False
@@ -220,7 +263,6 @@ async def check_roblox_subscription_status(roblox_id: str) -> bool:
     return False
 
 
-# --- DYNAMIC SERVER WELCOME SETTINGS HELPERS ---
 def set_guild_welcome_setting(guild_id: str, channel_id: str = None, message_template: str = None):
     g_id = str(guild_id)
     update_data = {}
@@ -260,7 +302,6 @@ def get_premium_embed_config() -> dict:
     return LOCAL_PREMIUM_CONFIG
 
 
-# --- GIVEAWAY STORAGE HELPERS ---
 def save_giveaway_data(message_id: str, data: dict):
     msg_id_str = str(message_id)
     if db_giveaways is not None:
@@ -736,9 +777,66 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
-    # --- WELCOME SETUP COMMAND (OWNER RESTRICTED & ADMINISTRATOR DEFAULT) ---
+    # --- OWNER-ONLY RESTRICTED COMMANDS ---
+    @app_commands.command(name="guild-allow", description="Grant or revoke owner command access for a specific Discord server (Owner restricted).")
+    @app_commands.describe(guild_id="Target Discord Server ID to authorize owner commands")
+    async def guild_allow_toggle(self, interaction: discord.Interaction, guild_id: str):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        g_id_str = str(guild_id).strip()
+        if not g_id_str.isdigit():
+            err = discord.Embed(title="[INVALID PARAMETER]", description="Please enter a valid numeric Discord Server ID.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        is_allowed = toggle_owner_guild_allow(g_id_str)
+        target_guild_obj = discord.Object(id=int(g_id_str))
+
+        owner_cmd_names = [
+            "welcome-set", "premiums", "premium-set", "premium-description",
+            "verification-set", "un-sync-set", "build-allow", "nuke"
+        ]
+
+        if is_allowed:
+            # Register owner commands to target guild
+            for c_name in owner_cmd_names:
+                for c in self.get_app_commands():
+                    if c.name == c_name:
+                        self.bot.tree.add_command(c, guild=target_guild_obj)
+
+            try:
+                await self.bot.tree.sync(guild=target_guild_obj)
+            except Exception as e:
+                print(f"[Guild Sync Error] {e}")
+
+            embed = discord.Embed(
+                title="[OWNER COMMANDS AUTHORIZED]",
+                description=f"Successfully authorized and synced owner commands to server ID `{g_id_str}`.",
+                color=0x2ecc71
+            )
+        else:
+            # Remove owner commands from target guild
+            try:
+                self.bot.tree.clear_commands(guild=target_guild_obj)
+                await self.bot.tree.sync(guild=target_guild_obj)
+            except Exception as e:
+                print(f"[Guild Clear Error] {e}")
+
+            embed = discord.Embed(
+                title="[OWNER COMMANDS REVOKED]",
+                description=f"Revoked owner command access and cleared command tree from server ID `{g_id_str}`.",
+                color=0xf43f5e
+            )
+
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     @app_commands.command(name="welcome-set", description="Set welcome channel and custom welcome message format for this server.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         channel="Target text channel for welcome messages",
         message="Custom message template (Use {user} for user ping, {server} for server name)"
@@ -759,7 +857,198 @@ class BotCog(commands.Cog):
         embed.set_footer(text="Template Engine Configuration")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # --- CHANNEL MANAGEMENT COMMAND (/channel) ---
+    @app_commands.command(name="premiums", description="List all active TE Premium members and expiration dates (Owner restricted).")
+    async def premiums_list(self, interaction: discord.Interaction):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        now = datetime.now(timezone.utc)
+        active_subscribers = []
+
+        if db_premium is not None:
+            docs = list(db_premium.find())
+            for doc in docs:
+                uid = doc.get("user_id")
+                exp_raw = doc.get("expires_at")
+                if uid and exp_raw:
+                    exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
+                    if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
+                    if exp > now: active_subscribers.append((uid, exp))
+        else:
+            for uid, exp in LOCAL_PREMIUM_USERS.items():
+                if exp > now: active_subscribers.append((uid, exp))
+
+        embed = discord.Embed(
+            title=f"👑 Active TE Premium Members ({len(active_subscribers)})",
+            color=0xF1C40F,
+            timestamp=now
+        )
+
+        if active_subscribers:
+            lines = [f"{idx}. <@{uid}> (`{uid}`) — Expires: <t:{int(exp.timestamp())}:F> (<t:{int(exp.timestamp())}:R>)" for idx, (uid, exp) in enumerate(active_subscribers, start=1)]
+            full_desc = "\n".join(lines)
+            embed.description = full_desc if len(full_desc) <= 4000 else full_desc[:3950] + "\n\n...[Truncated]"
+        else:
+            embed.description = "No active TE Premium subscribers found."
+
+        embed.set_footer(text="Template Engine Premium Audit Log")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="premium-set", description="Grant or remove TE Premium status for a user (Owner restricted).")
+    @app_commands.describe(
+        user="Target user to grant or revoke premium",
+        action="Select add or remove",
+        duration="Duration (e.g. 30d, 60d, inf)"
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Add Premium", value="add"),
+        app_commands.Choice(name="Remove Premium", value="remove")
+    ])
+    async def premium_set(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], duration: str = "30d"):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        user_id_str = str(user.id)
+        if action.value == "add":
+            td = parse_duration_to_timedelta(duration)
+            set_user_premium(user_id_str, td)
+            exp_time = datetime.now(timezone.utc) + td
+            embed = discord.Embed(
+                title="[TE PREMIUM GRANTED]",
+                description=f"Successfully granted TE Premium to {user.mention}.\nExpires: <t:{int(exp_time.timestamp())}:F> (<t:{int(exp_time.timestamp())}:R>)",
+                color=0x2ecc71
+            )
+        else:
+            remove_user_premium(user_id_str)
+            embed = discord.Embed(
+                title="[TE PREMIUM REVOKED]",
+                description=f"Revoked TE Premium status from {user.mention}.",
+                color=0xf43f5e
+            )
+
+        embed.set_footer(text="Template Engine Premium Manager")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="premium-description", description="Customize the /premium embed title, description, and perks (Owner restricted).")
+    @app_commands.describe(
+        title="Custom title for /premium embed",
+        description="Custom body description text",
+        perks="Perks list (One perk per line)"
+    )
+    async def premium_description_set(self, interaction: discord.Interaction, title: str = None, description: str = None, perks: str = None):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        perks_array = [line.strip() for line in perks.split("\n") if line.strip()] if perks else None
+        set_premium_embed_config(title=title, description=description, perks=perks_array)
+
+        embed = discord.Embed(
+            title="[PREMIUM EMBED CONFIG UPDATED]",
+            description="Successfully updated the `/premium` embed configuration.",
+            color=0x2ecc71
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="verification-set", description="Post Roblox verification panel.")
+    async def verification_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Roblox Account Verification", description: str = "Click Generate Code to link your Roblox profile."):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        embed = discord.Embed(title=title, description=description, color=0x8b5cf6)
+        embed.set_footer(text="Template Engine Infrastructure")
+        await location.send(embed=embed, view=VerificationPanelView())
+        confirm = discord.Embed(title="[PANEL DEPLOYED]", description="Verification panel deployed.", color=0x2ecc71)
+        await interaction.response.send_message(embed=confirm, ephemeral=True)
+
+    @app_commands.command(name="un-sync-set", description="Post Roblox unsync panel.")
+    async def unsync_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Unsync Roblox Account", description: str = "Unlink your Roblox account."):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        embed = discord.Embed(title=title, description=description, color=0xf43f5e)
+        embed.set_footer(text="Template Engine Infrastructure")
+        await location.send(embed=embed, view=UnsyncPanelView())
+        confirm = discord.Embed(title="[PANEL DEPLOYED]", description="Unsync panel deployed.", color=0x2ecc71)
+        await interaction.response.send_message(embed=confirm, ephemeral=True)
+
+    @app_commands.command(name="build-allow", description="Toggle /build authorization for a user (Owner restricted).")
+    @app_commands.describe(user="Target user to grant or revoke authorization")
+    async def build_allow_toggle(self, interaction: discord.Interaction, user: discord.User):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        user_id_str = str(user.id)
+        is_now_authorized = toggle_user_build_authorization(user_id_str)
+
+        if is_now_authorized:
+            embed = discord.Embed(title="[BUILD AUTHORIZATION GRANTED]", description=f"User {user.mention} ({user_id_str}) is now authorized to run /build commands.", color=0x2ecc71)
+        else:
+            embed = discord.Embed(title="[BUILD AUTHORIZATION REVOKED]", description=f"User {user.mention} ({user_id_str}) build permission has been revoked.", color=0xf43f5e)
+
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="nuke", description="Delete all channels and roles in the server (Owner restricted).")
+    async def nuke_server(self, interaction: discord.Interaction):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        nuke_embed = discord.Embed(title="[NUKE INITIATED]", description="Wiping guild channels and non-default roles...", color=0xf43f5e)
+        nuke_embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=nuke_embed, ephemeral=True)
+
+        for channel in interaction.guild.channels:
+            try: await channel.delete(reason="Rebuild Execution")
+            except Exception: pass
+        for role in interaction.guild.roles:
+            if not role.is_default() and not role.is_bot_managed() and not role.is_premium_subscriber():
+                try: await role.delete(reason="Rebuild Execution")
+                except Exception: pass
+
+    # --- PUBLIC MEMBERS COMMANDS ---
+    @app_commands.command(name="premium", description="View TE Premium features, perks, and subscription options.")
+    async def premium_public(self, interaction: discord.Interaction):
+        roblox_store_url = os.getenv("ROBLOX_STORE_URL", f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store")
+        cfg = get_premium_embed_config()
+
+        title = cfg.get("title") or "👑 Template Engine Premium"
+        base_desc = cfg.get("description") or "Upgrade to TE Premium to unlock automated server deployments, VIP badges, and custom themes."
+        perks_list = cfg.get("perks") or [
+            "Instant server layout auto-deployments",
+            "Gold Glassmorphism web dashboard access",
+            "Multi-entry multiplier on all server giveaways",
+            "Exclusive TE Premium gold role in Discord"
+        ]
+
+        perks_formatted = "\n".join([f"• {p}" for p in perks_list])
+        full_desc = f"{base_desc}\n\n**Perks Included:**\n{perks_formatted}"
+
+        embed = discord.Embed(
+            title=title,
+            description=full_desc,
+            color=0xF1C40F
+        )
+        embed.set_footer(text="Template Engine Infrastructure")
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Get Premium on Roblox (299 Robux)", url=roblox_store_url, style=discord.ButtonStyle.link, emoji="🛒"))
+        await interaction.response.send_message(embed=embed, view=view)
+
     @app_commands.command(name="channel", description="Create, edit, or set temporary channel behavior.")
     @app_commands.describe(
         action="Select channel operation mode",
@@ -885,138 +1174,6 @@ class BotCog(commands.Cog):
 
             asyncio.create_task(handle_temp_channel_lifecycle())
 
-    # --- PREMIUM MANAGEMENT COMMANDS (OWNER RESTRICTED & ADMIN DEFAULT) ---
-    @app_commands.command(name="premiums", description="List all active TE Premium members and expiration dates (Owner restricted).")
-    @app_commands.default_permissions(administrator=True)
-    async def premiums_list(self, interaction: discord.Interaction):
-        if interaction.user.id != BOT_OWNER_ID:
-            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
-            await interaction.response.send_message(embed=err, ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        now = datetime.now(timezone.utc)
-        active_subscribers = []
-
-        if db_premium is not None:
-            docs = list(db_premium.find())
-            for doc in docs:
-                uid = doc.get("user_id")
-                exp_raw = doc.get("expires_at")
-                if uid and exp_raw:
-                    exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
-                    if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
-                    if exp > now: active_subscribers.append((uid, exp))
-        else:
-            for uid, exp in LOCAL_PREMIUM_USERS.items():
-                if exp > now: active_subscribers.append((uid, exp))
-
-        embed = discord.Embed(
-            title=f"👑 Active TE Premium Members ({len(active_subscribers)})",
-            color=0xF1C40F,
-            timestamp=now
-        )
-
-        if active_subscribers:
-            lines = [f"{idx}. <@{uid}> (`{uid}`) — Expires: <t:{int(exp.timestamp())}:F> (<t:{int(exp.timestamp())}:R>)" for idx, (uid, exp) in enumerate(active_subscribers, start=1)]
-            full_desc = "\n".join(lines)
-            embed.description = full_desc if len(full_desc) <= 4000 else full_desc[:3950] + "\n\n...[Truncated]"
-        else:
-            embed.description = "No active TE Premium subscribers found."
-
-        embed.set_footer(text="Template Engine Premium Audit Log")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="premium-set", description="Grant or remove TE Premium status for a user (Owner restricted).")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.describe(
-        user="Target user to grant or revoke premium",
-        action="Select add or remove",
-        duration="Duration (e.g. 30d, 60d, inf)"
-    )
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Add Premium", value="add"),
-        app_commands.Choice(name="Remove Premium", value="remove")
-    ])
-    async def premium_set(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], duration: str = "30d"):
-        if interaction.user.id != BOT_OWNER_ID:
-            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
-            await interaction.response.send_message(embed=err, ephemeral=True)
-            return
-
-        user_id_str = str(user.id)
-        if action.value == "add":
-            td = parse_duration_to_timedelta(duration)
-            set_user_premium(user_id_str, td)
-            exp_time = datetime.now(timezone.utc) + td
-            embed = discord.Embed(
-                title="[TE PREMIUM GRANTED]",
-                description=f"Successfully granted TE Premium to {user.mention}.\nExpires: <t:{int(exp_time.timestamp())}:F> (<t:{int(exp_time.timestamp())}:R>)",
-                color=0x2ecc71
-            )
-        else:
-            remove_user_premium(user_id_str)
-            embed = discord.Embed(
-                title="[TE PREMIUM REVOKED]",
-                description=f"Revoked TE Premium status from {user.mention}.",
-                color=0xf43f5e
-            )
-
-        embed.set_footer(text="Template Engine Premium Manager")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="premium", description="View TE Premium features, perks, and subscription options.")
-    async def premium_public(self, interaction: discord.Interaction):
-        roblox_store_url = os.getenv("ROBLOX_STORE_URL", f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store")
-        cfg = get_premium_embed_config()
-
-        title = cfg.get("title") or "👑 Template Engine Premium"
-        base_desc = cfg.get("description") or "Upgrade to TE Premium to unlock automated server deployments, VIP badges, and custom themes."
-        perks_list = cfg.get("perks") or [
-            "Instant server layout auto-deployments",
-            "Gold Glassmorphism web dashboard access",
-            "Multi-entry multiplier on all server giveaways",
-            "Exclusive TE Premium gold role in Discord"
-        ]
-
-        perks_formatted = "\n".join([f"• {p}" for p in perks_list])
-        full_desc = f"{base_desc}\n\n**Perks Included:**\n{perks_formatted}"
-
-        embed = discord.Embed(
-            title=title,
-            description=full_desc,
-            color=0xF1C40F
-        )
-        embed.set_footer(text="Template Engine Infrastructure")
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Get Premium on Roblox (299 Robux)", url=roblox_store_url, style=discord.ButtonStyle.link, emoji="🛒"))
-        await interaction.response.send_message(embed=embed, view=view)
-
-    @app_commands.command(name="premium-description", description="Customize the /premium embed title, description, and perks (Owner restricted).")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.describe(
-        title="Custom title for /premium embed",
-        description="Custom body description text",
-        perks="Perks list (One perk per line)"
-    )
-    async def premium_description_set(self, interaction: discord.Interaction, title: str = None, description: str = None, perks: str = None):
-        if interaction.user.id != BOT_OWNER_ID:
-            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
-            await interaction.response.send_message(embed=err, ephemeral=True)
-            return
-
-        perks_array = [line.strip() for line in perks.split("\n") if line.strip()] if perks else None
-        set_premium_embed_config(title=title, description=description, perks=perks_array)
-
-        embed = discord.Embed(
-            title="[PREMIUM EMBED CONFIG UPDATED]",
-            description="Successfully updated the `/premium` embed configuration.",
-            color=0x2ecc71
-        )
-        embed.set_footer(text="Template Engine Infrastructure")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # --- GIVEAWAY COMMANDS ---
     @app_commands.command(name="giveaway-start", description="Start a customizable giveaway with multi-entry multipliers.")
     @app_commands.describe(
         channel="Channel to post giveaway",
@@ -1171,67 +1328,6 @@ class BotCog(commands.Cog):
         confirm = discord.Embed(title="[GIVEAWAY ENDED]", description="💥 Giveaway ended early.", color=0x2ecc71)
         await interaction.response.send_message(embed=confirm, ephemeral=True)
 
-    # --- UTILITY & ADMIN PANELS ---
-    @app_commands.command(name="verification-set", description="Post Roblox verification panel.")
-    @app_commands.default_permissions(administrator=True)
-    async def verification_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Roblox Account Verification", description: str = "Click Generate Code to link your Roblox profile."):
-        if interaction.user.id != BOT_OWNER_ID: return
-        embed = discord.Embed(title=title, description=description, color=0x8b5cf6)
-        embed.set_footer(text="Template Engine Infrastructure")
-        await location.send(embed=embed, view=VerificationPanelView())
-        confirm = discord.Embed(title="[PANEL DEPLOYED]", description="Verification panel deployed.", color=0x2ecc71)
-        await interaction.response.send_message(embed=confirm, ephemeral=True)
-
-    @app_commands.command(name="un-sync-set", description="Post Roblox unsync panel.")
-    @app_commands.default_permissions(administrator=True)
-    async def unsync_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Unsync Roblox Account", description: str = "Unlink your Roblox account."):
-        if interaction.user.id != BOT_OWNER_ID: return
-        embed = discord.Embed(title=title, description=description, color=0xf43f5e)
-        embed.set_footer(text="Template Engine Infrastructure")
-        await location.send(embed=embed, view=UnsyncPanelView())
-        confirm = discord.Embed(title="[PANEL DEPLOYED]", description="Unsync panel deployed.", color=0x2ecc71)
-        await interaction.response.send_message(embed=confirm, ephemeral=True)
-
-    @app_commands.command(name="build-allow", description="Toggle /build authorization for a user (Owner restricted).")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.describe(user="Target user to grant or revoke authorization")
-    async def build_allow_toggle(self, interaction: discord.Interaction, user: discord.User):
-        if interaction.user.id != BOT_OWNER_ID:
-            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
-            await interaction.response.send_message(embed=err, ephemeral=True)
-            return
-
-        user_id_str = str(user.id)
-        is_now_authorized = toggle_user_build_authorization(user_id_str)
-
-        if is_now_authorized:
-            embed = discord.Embed(title="[BUILD AUTHORIZATION GRANTED]", description=f"User {user.mention} ({user_id_str}) is now authorized to run /build commands.", color=0x2ecc71)
-        else:
-            embed = discord.Embed(title="[BUILD AUTHORIZATION REVOKED]", description=f"User {user.mention} ({user_id_str}) build permission has been revoked.", color=0xf43f5e)
-
-        embed.set_footer(text="Template Engine Infrastructure")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="nuke", description="Delete all channels and roles in the server (Owner restricted).")
-    @app_commands.default_permissions(administrator=True)
-    async def nuke_server(self, interaction: discord.Interaction):
-        if interaction.user.id != BOT_OWNER_ID:
-            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
-            await interaction.response.send_message(embed=err, ephemeral=True)
-            return
-
-        nuke_embed = discord.Embed(title="[NUKE INITIATED]", description="Wiping guild channels and non-default roles...", color=0xf43f5e)
-        nuke_embed.set_footer(text="Template Engine Infrastructure")
-        await interaction.response.send_message(embed=nuke_embed, ephemeral=True)
-
-        for channel in interaction.guild.channels:
-            try: await channel.delete(reason="Rebuild Execution")
-            except Exception: pass
-        for role in interaction.guild.roles:
-            if not role.is_default() and not role.is_bot_managed() and not role.is_premium_subscriber():
-                try: await role.delete(reason="Rebuild Execution")
-                except Exception: pass
-
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping(self, interaction: discord.Interaction):
         embed = discord.Embed(title="[PONG]", description=f"Latency: `{round(self.bot.latency * 1000)}ms`", color=0x3b82f6)
@@ -1250,10 +1346,27 @@ class BotCog(commands.Cog):
         if ctx.author.id != BOT_OWNER_ID:
             return
 
-        synced = await self.bot.tree.sync()
+        # 1. Sync Global Public Commands
+        synced_global = await self.bot.tree.sync()
+
+        # 2. Sync Local Owner Commands across authorized guilds
+        allowed_guild_ids = get_allowed_owner_guild_ids()
+        synced_guild_count = 0
+
+        for gid in allowed_guild_ids:
+            try:
+                g_obj = discord.Object(id=int(gid))
+                synced_guild = await self.bot.tree.sync(guild=g_obj)
+                synced_guild_count += len(synced_guild)
+            except Exception as e:
+                print(f"[Sync Guild Exception {gid}] {e}")
+
         embed = discord.Embed(
             title="[SLASH COMMANDS SYNCED]",
-            description=f"Successfully synchronized **{len(synced)}** slash commands across all guilds.",
+            description=(
+                f"Successfully synchronized **{len(synced_global)}** global commands across all servers.\n"
+                f"Synchronized owner commands across **{len(allowed_guild_ids)}** authorized control servers."
+            ),
             color=0x2ecc71
         )
         embed.set_footer(text="Template Engine Infrastructure")
@@ -1264,8 +1377,26 @@ async def setup(bot):
     bot.add_view(VerificationPanelView())
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
-    cog = BotCog(bot)
-    await bot.add_cog(cog)
-```
 
-The updated `cogs/bot.py` file has been saved. Remember to type **`!sync`** in your server chat to update Discord's command picker.
+    cog = BotCog(bot)
+
+    # Move Owner Commands to Authorized Control Guilds ONLY
+    allowed_guild_ids = get_allowed_owner_guild_ids()
+    owner_cmd_names = [
+        "welcome-set", "premiums", "premium-set", "premium-description",
+        "verification-set", "un-sync-set", "build-allow", "nuke"
+    ]
+
+    for gid in allowed_guild_ids:
+        guild_obj = discord.Object(id=int(gid))
+        for cmd_name in owner_cmd_names:
+            cmd = cog.get_app_commands()
+            for c in cmd:
+                if c.name == cmd_name:
+                    try:
+                        bot.tree.remove_command(c.name)
+                    except Exception:
+                        pass
+                    bot.tree.add_command(c, guild=guild_obj)
+
+    await bot.add_cog(cog)
