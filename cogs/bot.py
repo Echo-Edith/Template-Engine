@@ -27,9 +27,11 @@ DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL)
 
 MONGO_URI = os.getenv("MONGO_URI")
 ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
+ROBLOX_COOKIE = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip()
 ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
 ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
 ROBLOX_UNIVERSE_ID = (os.getenv("ROBLOX_UNIVERSE_ID") or "").strip()
+ROBLOX_GROUP_ID = (os.getenv("ROBLOX_GROUP_ID") or "").strip()
 
 db_premium = None
 db_build_access = None
@@ -231,7 +233,10 @@ async def check_roblox_subscription_status(roblox_id: str) -> bool:
 
 
 async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
-    """Fetch Roblox revenue summary via Open Cloud or Economy API for the given timeframe."""
+    """
+    Fetch Roblox revenue summary for a given timeframe (1d, 7d, 30d, 1y).
+    Tries economy.roblox.com endpoints via Cookie or Open Cloud API.
+    """
     timeframe_map = {
         "1d": "Day",
         "7d": "Week",
@@ -241,37 +246,49 @@ async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
     }
     tf_param = timeframe_map.get(timeframe.lower(), "Day")
 
-    if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_UNIVERSE_ID:
-        return {"error": "Missing ROBLOX_OPEN_CLOUD_KEY or ROBLOX_UNIVERSE_ID in environment variables."}
+    headers = {}
+    if ROBLOX_COOKIE:
+        clean_cookie = ROBLOX_COOKIE if ROBLOX_COOKIE.startswith(".ROBLOSECURITY=") else f".ROBLOSECURITY={ROBLOX_COOKIE}"
+        headers["Cookie"] = clean_cookie
+    if ROBLOX_OPEN_CLOUD_KEY:
+        headers["x-api-key"] = ROBLOX_OPEN_CLOUD_KEY
 
-    url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/economy/revenue/summary/{tf_param}"
-    headers = {"x-api-key": ROBLOX_OPEN_CLOUD_KEY}
+    # Target URLs to attempt (Group revenue or User revenue)
+    urls = []
+    if ROBLOX_GROUP_ID:
+        urls.append(f"https://economy.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/revenue/summary/{tf_param}")
+    if ROBLOX_UNIVERSE_ID:
+        urls.append(f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/economy/revenue/summary/{tf_param}")
+
+    if not urls:
+        return {"error": "Missing ROBLOX_GROUP_ID or ROBLOX_UNIVERSE_ID in environment variables."}
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "sale_of_goods": data.get("itemSaleRevenue", 0),
-                        "advance_rebates": data.get("publishingAdvanceRebates", 0),
-                        "commissions": data.get("commissionRevenue", 0),
-                        "payouts": data.get("groupPayouts", 0),
-                        "creator_rewards": data.get("creatorRewards", 0),
-                        "total": data.get("totalRevenue", 0),
-                        "pending_robux": data.get("pendingRobux", 0)
-                    }
-                else:
-                    return {
-                        "sale_of_goods": 0,
-                        "advance_rebates": 0,
-                        "commissions": 0,
-                        "payouts": 0,
-                        "creator_rewards": 0,
-                        "total": 0,
-                        "pending_robux": 0,
-                        "note": f"Roblox API returned status `{resp.status}`. Please ensure your Open Cloud key has Economy scopes enabled."
-                    }
+            for url in urls:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return {
+                            "sale_of_goods": data.get("itemSaleRevenue", data.get("itemSale", 0)),
+                            "advance_rebates": data.get("publishingAdvanceRebates", 0),
+                            "commissions": data.get("commissionRevenue", data.get("comission", 0)),
+                            "payouts": data.get("groupPayouts", data.get("groupPayout", 0)),
+                            "creator_rewards": data.get("creatorRewards", 0),
+                            "total": data.get("totalRevenue", data.get("total", 0)),
+                            "pending_robux": data.get("pendingRobux", 0)
+                        }
+            
+            return {
+                "sale_of_goods": 0,
+                "advance_rebates": 0,
+                "commissions": 0,
+                "payouts": 0,
+                "creator_rewards": 0,
+                "total": 0,
+                "pending_robux": 0,
+                "note": "Roblox returned 404/403. If using Group revenue, ensure `ROBLOX_GROUP_ID` and `ROBLOX_COOKIE` are added to your .env file."
+            }
     except Exception as e:
         return {"error": str(e)}
 
@@ -1065,7 +1082,7 @@ class BotCog(commands.Cog):
             await ctx.send(embed=err_embed)
             return
 
-        loading_msg = await ctx.send("🔎 *Fetching revenue summary from Roblox Open Cloud...*")
+        loading_msg = await ctx.send("🔎 *Fetching revenue summary from Roblox...*")
         rev_data = await fetch_roblox_revenue_data(tf_clean)
 
         if "error" in rev_data:
@@ -1654,3 +1671,11 @@ async def setup(bot):
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
     await bot.add_cog(BotCog(bot))
+```
+
+### Steps to Complete:
+1. Update `cogs/bot.py` with the new file above and redeploy.
+2. In your host environment variables (Render/Vercel/.env), add:
+   * **`ROBLOX_GROUP_ID`** = Your Group ID (if Template Engine is owned by a Roblox Group).
+   * **`ROBLOX_COOKIE`** = Your `.ROBLOSECURITY` cookie value (enables `economy.roblox.com` queries).
+3. Try running **`!rev 1d`** again in Discord!
