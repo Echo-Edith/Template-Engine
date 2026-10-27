@@ -298,7 +298,7 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
         await interaction.followup.send(embed=err, ephemeral=True)
         return
 
-    # XML Place Structure with a Physical Baseplate & SpawnLocation to prevent Void Death Loops
+    # XML Place Structure with Baseplate & LocalScript placed directly in StarterGui for instant execution
     rbxlx_template = f"""<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
     <External>null</External>
     <External>nil</External>
@@ -351,20 +351,16 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
             </Properties>
         </Item>
     </Item>
-    <Item class="StarterPlayer" referent="RBX1">
+    <Item class="StarterGui" referent="RBX_STARTER_GUI">
         <Properties>
-            <string name="Name">StarterPlayer</string>
+            <string name="Name">StarterGui</string>
+            <bool name="ResetPlayerGuiOnSpawn">false</bool>
         </Properties>
-        <Item class="StarterPlayerScripts" referent="RBX2">
+        <Item class="LocalScript" referent="RBX_LOCKSCREEN_SCRIPT">
             <Properties>
-                <string name="Name">StarterPlayerScripts</string>
+                <string name="Name">StoreLockscreenScript</string>
+                <ProtectedString name="Source"><![CDATA[{lua_code}]]></ProtectedString>
             </Properties>
-            <Item class="LocalScript" referent="RBX3">
-                <Properties>
-                    <string name="Name">MainClientScript</string>
-                    <ProtectedString name="Source"><![CDATA[{lua_code}]]></ProtectedString>
-                </Properties>
-            </Item>
         </Item>
     </Item>
 </roblox>"""
@@ -389,7 +385,7 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
                     embed = discord.Embed(
                         title="[PLACE PUBLISHED TO ROBLOX]",
                         description=(
-                            f"Successfully published `.rbxlx` place payload with baseplate floor to Roblox!\n\n"
+                            f"Successfully published `.rbxlx` place payload with StarterGui UI execution to Roblox!\n\n"
                             f"• **Place ID:** `{ROBLOX_PLACE_ID}`\n"
                             f"• **Universe ID:** `{ROBLOX_UNIVERSE_ID}`\n"
                             f"• **New Published Version:** `{version_num}`\n"
@@ -706,7 +702,7 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Bio Verification"):
                 color=0xf43f5e
             )
             err.set_footer(text="Template Engine Infrastructure")
-            await interaction.followup.send(embed=err, ephemeral=True)
+            await interaction.followup.send(embed=err_embed, ephemeral=True)
 
 
 # --- MODAL FOR FALLBACK TEXT INPUT ---
