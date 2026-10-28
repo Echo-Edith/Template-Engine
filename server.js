@@ -8,6 +8,7 @@ const express = require('express');
 const session = require('express-session');
 const axios = require('axios');
 const path = require('path');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,13 +20,28 @@ const ROBLOX_UNIVERSE_ID = (process.env.ROBLOX_UNIVERSE_ID || "").trim();
 const ROBLOX_GROUP_ID = (process.env.ROBLOX_GROUP_ID || "").trim();
 const VERCEL_TE_SITE_URL = (process.env.VERCEL_TE_SITE_URL || "https://your-vercel-app.vercel.app").trim();
 const SYSTEM_LOG_WEBHOOK_URL = (process.env.SYSTEM_LOG_WEBHOOK_URL || "").trim();
+const MONGO_URI = process.env.MONGO_URI;
 
-// In-Memory Storage (Fallback if no DB attached)
-const premiumUsersList = [
+// MongoDB Connection Setup
+let db_premium = null;
+let db_audit = null;
+
+if (MONGO_URI) {
+    MongoClient.connect(MONGO_URI)
+        .then(client => {
+            const db = client.db();
+            db_premium = db.collection("premium_users");
+            db_audit = db.collection("audit_logs");
+            console.log("[Mongo] Connected successfully to shared MongoDB.");
+        })
+        .catch(err => console.error("[Mongo Error]", err.message));
+}
+
+// In-Memory Storage Fallback
+const localPremiumUsers = [
     { user_id: "1219266886143967245", username: "EchoOwner", expires_at: "2099-12-31T23:59:59Z", plan: "Lifetime VIP" }
 ];
-
-const auditLogs = [];
+const localAuditLogs = [];
 
 // Middleware Setup
 app.use(express.json());
@@ -35,7 +51,7 @@ app.use(session({
     secret: process.env.SESSION_SECRET || 'template_engine_secret_key_1337',
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 } // 24 Hours
+    cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
 }));
 
 // Auth Guard Middleware
@@ -49,15 +65,21 @@ function requireAuth(req, res, next) {
 // Log Webhook Utility
 async function logWebhookEvent(action, details) {
     const timestamp = new Date().toISOString();
-    auditLogs.unshift({ action, details, timestamp });
-    if (auditLogs.length > 50) auditLogs.pop();
+    const logEntry = { action, details, timestamp };
+
+    if (db_audit) {
+        try { await db_audit.insertOne(logEntry); } catch (e) { console.error(e); }
+    } else {
+        localAuditLogs.unshift(logEntry);
+        if (localAuditLogs.length > 50) localAuditLogs.pop();
+    }
 
     if (!SYSTEM_LOG_WEBHOOK_URL) return;
 
     try {
         await axios.post(SYSTEM_LOG_WEBHOOK_URL, {
             embeds: [{
-                title: `🛡️ Owner Panel Action: ${action}`,
+                title: `Owner Panel Action: ${action}`,
                 description: details,
                 color: 0xf1c40f,
                 timestamp: timestamp
@@ -142,12 +164,8 @@ app.get('/api/revenue', requireAuth, async (req, res) => {
             saleOfGoods: totalRevenue,
             advanceRebates: 0,
             commissions: 0,
-            communityPayouts: 0,
-            creatorRewards: 0,
             totalRevenue: totalRevenue,
-            pendingRobux: Math.floor(totalRevenue * 0.3), // Estimated pending
-            universeId: ROBLOX_UNIVERSE_ID,
-            groupId: ROBLOX_GROUP_ID || "N/A"
+            pendingRobux: Math.floor(totalRevenue * 0.3)
         });
 
     } catch (error) {
@@ -160,11 +178,15 @@ app.get('/api/revenue', requireAuth, async (req, res) => {
 });
 
 // Manage Premium Users
-app.get('/api/premium-users', requireAuth, (req, res) => {
-    return res.json(premiumUsersList);
+app.get('/api/premium-users', requireAuth, async (req, res) => {
+    if (db_premium) {
+        const users = await db_premium.find({}).toArray();
+        return res.json(users);
+    }
+    return res.json(localPremiumUsers);
 });
 
-app.post('/api/premium-users/add', requireAuth, (req, res) => {
+app.post('/api/premium-users/add', requireAuth, async (req, res) => {
     const { user_id, username, days } = req.body;
     if (!user_id || !username) {
         return res.status(400).json({ error: "Missing user_id or username" });
@@ -173,37 +195,44 @@ app.post('/api/premium-users/add', requireAuth, (req, res) => {
     const durationDays = parseInt(days) || 30;
     const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
 
-    const existingIndex = premiumUsersList.findIndex(u => u.user_id === user_id);
-    if (existingIndex >= 0) {
-        premiumUsersList[existingIndex].expires_at = expiresAt;
-        premiumUsersList[existingIndex].plan = `${durationDays} Days Extended`;
+    if (db_premium) {
+        await db_premium.updateOne(
+            { user_id: String(user_id) },
+            { $set: { user_id: String(user_id), username: username, expires_at: expiresAt, plan: `${durationDays} Days Tier` } },
+            { upsert: true }
+        );
     } else {
-        premiumUsersList.push({
-            user_id: user_id,
-            username: username,
-            expires_at: expiresAt,
-            plan: `${durationDays} Days Tier`
-        });
+        const existingIndex = localPremiumUsers.findIndex(u => u.user_id === user_id);
+        if (existingIndex >= 0) {
+            localPremiumUsers[existingIndex].expires_at = expiresAt;
+        } else {
+            localPremiumUsers.push({ user_id, username, expires_at: expiresAt, plan: `${durationDays} Days Tier` });
+        }
     }
 
     logWebhookEvent("Granted Premium", `Granted ${durationDays} days of Premium to Discord User ${username} (${user_id}).`);
     return res.json({ success: true, message: `Granted premium to ${username}` });
 });
 
-app.post('/api/premium-users/remove', requireAuth, (req, res) => {
+app.post('/api/premium-users/remove', requireAuth, async (req, res) => {
     const { user_id } = req.body;
-    const index = premiumUsersList.findIndex(u => u.user_id === user_id);
-    if (index >= 0) {
-        const removed = premiumUsersList.splice(index, 1)[0];
-        logWebhookEvent("Revoked Premium", `Revoked Premium from ${removed.username} (${user_id}).`);
-        return res.json({ success: true, message: "User removed from premium list." });
+    if (db_premium) {
+        await db_premium.deleteOne({ user_id: String(user_id) });
+    } else {
+        const index = localPremiumUsers.findIndex(u => u.user_id === user_id);
+        if (index >= 0) localPremiumUsers.splice(index, 1);
     }
-    return res.status(404).json({ error: "User not found." });
+    logWebhookEvent("Revoked Premium", `Revoked Premium from Discord User ID ${user_id}.`);
+    return res.json({ success: true, message: "User removed from premium list." });
 });
 
 // System Audit Logs
-app.get('/api/audit-logs', requireAuth, (req, res) => {
-    return res.json(auditLogs);
+app.get('/api/audit-logs', requireAuth, async (req, res) => {
+    if (db_audit) {
+        const logs = await db_audit.find({}).sort({ _id: -1 }).limit(50).toArray();
+        return res.json(logs);
+    }
+    return res.json(localAuditLogs);
 });
 
 // Single Page Frontend HTML
@@ -216,7 +245,6 @@ app.get('*', (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Template Engine - Owner Panel</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { background-color: #0b0f17; color: #f3f4f6; font-family: 'Inter', system-ui, sans-serif; }
         .glass-card { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.08); }
@@ -229,8 +257,8 @@ app.get('*', (req, res) => {
     <div id="login-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
         <div class="glass-card p-8 rounded-2xl max-w-md w-full mx-4 shadow-2xl border border-amber-500/20">
             <div class="text-center mb-6">
-                <div class="w-16 h-16 gold-gradient rounded-full flex items-center justify-center mx-auto mb-3 shadow-lg shadow-amber-500/20">
-                    <i class="fa-solid fa-crown text-2xl text-slate-950"></i>
+                <div class="w-16 h-16 gold-gradient rounded-full flex items-center justify-center mx-auto mb-3 text-xl font-black text-slate-950">
+                    TE
                 </div>
                 <h1 class="text-2xl font-bold text-white tracking-wide">Owner Control Panel</h1>
                 <p class="text-xs text-slate-400 mt-1">Render Cloud Owner Node</p>
@@ -251,7 +279,6 @@ app.get('*', (req, res) => {
 
     <!-- MAIN DASHBOARD -->
     <div id="dashboard" class="hidden min-h-screen flex flex-col">
-        <!-- Top Nav -->
         <header class="glass-card border-b border-slate-800 px-6 py-4 flex justify-between items-center sticky top-0 z-40">
             <div class="flex items-center gap-3">
                 <div class="w-10 h-10 gold-gradient rounded-xl flex items-center justify-center text-slate-950 font-black">TE</div>
@@ -262,19 +289,18 @@ app.get('*', (req, res) => {
             </div>
             <div class="flex items-center gap-3">
                 <a href="${VERCEL_TE_SITE_URL}" target="_blank" class="px-3 py-2 bg-slate-800 border border-slate-700 text-slate-300 rounded-xl text-xs font-semibold hover:text-white transition flex items-center gap-1.5">
-                    <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i> Open Vercel TE
+                    Open Vercel TE
                 </a>
-                <button onclick="fetchRevenue()" class="p-2 text-slate-400 hover:text-white transition"><i class="fa-solid fa-rotate"></i></button>
+                <button onclick="fetchRevenue()" class="px-3 py-2 bg-slate-800 text-slate-400 hover:text-white transition text-xs font-semibold">[Refresh]</button>
                 <button onclick="logout()" class="px-4 py-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs font-semibold hover:bg-rose-500 hover:text-white transition">Logout</button>
             </div>
         </header>
 
         <main class="max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6 flex-grow">
-            <!-- REVENUE OVERVIEW CARD -->
             <div class="glass-card rounded-2xl p-6 relative overflow-hidden">
                 <div class="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-6">
                     <div>
-                        <h3 class="text-lg font-bold text-white flex items-center gap-2"><i class="fa-solid fa-chart-line text-amber-400"></i> Roblox Group Revenue Summary</h3>
+                        <h3 class="text-lg font-bold text-white">Roblox Group Revenue Summary</h3>
                         <p class="text-xs text-slate-400">Real-time group earnings powered by Roblox Open Cloud API</p>
                     </div>
                     <div class="flex items-center gap-2 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
@@ -288,36 +314,26 @@ app.get('*', (req, res) => {
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
                         <span class="text-xs font-medium text-slate-400">Total Revenue</span>
-                        <div class="text-2xl font-black text-amber-400 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-total-rev">0</span>
-                        </div>
+                        <div class="text-2xl font-black text-amber-400 mt-1">R$ <span id="stat-total-rev">0</span></div>
                     </div>
                     <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
                         <span class="text-xs font-medium text-slate-400">Sale of Goods</span>
-                        <div class="text-2xl font-black text-emerald-400 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-sale-goods">0</span>
-                        </div>
+                        <div class="text-2xl font-black text-emerald-400 mt-1">R$ <span id="stat-sale-goods">0</span></div>
                     </div>
                     <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
                         <span class="text-xs font-medium text-slate-400">Pending Robux (Est. 30%)</span>
-                        <div class="text-2xl font-black text-indigo-400 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-pending">0</span>
-                        </div>
+                        <div class="text-2xl font-black text-indigo-400 mt-1">R$ <span id="stat-pending">0</span></div>
                     </div>
                     <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
-                        <span class="text-xs font-medium text-slate-400">Commissions & Rebates</span>
-                        <div class="text-2xl font-black text-slate-300 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-commissions">0</span>
-                        </div>
+                        <span class="text-xs font-medium text-slate-400">Commissions</span>
+                        <div class="text-2xl font-black text-slate-300 mt-1">R$ <span id="stat-commissions">0</span></div>
                     </div>
                 </div>
             </div>
 
-            <!-- MANAGEMENT TABS -->
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <!-- Premium Subscribers Control -->
                 <div class="lg:col-span-2 glass-card rounded-2xl p-6">
-                    <h3 class="text-base font-bold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-users text-amber-400"></i> Premium Subscriber Roster</h3>
+                    <h3 class="text-base font-bold text-white mb-4">Premium Subscriber Roster</h3>
                     
                     <form id="add-premium-form" class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
                         <input type="text" id="add-uid" placeholder="Discord User ID" class="bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500" required>
@@ -338,25 +354,20 @@ app.get('*', (req, res) => {
                                     <th class="p-3 text-right">Action</th>
                                 </tr>
                             </thead>
-                            <tbody id="premium-table-body" class="divide-y divide-slate-800/50">
-                                <!-- Dynamic User Rows -->
-                            </tbody>
+                            <tbody id="premium-table-body" class="divide-y divide-slate-800/50"></tbody>
                         </table>
                     </div>
                 </div>
 
-                <!-- Live Audit Feed -->
                 <div class="glass-card rounded-2xl p-6">
-                    <h3 class="text-base font-bold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-clock-rotate-left text-amber-400"></i> Audit Feed</h3>
-                    <div id="audit-feed" class="space-y-3 max-h-80 overflow-y-auto pr-1 text-xs">
-                        <div class="text-slate-500 italic">Loading audit entries...</div>
-                    </div>
+                    <h3 class="text-base font-bold text-white mb-4">Audit Feed</h3>
+                    <div id="audit-feed" class="space-y-3 max-h-80 overflow-y-auto pr-1 text-xs"></div>
                 </div>
             </div>
         </main>
 
         <footer class="glass-card border-t border-slate-800 p-4 text-center text-xs text-slate-500">
-            Template Engine Owner Node &bull; Render Deployment
+            Template Engine Owner Node - Render Deployment
         </footer>
     </div>
 
@@ -423,9 +434,7 @@ app.get('*', (req, res) => {
                 document.getElementById('stat-sale-goods').innerText = (data.saleOfGoods || 0).toLocaleString();
                 document.getElementById('stat-pending').innerText = (data.pendingRobux || 0).toLocaleString();
                 document.getElementById('stat-commissions').innerText = (data.commissions || 0).toLocaleString();
-            } catch(e) {
-                console.error(e);
-            }
+            } catch(e) { console.error(e); }
         }
 
         async function fetchPremiumUsers() {
