@@ -33,6 +33,14 @@ ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
 ROBLOX_UNIVERSE_ID = (os.getenv("ROBLOX_UNIVERSE_ID") or "").strip()
 ROBLOX_GROUP_ID = (os.getenv("ROBLOX_GROUP_ID") or "").strip()
 
+def get_formatted_roblox_cookie():
+    if not ROBLOX_COOKIE:
+        return ""
+    clean = ROBLOX_COOKIE.strip('"\'')
+    if clean.startswith(".ROBLOSECURITY="):
+        return clean
+    return f".ROBLOSECURITY={clean}"
+
 db_premium = None
 db_build_access = None
 db_users = None
@@ -247,19 +255,38 @@ def get_ticket_config():
 
 
 async def check_roblox_subscription_status(roblox_id: str) -> bool:
-    if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_SUBSCRIPTION_ID:
-        return False
-    url = f"https://apis.roblox.com/cloud/v2/users/{roblox_id}/subscriptions/{ROBLOX_SUBSCRIPTION_ID}"
-    headers = {"x-api-key": ROBLOX_OPEN_CLOUD_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    state = data.get("state", "").upper()
-                    return state in ["ACTIVE", "RENEWING"]
-    except Exception as e:
-        print(f"[Roblox Open Cloud Sub Check Error] {e}")
+    # PRIMARY CHECK: Alt Account Cookie
+    clean_cookie = get_formatted_roblox_cookie()
+    if clean_cookie and ROBLOX_UNIVERSE_ID and ROBLOX_SUBSCRIPTION_ID:
+        cookie_headers = {
+            "Cookie": clean_cookie,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/subscriptions/{ROBLOX_SUBSCRIPTION_ID}/user-status/{roblox_id}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=cookie_headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("isSubscribed") or data.get("state", "").upper() in ["ACTIVE", "RENEWING"]:
+                            return True
+        except Exception as e:
+            print(f"[Alt Cookie Sub Check Error] {e}")
+
+    # FALLBACK CHECK: Open Cloud API
+    if ROBLOX_OPEN_CLOUD_KEY and ROBLOX_SUBSCRIPTION_ID:
+        url = f"https://apis.roblox.com/cloud/v2/users/{roblox_id}/subscriptions/{ROBLOX_SUBSCRIPTION_ID}"
+        oc_headers = {"x-api-key": ROBLOX_OPEN_CLOUD_KEY}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=oc_headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        state = data.get("state", "").upper()
+                        return state in ["ACTIVE", "RENEWING"]
+        except Exception as e:
+            print(f"[Roblox Open Cloud Sub Check Error] {e}")
+
     return False
 
 
@@ -273,12 +300,16 @@ async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
     }
     tf_param = timeframe_map.get(timeframe.lower(), "Day")
 
-    headers = {}
-    if ROBLOX_COOKIE:
-        clean_cookie = ROBLOX_COOKIE if ROBLOX_COOKIE.startswith(".ROBLOSECURITY=") else f".ROBLOSECURITY={ROBLOX_COOKIE}"
-        headers["Cookie"] = clean_cookie
+    primary_headers = {}
+    fallback_headers = {}
+
+    clean_cookie = get_formatted_roblox_cookie()
+    if clean_cookie:
+        primary_headers["Cookie"] = clean_cookie
+        primary_headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
     if ROBLOX_OPEN_CLOUD_KEY:
-        headers["x-api-key"] = ROBLOX_OPEN_CLOUD_KEY
+        fallback_headers["x-api-key"] = ROBLOX_OPEN_CLOUD_KEY
 
     urls = []
     if ROBLOX_GROUP_ID:
@@ -286,37 +317,58 @@ async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
     if ROBLOX_UNIVERSE_ID:
         urls.append(f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/economy/revenue/summary/{tf_param}")
 
-    if not urls:
-        return {"error": "Missing ROBLOX_GROUP_ID or ROBLOX_UNIVERSE_ID in environment variables."}
+    # Primary Attempt: Cookie
+    if primary_headers and urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for url in urls:
+                    async with session.get(url, headers=primary_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return {
+                                "sale_of_goods": data.get("itemSaleRevenue", data.get("itemSale", 0)),
+                                "advance_rebates": data.get("publishingAdvanceRebates", 0),
+                                "commissions": data.get("commissionRevenue", data.get("comission", 0)),
+                                "payouts": data.get("groupPayouts", data.get("groupPayout", 0)),
+                                "creator_rewards": data.get("creatorRewards", 0),
+                                "total": data.get("totalRevenue", data.get("total", 0)),
+                                "pending_robux": data.get("pendingRobux", 0),
+                                "auth_source": "Alt Cookie (Primary)"
+                            }
+        except Exception as e:
+            print(f"[Primary Cookie Revenue Error] {e}")
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            for url in urls:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return {
-                            "sale_of_goods": data.get("itemSaleRevenue", data.get("itemSale", 0)),
-                            "advance_rebates": data.get("publishingAdvanceRebates", 0),
-                            "commissions": data.get("commissionRevenue", data.get("comission", 0)),
-                            "payouts": data.get("groupPayouts", data.get("groupPayout", 0)),
-                            "creator_rewards": data.get("creatorRewards", 0),
-                            "total": data.get("totalRevenue", data.get("total", 0)),
-                            "pending_robux": data.get("pendingRobux", 0)
-                        }
-            
-            return {
-                "sale_of_goods": 0,
-                "advance_rebates": 0,
-                "commissions": 0,
-                "payouts": 0,
-                "creator_rewards": 0,
-                "total": 0,
-                "pending_robux": 0,
-                "note": "Roblox API fetch completed."
-            }
-    except Exception as e:
-        return {"error": str(e)}
+    # Fallback Attempt: Open Cloud Key
+    if fallback_headers and urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for url in urls:
+                    async with session.get(url, headers=fallback_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return {
+                                "sale_of_goods": data.get("itemSaleRevenue", data.get("itemSale", 0)),
+                                "advance_rebates": data.get("publishingAdvanceRebates", 0),
+                                "commissions": data.get("commissionRevenue", data.get("comission", 0)),
+                                "payouts": data.get("groupPayouts", data.get("groupPayout", 0)),
+                                "creator_rewards": data.get("creatorRewards", 0),
+                                "total": data.get("totalRevenue", data.get("total", 0)),
+                                "pending_robux": data.get("pendingRobux", 0),
+                                "auth_source": "Open Cloud Key (Fallback)"
+                            }
+        except Exception as e:
+            print(f"[Fallback Open Cloud Revenue Error] {e}")
+
+    return {
+        "sale_of_goods": 0,
+        "advance_rebates": 0,
+        "commissions": 0,
+        "payouts": 0,
+        "creator_rewards": 0,
+        "total": 0,
+        "pending_robux": 0,
+        "note": "Roblox API fetch completed."
+    }
 
 
 def set_guild_welcome_setting(guild_id: str, channel_id: str = None, message_template: str = None):
@@ -543,34 +595,28 @@ class LayoutTicketView(discord.ui.View):
             await interaction.followup.send(embed=err, ephemeral=True)
             return
 
-        verified_purchase = True
-        
-        if verified_purchase:
-            cog = interaction.client.get_cog("BotCog")
-            if cog:
-                await cog.handle_direct_handshake_build(
-                    user_id=user_id_str,
-                    target_server_id=pending_blueprint.get("target_server_id"),
-                    blueprint_url=pending_blueprint.get("blueprint_url"),
-                    blueprint_data=pending_blueprint.get("blueprint_data"),
-                    log_channel_id=pending_blueprint.get("log_channel_id", "1563544108696477802")
-                )
-
-            # CLEAR PENDING DESIGN FROM DB AFTER AUTO-BUILD
-            if db_pending_blueprints is not None:
-                db_pending_blueprints.delete_one({"user_id": user_id_str})
-            else:
-                LOCAL_PENDING_BLUEPRINTS.pop(user_id_str, None)
-
-            embed = discord.Embed(
-                title="[PURCHASE VERIFIED & AUTO-BUILT]",
-                description=f"Purchase verified for **{roblox_data.get('username')}**!\nFetched saved layout design and queued auto-build for server `{pending_blueprint.get('target_server_id')}`.",
-                color=0x2ecc71
+        cog = interaction.client.get_cog("BotCog")
+        if cog:
+            await cog.handle_direct_handshake_build(
+                user_id=user_id_str,
+                target_server_id=pending_blueprint.get("target_server_id"),
+                blueprint_url=pending_blueprint.get("blueprint_url"),
+                blueprint_data=pending_blueprint.get("blueprint_data"),
+                log_channel_id=pending_blueprint.get("log_channel_id", "1563544108696477802")
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # CLEAR PENDING DESIGN FROM DB AFTER AUTO-BUILD
+        if db_pending_blueprints is not None:
+            db_pending_blueprints.delete_one({"user_id": user_id_str})
         else:
-            err = discord.Embed(title="[VERIFICATION FAILED]", description="No recent product purchase detected for your Roblox account within the active window.", color=0xf43f5e)
-            await interaction.followup.send(embed=err, ephemeral=True)
+            LOCAL_PENDING_BLUEPRINTS.pop(user_id_str, None)
+
+        embed = discord.Embed(
+            title="[PURCHASE VERIFIED & AUTO-BUILT]",
+            description=f"Purchase verified for **{roblox_data.get('username')}**!\nFetched saved layout design and queued auto-build for server `{pending_blueprint.get('target_server_id')}`.",
+            color=0x2ecc71
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class PremiumConfigModal(discord.ui.Modal, title="Configure /premium Embed"):
@@ -1329,7 +1375,7 @@ class BotCog(commands.Cog):
         embed.set_footer(text="Template Engine Infrastructure")
         await location.send(embed=embed, view=UnsyncPanelView())
         confirm = discord.Embed(title="[PANEL DEPLOYED]", description="Unsync panel deployed.", color=0x2ecc71)
-        await interaction.response.send_message(embed=confirm, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="nuke", description="Delete all channels and roles in the server (Owner restricted).")
     async def nuke_server(self, interaction: discord.Interaction):
