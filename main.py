@@ -18,7 +18,7 @@ MONGO_URI = os.environ.get("MONGO_URI")
 ROBLOX_OPEN_CLOUD_KEY = (os.environ.get("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
 ROBLOX_UNIVERSE_ID = (os.environ.get("ROBLOX_UNIVERSE_ID") or "").strip()
 ROBLOX_GROUP_ID = (os.environ.get("ROBLOX_GROUP_ID") or "").strip()
-VERCEL_TE_SITE_URL = (os.environ.get("VERCEL_TE_SITE_URL") or "https://your-vercel-app.vercel.app").strip()
+VERCEL_TE_SITE_URL = (os.environ.get("VERCEL_TE_SITE_URL") or "https://templateengine-xi.vercel.app/").strip()
 SYSTEM_LOG_WEBHOOK_URL = (os.environ.get("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 
 # --- MONGO DATABASE CONNECTIONS ---
