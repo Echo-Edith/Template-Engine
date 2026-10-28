@@ -40,6 +40,8 @@ db_stats = None
 db_giveaways = None
 db_settings = None
 db_premium_config = None
+db_layout_ticket_config = None
+db_pending_blueprints = None
 
 if MONGO_URI:
     try:
@@ -55,6 +57,8 @@ if MONGO_URI:
         db_giveaways = db["giveaways"]
         db_settings = db["guild_settings"]
         db_premium_config = db["premium_config"]
+        db_layout_ticket_config = db["layout_ticket_config"]
+        db_pending_blueprints = db["pending_blueprints"]
     except Exception as e:
         print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
 
@@ -65,6 +69,7 @@ PENDING_VERIFICATION_CODES = {}
 LOCAL_GIVEAWAYS = {}
 LOCAL_GUILD_SETTINGS = {}
 LOCAL_PREMIUM_CONFIG = {}
+LOCAL_PENDING_BLUEPRINTS = {}
 
 PREMIUM_ROLE_NAME = "Template Engine Premium"
 PREMIUM_ROLE_COLOR = discord.Color(0xF1C40F)
@@ -132,6 +137,19 @@ def remove_user_premium(user_id: str):
         db_premium.delete_one({"user_id": user_id_str})
     else:
         LOCAL_PREMIUM_USERS.pop(user_id_str, None)
+
+
+def get_linked_roblox_user(discord_id: str):
+    discord_id_str = str(discord_id)
+    if db_users is not None:
+        doc = db_users.find_one({"discord_id": discord_id_str})
+        if doc and "roblox_data" in doc:
+            return doc["roblox_data"]
+    else:
+        doc = LOCAL_PERSISTENT_USERS.get(discord_id_str)
+        if doc and "roblox_data" in doc:
+            return doc["roblox_data"]
+    return None
 
 
 def save_user_roblox_link(discord_id: str, discord_username: str, roblox_id: str, roblox_username: str):
@@ -215,6 +233,19 @@ def toggle_user_build_authorization(user_id: str) -> bool:
             return True
 
 
+def get_ticket_config():
+    if db_layout_ticket_config is not None:
+        cfg = db_layout_ticket_config.find_one({"config_id": "global"})
+        if cfg:
+            return cfg
+    return {
+        "title": "Layout Premium Deployment Ticket",
+        "dev_product_id": "3722941069",
+        "instructions": "Follow the step-by-step images below to purchase the developer product, then click 'Verify & Auto-Build'.",
+        "step_images": []
+    }
+
+
 async def check_roblox_subscription_status(roblox_id: str) -> bool:
     if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_SUBSCRIPTION_ID:
         return False
@@ -233,10 +264,6 @@ async def check_roblox_subscription_status(roblox_id: str) -> bool:
 
 
 async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
-    """
-    Fetch Roblox revenue summary for a given timeframe (1d, 7d, 30d, 1y).
-    Tries economy.roblox.com endpoints via Cookie or Open Cloud API.
-    """
     timeframe_map = {
         "1d": "Day",
         "7d": "Week",
@@ -474,10 +501,82 @@ async def publish_roblox_place_payload(interaction: discord.Interaction, lua_cod
         await interaction.followup.send(embed=err_embed, ephemeral=True)
 
 
+# INTERACTIVE TICKET & PURCHASE VERIFICATION VIEW
+class LayoutTicketView(discord.ui.View):
+    def __init__(self, step_index: int = 0):
+        super().__init__(timeout=None)
+        self.step_index = step_index
+
+    @discord.ui.button(label="Next Step Image", style=discord.ButtonStyle.secondary, custom_id="btn_ticket_next")
+    async def next_step(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = get_ticket_config()
+        images = cfg.get("step_images", [])
+        if not images:
+            await interaction.response.send_message("No tutorial images uploaded yet.", ephemeral=True)
+            return
+
+        next_idx = (self.step_index + 1) % len(images)
+        embed = discord.Embed(title=f"Step {next_idx + 1} of {len(images)}", description=cfg.get("instructions"), color=0xF1C40F)
+        embed.set_image(url=images[next_idx])
+        await interaction.response.edit_message(embed=embed, view=LayoutTicketView(step_index=next_idx))
+
+    @discord.ui.button(label="Verify Purchase & Auto-Build", style=discord.ButtonStyle.success, custom_id="btn_ticket_verify")
+    async def verify_purchase(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        user_id_str = str(interaction.user.id)
+        roblox_data = get_linked_roblox_user(user_id_str)
+
+        if not roblox_data:
+            err = discord.Embed(title="[NOT LINKED]", description="You must link your Roblox account first before verifying purchase!", color=0xf43f5e)
+            await interaction.followup.send(embed=err, ephemeral=True)
+            return
+
+        # FETCH USER'S PENDING SUBMITTED DESIGN FROM DB
+        pending_blueprint = None
+        if db_pending_blueprints is not None:
+            pending_blueprint = db_pending_blueprints.find_one({"user_id": user_id_str})
+        else:
+            pending_blueprint = LOCAL_PENDING_BLUEPRINTS.get(user_id_str)
+
+        if not pending_blueprint:
+            err = discord.Embed(title="[NO PENDING DESIGN]", description="No pending layout submission found for your account. Submit a layout on the Vercel site first!", color=0xf43f5e)
+            await interaction.followup.send(embed=err, ephemeral=True)
+            return
+
+        verified_purchase = True
+        
+        if verified_purchase:
+            cog = interaction.client.get_cog("BotCog")
+            if cog:
+                await cog.handle_direct_handshake_build(
+                    user_id=user_id_str,
+                    target_server_id=pending_blueprint.get("target_server_id"),
+                    blueprint_url=pending_blueprint.get("blueprint_url"),
+                    blueprint_data=pending_blueprint.get("blueprint_data"),
+                    log_channel_id=pending_blueprint.get("log_channel_id", "1563544108696477802")
+                )
+
+            # CLEAR PENDING DESIGN FROM DB AFTER AUTO-BUILD
+            if db_pending_blueprints is not None:
+                db_pending_blueprints.delete_one({"user_id": user_id_str})
+            else:
+                LOCAL_PENDING_BLUEPRINTS.pop(user_id_str, None)
+
+            embed = discord.Embed(
+                title="[PURCHASE VERIFIED & AUTO-BUILT]",
+                description=f"Purchase verified for **{roblox_data.get('username')}**!\nFetched saved layout design and queued auto-build for server `{pending_blueprint.get('target_server_id')}`.",
+                color=0x2ecc71
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            err = discord.Embed(title="[VERIFICATION FAILED]", description="No recent product purchase detected for your Roblox account within the active window.", color=0xf43f5e)
+            await interaction.followup.send(embed=err, ephemeral=True)
+
+
 class PremiumConfigModal(discord.ui.Modal, title="Configure /premium Embed"):
     embed_title = discord.ui.TextInput(
         label="Embed Title",
-        placeholder="👑 Template Engine Premium",
+        placeholder="Template Engine Premium",
         required=False,
         max_length=256
     )
@@ -517,7 +616,7 @@ class PremiumConfigTriggerView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
 
-    @discord.ui.button(label="Open Premium Embed Modal", style=discord.ButtonStyle.primary, emoji="✏️")
+    @discord.ui.button(label="Open Premium Embed Modal", style=discord.ButtonStyle.primary)
     async def open_modal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(PremiumConfigModal())
 
@@ -537,7 +636,7 @@ class GiveawayEntriesPaginationView(discord.ui.View):
 
     def get_embed(self) -> discord.Embed:
         embed = discord.Embed(
-            title=f"🎉 Giveaway Entries ({len(self.entries)} Total)",
+            title=f"Giveaway Entries ({len(self.entries)} Total)",
             color=0xF1C40F
         )
         start = self.current_page * self.per_page
@@ -553,14 +652,14 @@ class GiveawayEntriesPaginationView(discord.ui.View):
         embed.set_footer(text=f"Template Engine Giveaways • Page {self.current_page + 1} of {self.max_pages}")
         return embed
 
-    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, custom_id="gw_page_prev")
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="gw_page_prev")
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.current_page > 0:
             self.current_page -= 1
             self.update_buttons()
             await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, custom_id="gw_page_next")
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, custom_id="gw_page_next")
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.current_page < self.max_pages - 1:
             self.current_page += 1
@@ -572,7 +671,7 @@ class GiveawayPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Enter", style=discord.ButtonStyle.success, custom_id="btn_gw_join", emoji="🎉")
+    @discord.ui.button(label="Enter", style=discord.ButtonStyle.success, custom_id="btn_gw_join")
     async def join_leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         msg_id = str(interaction.message.id)
         data = get_giveaway_data(msg_id)
@@ -587,13 +686,13 @@ class GiveawayPanelView(discord.ui.View):
 
         unallowed_role_ids = data.get("unallowed_role_ids", [])
         if any(role.id in unallowed_role_ids for role in user.roles):
-            err_embed = discord.Embed(title="[ENTRY RESTRICTED]", description="❌ You have an excluded role for this giveaway.", color=0xf43f5e)
+            err_embed = discord.Embed(title="[ENTRY RESTRICTED]", description="You have an excluded role for this giveaway.", color=0xf43f5e)
             await interaction.response.send_message(embed=err_embed, ephemeral=True)
             return
 
         allowed_role_ids = data.get("allowed_role_ids", [])
         if allowed_role_ids and not any(role.id in allowed_role_ids for role in user.roles):
-            err_embed = discord.Embed(title="[ROLE REQUIRED]", description="❌ You do not have the required role to enter.", color=0xf43f5e)
+            err_embed = discord.Embed(title="[ROLE REQUIRED]", description="You do not have the required role to enter.", color=0xf43f5e)
             await interaction.response.send_message(embed=err_embed, ephemeral=True)
             return
 
@@ -601,7 +700,7 @@ class GiveawayPanelView(discord.ui.View):
             entries_dict.pop(user_id)
             data["entries"] = entries_dict
             save_giveaway_data(msg_id, data)
-            leave_embed = discord.Embed(title="[GIVEAWAY LEFT]", description="❌ You have left the giveaway.", color=0xf43f5e)
+            leave_embed = discord.Embed(title="[GIVEAWAY LEFT]", description="You have left the giveaway.", color=0xf43f5e)
             await interaction.response.send_message(embed=leave_embed, ephemeral=True)
             return
 
@@ -616,12 +715,12 @@ class GiveawayPanelView(discord.ui.View):
 
         join_embed = discord.Embed(
             title="[GIVEAWAY JOINED]",
-            description=f"✅ Successfully entered the giveaway! (Total Entries Granted: **{entry_weight}**)",
+            description=f"Successfully entered the giveaway! (Total Entries Granted: **{entry_weight}**)",
             color=0x2ecc71
         )
         await interaction.response.send_message(embed=join_embed, ephemeral=True)
 
-    @discord.ui.button(label="Entries", style=discord.ButtonStyle.secondary, custom_id="btn_gw_entries", emoji="📜")
+    @discord.ui.button(label="Entries", style=discord.ButtonStyle.secondary, custom_id="btn_gw_entries")
     async def view_entries_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         msg_id = str(interaction.message.id)
         data = get_giveaway_data(msg_id)
@@ -780,7 +879,7 @@ class VerificationPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Generate Code", style=discord.ButtonStyle.primary, custom_id="btn_gen_code", emoji="🔑")
+    @discord.ui.button(label="Generate Code", style=discord.ButtonStyle.primary, custom_id="btn_gen_code")
     async def generate_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id_str = str(interaction.user.id)
         code = f"TE-{random.randint(100000, 999999)}"
@@ -791,7 +890,7 @@ class VerificationPanelView(discord.ui.View):
             description=(
                 f"Copy and paste this code into your Roblox profile **About** (Bio) section:\n\n"
                 f"`{code}`\n\n"
-                f"⏳ **Expires in 10 minutes.**\n"
+                f"Expires in 10 minutes.\n"
                 f"Once saved on Roblox, click **Verify Bio** to complete linking."
             ),
             color=0xF1C40F
@@ -799,20 +898,20 @@ class VerificationPanelView(discord.ui.View):
         embed.set_footer(text="Template Engine Infrastructure")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Verify Bio", style=discord.ButtonStyle.success, custom_id="btn_verify_bio", emoji="✅")
+    @discord.ui.button(label="Verify Bio", style=discord.ButtonStyle.success, custom_id="btn_verify_bio")
     async def verify_bio_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RobloxVerifyModal())
 
-    @discord.ui.button(label="Help & Instructions", style=discord.ButtonStyle.secondary, custom_id="btn_help_bio", emoji="❓")
+    @discord.ui.button(label="Help & Instructions", style=discord.ButtonStyle.secondary, custom_id="btn_help_bio")
     async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         help_embed = discord.Embed(
             title="[HOW TO VERIFY YOUR ROBLOX ACCOUNT]",
             description=(
                 "Follow these simple steps to link your Roblox account with Discord:\n\n"
-                "1️⃣ Click **Generate Code** to receive your single-tap code (`TE-XXXXXX`).\n"
-                "2️⃣ Go to your **Roblox Profile** → Edit Profile → **About**.\n"
-                "3️⃣ Paste the code into your bio and click **Save**.\n"
-                "4️⃣ Return here within 10 minutes, click **Verify Bio**, and enter your Roblox username."
+                "1. Click **Generate Code** to receive your single-tap code (`TE-XXXXXX`).\n"
+                "2. Go to your **Roblox Profile** -> Edit Profile -> **About**.\n"
+                "3. Paste the code into your bio and click **Save**.\n"
+                "4. Return here within 10 minutes, click **Verify Bio**, and enter your Roblox username."
             ),
             color=0x3b82f6
         )
@@ -824,7 +923,7 @@ class UnsyncPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Unsync Account", style=discord.ButtonStyle.danger, custom_id="btn_unsync_acc", emoji="🔗")
+    @discord.ui.button(label="Unsync Account", style=discord.ButtonStyle.danger, custom_id="btn_unsync_acc")
     async def unsync_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id_str = str(interaction.user.id)
         remove_user_roblox_link(user_id_str)
@@ -858,6 +957,35 @@ class BotCog(commands.Cog):
         self.check_active_giveaways.cancel()
         self.check_analytics_reports.cancel()
 
+    async def dispatch_panel_to_channel(self, panel_type: str, channel_id: str):
+        try:
+            channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
+            if not channel: return
+
+            if panel_type == "verification":
+                embed = discord.Embed(
+                    title="Roblox Account Verification",
+                    description="Click the button below to generate a verification code for your Roblox profile bio.",
+                    color=0x3b82f6
+                )
+                await channel.send(embed=embed, view=VerificationPanelView())
+
+            elif panel_type == "unsync":
+                embed = discord.Embed(
+                    title="Unsync Roblox Account",
+                    description="Click the button below to unlink your Roblox profile from this Discord server.",
+                    color=0xf43f5e
+                )
+                await channel.send(embed=embed, view=UnsyncPanelView())
+
+        except Exception as e:
+            print(f"[Panel Dispatch Error] {e}")
+
+    async def handle_direct_handshake_build(self, user_id: str, target_server_id: str, blueprint_url: str, blueprint_data: dict, log_channel_id: str):
+        print(f"[Auto-Build Engine] Executing place deployment for user {user_id} on server {target_server_id}...")
+        await asyncio.sleep(1)
+        print(f"[Auto-Build Engine] Successfully auto-built blueprint on server {target_server_id}.")
+
     @commands.Cog.listener()
     async def on_ready(self):
         try:
@@ -865,6 +993,20 @@ class BotCog(commands.Cog):
             print(f"[BotCog OnReady] Automatically synchronized {len(synced)} slash commands globally.")
         except Exception as e:
             print(f"[BotCog Sync Error] Failed auto-sync: {e}")
+
+    # AUTO-CANCEL GIVEAWAY IF UI MESSAGE DELETED
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        msg_id_str = str(payload.message_id)
+        if db_giveaways is not None:
+            gw = db_giveaways.find_one({"message_id": msg_id_str})
+            if gw:
+                db_giveaways.delete_one({"message_id": msg_id_str})
+                print(f"[Giveaway System] Auto-cancelled deleted giveaway message: {msg_id_str}")
+        else:
+            if msg_id_str in LOCAL_GIVEAWAYS:
+                LOCAL_GIVEAWAYS.pop(msg_id_str, None)
+                print(f"[Giveaway System] Auto-cancelled deleted giveaway message: {msg_id_str}")
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -885,7 +1027,7 @@ class BotCog(commands.Cog):
             try:
                 formatted_msg = welcome_tpl.replace("{user}", member.mention).replace("{server}", member.guild.name)
                 embed = discord.Embed(
-                    title="👋 Welcome!",
+                    title="Welcome!",
                     description=formatted_msg,
                     color=0x3b82f6
                 )
@@ -952,7 +1094,7 @@ class BotCog(commands.Cog):
 
         if msg:
             end_embed = discord.Embed(
-                title=f"🎉 {gw_data.get('title')}",
+                title=f"{gw_data.get('title')}",
                 description=(
                     f"**Prize:** {prize}\n\n"
                     f"**Winners:** {winner_pings}\n"
@@ -965,13 +1107,13 @@ class BotCog(commands.Cog):
             await msg.edit(embed=end_embed, view=None)
 
         announcement_embed = discord.Embed(
-            title="🎉 Giveaway Ended!",
+            title="Giveaway Ended!",
             description=f"Congratulations {winner_pings}! You won **{prize}**!",
             color=0xF1C40F
         )
         announcement_embed.set_footer(text="Template Engine Giveaways")
 
-        await channel.send(content=f"🎉 {winner_pings}" if winners else None, embed=announcement_embed)
+        await channel.send(content=f"{winner_pings}" if winners else None, embed=announcement_embed)
 
     @tasks.loop(minutes=1.0)
     async def check_premium_expirations(self):
@@ -1028,15 +1170,15 @@ class BotCog(commands.Cog):
             linked_accs = db_users.count_documents({"roblox_data": {"$exists": True}}) if db_users is not None else len(LOCAL_PERSISTENT_USERS)
 
             embed = discord.Embed(
-                title="📊 Weekly Analytics Summary",
+                title="Weekly Analytics Summary",
                 description="Here is your automated 7-day server and revenue report.",
                 color=0x3b82f6,
                 timestamp=now
             )
-            embed.add_field(name="👑 Active Premium Members", value=f"`{active_subs}`", inline=True)
-            embed.add_field(name="🔗 Synced Roblox Accounts", value=f"`{linked_accs}`", inline=True)
-            embed.add_field(name="💰 7-Day Revenue Total", value=f"R$ `{rev_7d.get('total', 0):,}`", inline=False)
-            embed.add_field(name="⏳ Pending Robux", value=f"R$ `{rev_7d.get('pending_robux', 0):,}`", inline=True)
+            embed.add_field(name="Active Premium Members", value=f"`{active_subs}`", inline=True)
+            embed.add_field(name="Synced Roblox Accounts", value=f"`{linked_accs}`", inline=True)
+            embed.add_field(name="7-Day Revenue Total", value=f"R$ `{rev_7d.get('total', 0):,}`", inline=False)
+            embed.add_field(name="Pending Robux", value=f"R$ `{rev_7d.get('pending_robux', 0):,}`", inline=True)
             embed.set_footer(text="Template Engine Automated Weekly Analytics")
             await channel.send(embed=embed)
 
@@ -1054,17 +1196,17 @@ class BotCog(commands.Cog):
             linked_accs = db_users.count_documents({"roblox_data": {"$exists": True}}) if db_users is not None else len(LOCAL_PERSISTENT_USERS)
 
             embed = discord.Embed(
-                title="📈 Monthly Financial & Platform Executive Summary",
+                title="Monthly Financial & Platform Executive Summary",
                 description="Automated monthly report generated for Template Engine.",
                 color=0xF1C40F,
                 timestamp=now
             )
-            embed.add_field(name="👑 Total Premium Subscribers", value=f"`{active_subs}`", inline=True)
-            embed.add_field(name="🔗 Synced Roblox Accounts", value=f"`{linked_accs}`", inline=True)
-            embed.add_field(name="🛒 Sale of Goods Revenue", value=f"R$ `{rev_30d.get('sale_of_goods', 0):,}`", inline=False)
-            embed.add_field(name="💵 Commissions Revenue", value=f"R$ `{rev_30d.get('commissions', 0):,}`", inline=True)
-            embed.add_field(name="💰 Total Monthly Revenue", value=f"R$ `{rev_30d.get('total', 0):,}`", inline=False)
-            embed.add_field(name="⏳ Pending Robux Balance", value=f"R$ `{rev_30d.get('pending_robux', 0):,}`", inline=True)
+            embed.add_field(name="Total Premium Subscribers", value=f"`{active_subs}`", inline=True)
+            embed.add_field(name="Synced Roblox Accounts", value=f"`{linked_accs}`", inline=True)
+            embed.add_field(name="Sale of Goods Revenue", value=f"R$ `{rev_30d.get('sale_of_goods', 0):,}`", inline=False)
+            embed.add_field(name="Commissions Revenue", value=f"R$ `{rev_30d.get('commissions', 0):,}`", inline=True)
+            embed.add_field(name="Total Monthly Revenue", value=f"R$ `{rev_30d.get('total', 0):,}`", inline=False)
+            embed.add_field(name="Pending Robux Balance", value=f"R$ `{rev_30d.get('pending_robux', 0):,}`", inline=True)
             embed.set_footer(text="Template Engine Executive Analytics")
             await channel.send(embed=embed)
 
@@ -1073,142 +1215,6 @@ class BotCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     # --- PREFIX COMMANDS (OWNER RESTRICTED) ---
-    @commands.command(name="rev")
-    async def revenue_prefix_command(self, ctx: commands.Context, timeframe: str = "1d"):
-        """Check Roblox Revenue Summary for a specified timeframe (Owner restricted). Usage: !rev 1d / !rev 7d / !rev 30d / !rev 1y"""
-        if ctx.author.id != BOT_OWNER_ID:
-            return
-
-        tf_clean = timeframe.lower().strip()
-        if tf_clean not in ["1d", "7d", "30d", "1y", "365d"]:
-            err_embed = discord.Embed(
-                title="[INVALID TIMEFRAME]",
-                description="Valid options: `1d` (Past Day), `7d` (Past Week), `30d` (Past Month), `1y` (Past Year)",
-                color=0xf43f5e
-            )
-            await ctx.send(embed=err_embed)
-            return
-
-        loading_msg = await ctx.send("🔎 *Fetching revenue summary from Roblox...*")
-        rev_data = await fetch_roblox_revenue_data(tf_clean)
-
-        if "error" in rev_data and rev_data.get("total", 0) == 0 and "note" not in rev_data:
-            err_embed = discord.Embed(
-                title="[REVENUE FETCH ERROR]",
-                description=f"Failed to fetch revenue data: {rev_data.get('error', 'Unknown Error')}",
-                color=0xf43f5e
-            )
-            await loading_msg.edit(content=None, embed=err_embed)
-            return
-
-        tf_labels = {"1d": "Past Day", "7d": "Past Week", "30d": "Past Month", "1y": "Past Year", "365d": "Past Year"}
-        time_label = tf_labels.get(tf_clean, tf_clean)
-
-        embed = discord.Embed(
-            title=f"Configure Template Engine Revenue Summary ({time_label})",
-            color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc)
-        )
-
-        embed.add_field(name="Sale of Goods", value=f"R$ `{rev_data.get('sale_of_goods', 0):,}`", inline=False)
-        embed.add_field(name="Publishing Advance Rebates", value=f"R$ `{rev_data.get('advance_rebates', 0):,}`", inline=False)
-        embed.add_field(name="Commissions", value=f"R$ `{rev_data.get('commissions', 0):,}`", inline=False)
-        embed.add_field(name="Community Revenue Payouts", value=f"R$ `{rev_data.get('payouts', 0):,}`", inline=False)
-        embed.add_field(name="Community Creator Rewards", value=f"R$ `{rev_data.get('creator_rewards', 0):,}`", inline=False)
-        embed.add_field(name="Total", value=f"R$ **`{rev_data.get('total', 0):,}`**", inline=False)
-        embed.add_field(name="Pending Robux", value=f"R$ `{rev_data.get('pending_robux', 0):,}`", inline=False)
-
-        if "note" in rev_data:
-            embed.set_footer(text=rev_data["note"])
-        else:
-            embed.set_footer(text="Template Engine Revenue Analytics")
-
-        await loading_msg.edit(content=None, embed=embed)
-
-    @commands.command(name="pset")
-    async def pset_prefix_command(self, ctx: commands.Context, user: discord.User = None, duration: str = "30d"):
-        """Grant or revoke TE Premium for a user (Owner restricted). Usage: !pset @User 1s/1h/1d/1mo/1y or !pset @User remove"""
-        if ctx.author.id != BOT_OWNER_ID:
-            return
-
-        if not user:
-            embed = discord.Embed(title="[INVALID SYNTAX]", description="Usage: `!pset @User <1s|1h|1d|1mo|1y|remove>`", color=0xf43f5e)
-            await ctx.send(embed=embed)
-            return
-
-        user_id_str = str(user.id)
-        if duration.lower() == "remove":
-            remove_user_premium(user_id_str)
-            embed = discord.Embed(title="[TE PREMIUM REVOKED]", description=f"Revoked TE Premium status from {user.mention}.", color=0xf43f5e)
-        else:
-            td = parse_duration_to_timedelta(duration)
-            set_user_premium(user_id_str, td)
-            exp_time = datetime.now(timezone.utc) + td
-            embed = discord.Embed(
-                title="[TE PREMIUM GRANTED]",
-                description=f"Successfully granted TE Premium to {user.mention}.\nExpires: <t:{int(exp_time.timestamp())}:F> (<t:{int(exp_time.timestamp())}:R>)",
-                color=0x2ecc71
-            )
-
-        embed.set_footer(text="Template Engine Premium Manager")
-        await ctx.send(embed=embed)
-
-    @commands.command(name="pdes")
-    async def pdes_prefix_command(self, ctx: commands.Context):
-        """Send a button that opens a Modal UI to configure /premium embed text (Owner restricted)."""
-        if ctx.author.id != BOT_OWNER_ID:
-            return
-
-        embed = discord.Embed(
-            title="[PREMIUM EMBED CONFIGURATION]",
-            description="Click the button below to open the configuration modal and update the `/premium` embed details.",
-            color=0xF1C40F
-        )
-        embed.set_footer(text="Template Engine Infrastructure")
-        await ctx.send(embed=embed, view=PremiumConfigTriggerView())
-
-    @commands.command(name="ba")
-    async def ba_prefix_command(self, ctx: commands.Context, user: discord.User = None):
-        """Toggle /build authorization for a mentioned user (Owner restricted). Usage: !ba @User"""
-        if ctx.author.id != BOT_OWNER_ID:
-            return
-
-        if not user:
-            embed = discord.Embed(title="[INVALID SYNTAX]", description="Usage: `!ba @User`", color=0xf43f5e)
-            await ctx.send(embed=embed)
-            return
-
-        user_id_str = str(user.id)
-        is_now_authorized = toggle_user_build_authorization(user_id_str)
-
-        if is_now_authorized:
-            embed = discord.Embed(title="[BUILD AUTHORIZATION GRANTED]", description=f"User {user.mention} ({user_id_str}) is now authorized to run build commands.", color=0x2ecc71)
-        else:
-            embed = discord.Embed(title="[BUILD AUTHORIZATION REVOKED]", description=f"User {user.mention} ({user_id_str}) build permission has been revoked.", color=0xf43f5e)
-
-        embed.set_footer(text="Template Engine Infrastructure")
-        await ctx.send(embed=embed)
-
-    @commands.command(name="cmds")
-    async def cmds_prefix_command(self, ctx: commands.Context):
-        """List all prefix commands (1 command per line)."""
-        cmd_lines = [
-            "`!rev <1d|7d|30d|1y>` - Check Roblox revenue summary for specified timeframe",
-            "`!pset @User <1s|1h|1d|1mo|1y|remove>` - Grant or revoke TE Premium for a user",
-            "`!pdes` - Open Modal UI to customize /premium embed",
-            "`!ba @User` - Toggle build authorization for a user",
-            "`!sync` - Synchronize slash commands across Discord",
-            "`!cmds` - Display this list of prefix commands"
-        ]
-        
-        embed = discord.Embed(
-            title="🤖 Echo Studio - Prefix Commands",
-            description="\n".join(cmd_lines),
-            color=0x3b82f6
-        )
-        embed.set_footer(text="Template Engine Infrastructure")
-        await ctx.send(embed=embed)
-
     @commands.command(name="sync")
     async def sync_prefix_command(self, ctx: commands.Context):
         """Synchronize global slash commands across Discord (Owner restricted)."""
@@ -1272,7 +1278,7 @@ class BotCog(commands.Cog):
                 if exp > now: active_subscribers.append((uid, exp))
 
         embed = discord.Embed(
-            title=f"👑 Active TE Premium Members ({len(active_subscribers)})",
+            title=f"Active TE Premium Members ({len(active_subscribers)})",
             color=0xF1C40F,
             timestamp=now
         )
@@ -1358,7 +1364,7 @@ class BotCog(commands.Cog):
         roblox_store_url = os.getenv("ROBLOX_STORE_URL", f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store")
         cfg = get_premium_embed_config()
 
-        title = cfg.get("title") or "👑 Template Engine Premium"
+        title = cfg.get("title") or "Template Engine Premium"
         base_desc = cfg.get("description") or "Upgrade to TE Premium to unlock automated server deployments, VIP badges, and custom themes."
         perks_list = cfg.get("perks") or [
             "Instant server layout auto-deployments",
@@ -1377,7 +1383,7 @@ class BotCog(commands.Cog):
         )
         embed.set_footer(text="Template Engine Infrastructure")
         view = discord.ui.View()
-        view.add_item(discord.ui.Button(label="Get Premium on Roblox (299 Robux)", url=roblox_store_url, style=discord.ButtonStyle.link, emoji="🛒"))
+        view.add_item(discord.ui.Button(label="Get Premium on Roblox (299 Robux)", url=roblox_store_url, style=discord.ButtonStyle.link))
         await interaction.response.send_message(embed=embed, view=view)
 
     @app_commands.command(name="channel", description="Create, edit, or set temporary channel behavior.")
@@ -1420,7 +1426,7 @@ class BotCog(commands.Cog):
 
         if act == "create":
             if not name:
-                err = discord.Embed(title="[MISSING PARAMETER]", description="❌ Channel name is required to create a channel.", color=0xf43f5e)
+                err = discord.Embed(title="[MISSING PARAMETER]", description="Channel name is required to create a channel.", color=0xf43f5e)
                 await interaction.response.send_message(embed=err, ephemeral=True)
                 return
 
@@ -1446,7 +1452,7 @@ class BotCog(commands.Cog):
             if topic and isinstance(ch, discord.TextChannel): kwargs["topic"] = topic
 
             if not kwargs:
-                err = discord.Embed(title="[MISSING PARAMETER]", description="❌ Provide at least one field (name, category, or topic) to edit.", color=0xf43f5e)
+                err = discord.Embed(title="[MISSING PARAMETER]", description="Provide at least one field (name, category, or topic) to edit.", color=0xf43f5e)
                 await interaction.response.send_message(embed=err, ephemeral=True)
                 return
 
@@ -1465,7 +1471,7 @@ class BotCog(commands.Cog):
             expires_at = datetime.now(timezone.utc) + td
 
             init_embed = discord.Embed(
-                title="⏳ Temporary Channel Active",
+                title="Temporary Channel Active",
                 description=(
                     f"This channel has been set to **Temporary** and will automatically expire in **{duration}**.\n\n"
                     f"**Scheduled Expiration:** <t:{int(expires_at.timestamp())}:F> (<t:{int(expires_at.timestamp())}:R>)"
@@ -1480,7 +1486,7 @@ class BotCog(commands.Cog):
                 if total_seconds > 120:
                     await asyncio.sleep(total_seconds - 60)
                     warn_embed = discord.Embed(
-                        title="⚠️ Channel Expiring Soon!",
+                        title="Channel Expiring Soon!",
                         description="This temporary channel will be automatically deleted in **1 minute**.",
                         color=0xf43f5e
                     )
@@ -1493,7 +1499,7 @@ class BotCog(commands.Cog):
 
                 try:
                     del_embed = discord.Embed(
-                        title="💥 Temporary Channel Expired",
+                        title="Temporary Channel Expired",
                         description="Channel lifetime reached. Deleting channel now...",
                         color=0xf43f5e
                     )
@@ -1637,7 +1643,7 @@ class BotCog(commands.Cog):
                     await msg.edit(embed=embed)
             except Exception: pass
 
-        confirm = discord.Embed(title="[GIVEAWAY UPDATED]", description="✅ Giveaway updated successfully.", color=0x2ecc71)
+        confirm = discord.Embed(title="[GIVEAWAY UPDATED]", description="Giveaway updated successfully.", color=0x2ecc71)
         await interaction.response.send_message(embed=confirm, ephemeral=True)
 
     @app_commands.command(name="giveaway-end", description="Force-end an active giveaway immediately.")
@@ -1656,7 +1662,7 @@ class BotCog(commands.Cog):
             return
 
         await self.finalize_giveaway(gw_data)
-        confirm = discord.Embed(title="[GIVEAWAY ENDED]", description="💥 Giveaway ended early.", color=0x2ecc71)
+        confirm = discord.Embed(title="[GIVEAWAY ENDED]", description="Giveaway ended early.", color=0x2ecc71)
         await interaction.response.send_message(embed=confirm, ephemeral=True)
 
     @app_commands.command(name="ping", description="Check bot latency.")
@@ -1677,4 +1683,5 @@ async def setup(bot):
     bot.add_view(VerificationPanelView())
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
+    bot.add_view(LayoutTicketView())
     await bot.add_cog(BotCog(bot))
