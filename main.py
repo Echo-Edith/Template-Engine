@@ -18,12 +18,15 @@ MONGO_URI = os.environ.get("MONGO_URI")
 ROBLOX_OPEN_CLOUD_KEY = (os.environ.get("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
 ROBLOX_UNIVERSE_ID = (os.environ.get("ROBLOX_UNIVERSE_ID") or "").strip()
 ROBLOX_GROUP_ID = (os.environ.get("ROBLOX_GROUP_ID") or "").strip()
-VERCEL_TE_SITE_URL = (os.environ.get("VERCEL_TE_SITE_URL") or "https://templateengine-xi.vercel.app/").strip()
+VERCEL_TE_SITE_URL = (os.environ.get("VERCEL_TE_SITE_URL") or "https://your-vercel-app.vercel.app").strip()
 SYSTEM_LOG_WEBHOOK_URL = (os.environ.get("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 
 # --- MONGO DATABASE CONNECTIONS ---
 db_premium = None
 db_audit = None
+db_layout_ticket_config = None
+db_purchase_receipts = None
+db_pending_blueprints = None
 
 if MONGO_URI:
     try:
@@ -34,14 +37,22 @@ if MONGO_URI:
             db = mongo_client["static_studio_db"]
         db_premium = db["premium_users"]
         db_audit = db["audit_logs"]
+        db_layout_ticket_config = db["layout_ticket_config"]
+        db_purchase_receipts = db["purchase_receipts"]
+        db_pending_blueprints = db["pending_blueprints"]
     except Exception as e:
         print(f"[Mongo Warning] Could not connect to MongoDB in main.py: {e}")
 
-# Fallback in-memory structures if MongoDB is unattached
 LOCAL_PREMIUM_USERS = [
     {"user_id": "1219266886143967245", "username": "EchoOwner", "expires_at": "2099-12-31T23:59:59Z", "plan": "Lifetime VIP"}
 ]
 LOCAL_AUDIT_LOGS = []
+LOCAL_TICKET_CONFIG = {
+    "title": "Layout Premium Deployment Ticket",
+    "dev_product_id": "3722941069",
+    "instructions": "Follow the step-by-step images below to purchase the developer product, then click 'Verify & Auto-Build'.",
+    "step_images": []
+}
 
 def log_system_event(action: str, details: str):
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -61,7 +72,7 @@ def log_system_event(action: str, details: str):
         try:
             requests.post(SYSTEM_LOG_WEBHOOK_URL, json={
                 "embeds": [{
-                    "title": f"🛡️ Owner Panel Action: {action}",
+                    "title": f"Owner Panel Action: {action}",
                     "description": details,
                     "color": 0xf1c40f,
                     "timestamp": timestamp
@@ -76,25 +87,23 @@ web_app.secret_key = SECRET_KEY
 
 bot_cog_ref = None
 
-# --- AUTH HELPER ---
 def is_authenticated():
     return session.get("authenticated", False)
 
-# --- WEB ROUTES & OWNER CONTROL PANEL ---
-
+# --- OWNER CONTROL PANEL TEMPLATE (TABBED & HAMBURGER SIDEBAR) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Template Engine - Owner Panel</title>
+    <title>Template Engine - Owner Control Panel</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { background-color: #0b0f17; color: #f3f4f6; font-family: 'Inter', system-ui, sans-serif; }
         .glass-card { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.08); }
         .gold-gradient { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
+        .sidebar-transition { transition: transform 0.3s ease-in-out; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col justify-between">
@@ -103,11 +112,11 @@ HTML_TEMPLATE = """
     <div id="login-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
         <div class="glass-card p-8 rounded-2xl max-w-md w-full mx-4 shadow-2xl border border-amber-500/20">
             <div class="text-center mb-6">
-                <div class="w-16 h-16 gold-gradient rounded-full flex items-center justify-center mx-auto mb-3 shadow-lg shadow-amber-500/20">
-                    <i class="fa-solid fa-crown text-2xl text-slate-950"></i>
+                <div class="w-16 h-16 gold-gradient rounded-full flex items-center justify-center mx-auto mb-3 shadow-lg shadow-amber-500/20 font-black text-xl text-slate-950">
+                    TE
                 </div>
                 <h1 class="text-2xl font-bold text-white tracking-wide">Owner Control Panel</h1>
-                <p class="text-xs text-slate-400 mt-1">Template Engine Master Node</p>
+                <p class="text-xs text-slate-400 mt-1">Master Management Node</p>
             </div>
             
             <form id="login-form" class="space-y-4">
@@ -124,118 +133,274 @@ HTML_TEMPLATE = """
     </div>
 
     <!-- MAIN DASHBOARD -->
-    <div id="dashboard" class="hidden min-h-screen flex flex-col">
-        <!-- Top Nav -->
-        <header class="glass-card border-b border-slate-800 px-6 py-4 flex justify-between items-center sticky top-0 z-40">
-            <div class="flex items-center gap-3">
-                <div class="w-10 h-10 gold-gradient rounded-xl flex items-center justify-center text-slate-950 font-black">TE</div>
-                <div>
-                    <h2 class="font-bold text-white text-base leading-tight">Template Engine</h2>
-                    <p class="text-xs text-amber-400 font-medium">Render Master Control Center</p>
-                </div>
-            </div>
-            <div class="flex items-center gap-3">
-                <a href="{{ vercel_url }}" target="_blank" class="px-3 py-2 bg-slate-800 border border-slate-700 text-slate-300 rounded-xl text-xs font-semibold hover:text-white transition flex items-center gap-1.5">
-                    <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i> Open Vercel TE
-                </a>
-                <button onclick="fetchRevenue()" class="p-2 text-slate-400 hover:text-white transition"><i class="fa-solid fa-rotate"></i></button>
-                <button onclick="logout()" class="px-4 py-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs font-semibold hover:bg-rose-500 hover:text-white transition">Logout</button>
-            </div>
-        </header>
+    <div id="dashboard" class="hidden min-h-screen flex flex-col md:flex-row">
 
-        <main class="max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6 flex-grow">
-            <!-- REVENUE OVERVIEW CARD -->
-            <div class="glass-card rounded-2xl p-6 relative overflow-hidden">
-                <div class="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-6">
+        <!-- MOBILE SIDEBAR OVERLAY -->
+        <div id="sidebar-overlay" onclick="toggleSidebar()" class="fixed inset-0 bg-black/60 z-30 hidden md:hidden"></div>
+
+        <!-- HAMBURGER SIDEBAR -->
+        <aside id="sidebar" class="fixed md:static inset-y-0 left-0 z-40 w-64 glass-card border-r border-slate-800 flex flex-col transform -translate-x-full md:translate-x-0 sidebar-transition">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 gold-gradient rounded-xl flex items-center justify-center text-slate-950 font-black">TE</div>
                     <div>
-                        <h3 class="text-lg font-bold text-white flex items-center gap-2"><i class="fa-solid fa-chart-line text-amber-400"></i> Roblox Group Revenue Summary</h3>
-                        <p class="text-xs text-slate-400">Real-time group earnings powered by Roblox Open Cloud API</p>
-                    </div>
-                    <div class="flex items-center gap-2 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
-                        <button onclick="setRevenueTimeframe('1d')" id="tf-1d" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30">1D</button>
-                        <button onclick="setRevenueTimeframe('7d')" id="tf-7d" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white">7D</button>
-                        <button onclick="setRevenueTimeframe('30d')" id="tf-30d" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white">30D</button>
-                        <button onclick="setRevenueTimeframe('1y')" id="tf-1y" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white">1Y</button>
+                        <h2 class="font-bold text-white text-sm">Template Engine</h2>
+                        <p class="text-[10px] text-amber-400 font-medium">Owner Panel</p>
                     </div>
                 </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
-                        <span class="text-xs font-medium text-slate-400">Total Revenue</span>
-                        <div class="text-2xl font-black text-amber-400 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-total-rev">0</span>
-                        </div>
-                    </div>
-                    <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
-                        <span class="text-xs font-medium text-slate-400">Sale of Goods</span>
-                        <div class="text-2xl font-black text-emerald-400 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-sale-goods">0</span>
-                        </div>
-                    </div>
-                    <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
-                        <span class="text-xs font-medium text-slate-400">Pending Robux (Est. 30%)</span>
-                        <div class="text-2xl font-black text-indigo-400 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-pending">0</span>
-                        </div>
-                    </div>
-                    <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
-                        <span class="text-xs font-medium text-slate-400">Commissions & Rebates</span>
-                        <div class="text-2xl font-black text-slate-300 mt-1 flex items-center gap-1">
-                            <span>R$</span> <span id="stat-commissions">0</span>
-                        </div>
-                    </div>
-                </div>
+                <button onclick="toggleSidebar()" class="md:hidden text-slate-400 hover:text-white p-1 text-sm font-bold">[X]</button>
             </div>
 
-            <!-- MANAGEMENT TABS -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <!-- Premium Subscribers Control -->
-                <div class="lg:col-span-2 glass-card rounded-2xl p-6">
-                    <h3 class="text-base font-bold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-users text-amber-400"></i> Premium Subscriber Roster</h3>
-                    
-                    <form id="add-premium-form" class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
-                        <input type="text" id="add-uid" placeholder="Discord User ID" class="bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500" required>
-                        <input type="text" id="add-uname" placeholder="Username" class="bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500" required>
-                        <div class="flex gap-2">
-                            <input type="number" id="add-days" placeholder="Days (30)" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500">
-                            <button type="submit" class="gold-gradient text-slate-950 font-bold px-4 rounded-xl text-xs hover:opacity-90">Grant</button>
-                        </div>
-                    </form>
+            <nav class="p-3 space-y-1 flex-grow">
+                <button onclick="switchTab('analytics')" id="nav-analytics" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30">
+                    Revenue Analytics
+                </button>
+                <button onclick="switchTab('premium')" id="nav-premium" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/50">
+                    Subscriber Roster
+                </button>
+                <button onclick="switchTab('ticket')" id="nav-ticket" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/50">
+                    Ticket & Panel Config
+                </button>
+                <button onclick="switchTab('deploy')" id="nav-deploy" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/50">
+                    Open Cloud Deploy
+                </button>
+                <button onclick="switchTab('logs')" id="nav-logs" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/50">
+                    System Audit Logs
+                </button>
+            </nav>
 
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left text-xs">
-                            <thead class="bg-slate-900/80 text-slate-400 border-b border-slate-800">
-                                <tr>
-                                    <th class="p-3">User</th>
-                                    <th class="p-3">Discord ID</th>
-                                    <th class="p-3">Expires At</th>
-                                    <th class="p-3 text-right">Action</th>
-                                </tr>
-                            </thead>
-                            <tbody id="premium-table-body" class="divide-y divide-slate-800/50">
-                                <!-- Dynamic User Rows -->
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Live Audit Feed -->
-                <div class="glass-card rounded-2xl p-6">
-                    <h3 class="text-base font-bold text-white mb-4 flex items-center gap-2"><i class="fa-solid fa-clock-rotate-left text-amber-400"></i> Audit Feed</h3>
-                    <div id="audit-feed" class="space-y-3 max-h-80 overflow-y-auto pr-1 text-xs">
-                        <div class="text-slate-500 italic">Loading audit entries...</div>
-                    </div>
-                </div>
+            <div class="p-4 border-t border-slate-800 space-y-2">
+                <a href="{{ vercel_url }}" target="_blank" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 text-slate-300 rounded-xl text-xs font-semibold hover:text-white transition flex items-center justify-center gap-2">
+                    Open Vercel TE
+                </a>
+                <button onclick="logout()" class="w-full px-3 py-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs font-semibold hover:bg-rose-500 hover:text-white transition">
+                    Logout
+                </button>
             </div>
-        </main>
+        </aside>
 
-        <footer class="glass-card border-t border-slate-800 p-4 text-center text-xs text-slate-500">
-            Template Engine Owner Node &bull; Render Host
-        </footer>
+        <!-- CONTENT AREA -->
+        <div class="flex-grow flex flex-col min-w-0">
+            <!-- TOP BAR -->
+            <header class="glass-card border-b border-slate-800 px-4 py-3 flex justify-between items-center sticky top-0 z-20">
+                <div class="flex items-center gap-3">
+                    <button onclick="toggleSidebar()" class="md:hidden p-2 text-slate-300 hover:text-white text-xs font-bold">[Menu]</button>
+                    <h2 id="tab-header-title" class="font-bold text-white text-base">Revenue Analytics</h2>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button onclick="refreshActiveTab()" class="p-2 text-slate-400 hover:text-white transition text-xs font-bold">[Refresh]</button>
+                </div>
+            </header>
+
+            <main class="p-4 md:p-6 space-y-6 flex-grow overflow-y-auto">
+                
+                <!-- TAB 1: REVENUE ANALYTICS -->
+                <div id="tab-content-analytics" class="tab-page space-y-6">
+                    <div class="glass-card rounded-2xl p-6">
+                        <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-4 mb-6">
+                            <div>
+                                <h3 class="text-lg font-bold text-white">Roblox Group Revenue</h3>
+                                <p class="text-xs text-slate-400">Powered by Roblox Open Cloud API</p>
+                            </div>
+                            <div class="flex items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
+                                <button onclick="setRevenueTimeframe('1d')" id="tf-1d" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30">1D</button>
+                                <button onclick="setRevenueTimeframe('7d')" id="tf-7d" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white">7D</button>
+                                <button onclick="setRevenueTimeframe('30d')" id="tf-30d" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white">30D</button>
+                                <button onclick="setRevenueTimeframe('1y')" id="tf-1y" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white">1Y</button>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                            <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+                                <span class="text-xs font-medium text-slate-400">Total Revenue</span>
+                                <div class="text-2xl font-black text-amber-400 mt-1">R$ <span id="stat-total-rev">0</span></div>
+                            </div>
+                            <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+                                <span class="text-xs font-medium text-slate-400">Sale of Goods</span>
+                                <div class="text-2xl font-black text-emerald-400 mt-1">R$ <span id="stat-sale-goods">0</span></div>
+                            </div>
+                            <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+                                <span class="text-xs font-medium text-slate-400">Pending Robux (Est. 30%)</span>
+                                <div class="text-2xl font-black text-indigo-400 mt-1">R$ <span id="stat-pending">0</span></div>
+                            </div>
+                            <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+                                <span class="text-xs font-medium text-slate-400">Commissions</span>
+                                <div class="text-2xl font-black text-slate-300 mt-1">R$ <span id="stat-commissions">0</span></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 2: PREMIUM SUBSCRIBERS -->
+                <div id="tab-content-premium" class="tab-page hidden space-y-6">
+                    <div class="glass-card rounded-2xl p-6">
+                        <h3 class="text-base font-bold text-white mb-4">Active Subscriber Roster</h3>
+                        
+                        <form id="add-premium-form" class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
+                            <input type="text" id="add-uid" placeholder="Discord User ID" class="bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500" required>
+                            <input type="text" id="add-uname" placeholder="Username" class="bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500" required>
+                            <div class="flex gap-2">
+                                <input type="number" id="add-days" placeholder="Days (30)" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500">
+                                <button type="submit" class="gold-gradient text-slate-950 font-bold px-4 rounded-xl text-xs hover:opacity-90">Grant</button>
+                            </div>
+                        </form>
+
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-xs">
+                                <thead class="bg-slate-900/80 text-slate-400 border-b border-slate-800">
+                                    <tr>
+                                        <th class="p-3">User</th>
+                                        <th class="p-3">Discord ID</th>
+                                        <th class="p-3">Expires At</th>
+                                        <th class="p-3 text-right">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="premium-table-body" class="divide-y divide-slate-800/50"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 3: LAYOUT TICKET & DISCORD PANELS CONFIG -->
+                <div id="tab-content-ticket" class="tab-page hidden space-y-6">
+                    <div class="glass-card rounded-2xl p-6 space-y-6">
+                        <div>
+                            <h3 class="text-base font-bold text-white">Layout Ticket & Panel Controls</h3>
+                            <p class="text-xs text-slate-400">Post account verification or unsync panels directly to Discord, and configure step-by-step product images.</p>
+                        </div>
+
+                        <!-- PANEL DISPATCH ACTIONS -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
+                            <div>
+                                <h4 class="text-xs font-bold text-white mb-1">Post Account Verification Panel</h4>
+                                <p class="text-[10px] text-slate-400 mb-2">Sends /verification-set panel to specified Discord channel.</p>
+                                <div class="flex gap-2">
+                                    <input type="text" id="verify-channel-id" placeholder="Channel ID" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                                    <button type="button" onclick="triggerVerificationPanel()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold">Post</button>
+                                </div>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white mb-1">Post Account Unsync Panel</h4>
+                                <p class="text-[10px] text-slate-400 mb-2">Sends /un-sync-set panel to specified Discord channel.</p>
+                                <div class="flex gap-2">
+                                    <input type="text" id="unsync-channel-id" placeholder="Channel ID" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                                    <button type="button" onclick="triggerUnsyncPanel()" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold">Post</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <form id="ticket-config-form" class="space-y-4 border-t border-slate-800 pt-4">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Ticket Title</label>
+                                <input type="text" id="ticket-title" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:border-amber-500">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Developer Product ID (Roblox)</label>
+                                <input type="text" id="ticket-devid" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:border-amber-500">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Instructions Text</label>
+                                <textarea id="ticket-instructions" rows="3" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:border-amber-500"></textarea>
+                            </div>
+
+                            <div class="border-t border-slate-800 pt-4 space-y-3">
+                                <label class="block text-xs font-semibold uppercase text-slate-400">Step-by-Step Instruction Images</label>
+                                
+                                <div class="flex items-center gap-3">
+                                    <input type="file" id="image-upload-input" accept="image/*" class="hidden" onchange="handleImageSelected(event)">
+                                    <button type="button" onclick="document.getElementById('image-upload-input').click()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold">
+                                        + Add Image (Photo Library / Choose File)
+                                    </button>
+                                </div>
+
+                                <div id="step-images-list" class="space-y-2"></div>
+                            </div>
+
+                            <button type="submit" class="gold-gradient text-slate-950 font-bold px-6 py-2.5 rounded-xl text-xs hover:opacity-90">
+                                Save Ticket Configuration
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- TAB 4: ROBLOX OPEN CLOUD DEPLOYMENT -->
+                <div id="tab-content-deploy" class="tab-page hidden space-y-6">
+                    <div class="glass-card rounded-2xl p-6 space-y-4">
+                        <h3 class="text-base font-bold text-white">Deploy Script via Open Cloud</h3>
+                        <p class="text-xs text-slate-400">Paste Luau script to publish directly to your Roblox Universe place.</p>
+                        
+                        <div>
+                            <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Luau Script</label>
+                            <textarea id="deploy-lua-code" rows="8" placeholder="Paste script here..." class="w-full bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs text-emerald-400 font-mono focus:outline-none focus:border-amber-500"></textarea>
+                        </div>
+                        <button onclick="deployScriptToRoblox()" class="gold-gradient text-slate-950 font-bold px-6 py-2.5 rounded-xl text-xs hover:opacity-90">
+                            Publish Place Payload
+                        </button>
+                        <div id="deploy-status" class="text-xs font-semibold"></div>
+                    </div>
+                </div>
+
+                <!-- TAB 5: AUDIT LOGS -->
+                <div id="tab-content-logs" class="tab-page hidden space-y-6">
+                    <div class="glass-card rounded-2xl p-6">
+                        <h3 class="text-base font-bold text-white mb-4">Audit Feed</h3>
+                        <div id="audit-feed" class="space-y-3 max-h-96 overflow-y-auto pr-1 text-xs"></div>
+                    </div>
+                </div>
+
+            </main>
+
+            <footer class="glass-card border-t border-slate-800 p-4 text-center text-xs text-slate-500">
+                Template Engine Owner Master Panel - Unified Flask Architecture
+            </footer>
+        </div>
     </div>
 
     <script>
         let currentTF = '1d';
+        let currentTab = 'analytics';
+        let stepImages = [];
+
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('sidebar-overlay');
+            sidebar.classList.toggle('-translate-x-full');
+            overlay.classList.toggle('hidden');
+        }
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-page').forEach(el => el.classList.add('hidden'));
+            document.getElementById(`tab-content-${tab}`).classList.remove('hidden');
+
+            const titleMap = {
+                'analytics': 'Revenue Analytics',
+                'premium': 'Subscriber Roster',
+                'ticket': 'Ticket & Panel Config',
+                'deploy': 'Open Cloud Deploy',
+                'logs': 'System Audit Logs'
+            };
+            document.getElementById('tab-header-title').innerText = titleMap[tab] || 'Dashboard';
+
+            ['analytics', 'premium', 'ticket', 'deploy', 'logs'].forEach(t => {
+                const navBtn = document.getElementById(`nav-${t}`);
+                if (t === tab) {
+                    navBtn.className = "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30";
+                } else {
+                    navBtn.className = "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/50";
+                }
+            });
+
+            if (window.innerWidth < 768) toggleSidebar();
+            refreshActiveTab();
+        }
+
+        function refreshActiveTab() {
+            if (currentTab === 'analytics') fetchRevenue();
+            else if (currentTab === 'premium') fetchPremiumUsers();
+            else if (currentTab === 'ticket') loadTicketConfig();
+            else if (currentTab === 'logs') fetchAuditFeed();
+        }
 
         async function checkAuth() {
             const res = await fetch('/api/auth-status');
@@ -243,7 +408,7 @@ HTML_TEMPLATE = """
             if (data.authenticated) {
                 document.getElementById('login-modal').classList.add('hidden');
                 document.getElementById('dashboard').classList.remove('hidden');
-                loadDashboardData();
+                refreshActiveTab();
             } else {
                 document.getElementById('login-modal').classList.remove('hidden');
             }
@@ -276,11 +441,7 @@ HTML_TEMPLATE = """
             currentTF = tf;
             ['1d', '7d', '30d', '1y'].forEach(t => {
                 const btn = document.getElementById(`tf-${t}`);
-                if (t === tf) {
-                    btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30";
-                } else {
-                    btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white";
-                }
+                btn.className = (t === tf) ? "px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30" : "px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white";
             });
             fetchRevenue();
         }
@@ -297,9 +458,7 @@ HTML_TEMPLATE = """
                 document.getElementById('stat-sale-goods').innerText = (data.saleOfGoods || 0).toLocaleString();
                 document.getElementById('stat-pending').innerText = (data.pendingRobux || 0).toLocaleString();
                 document.getElementById('stat-commissions').innerText = (data.commissions || 0).toLocaleString();
-            } catch(e) {
-                console.error(e);
-            }
+            } catch(e) { console.error(e); }
         }
 
         async function fetchPremiumUsers() {
@@ -338,7 +497,6 @@ HTML_TEMPLATE = """
             document.getElementById('add-uname').value = '';
             document.getElementById('add-days').value = '';
             fetchPremiumUsers();
-            fetchAuditFeed();
         });
 
         async function revokePremium(user_id) {
@@ -348,7 +506,122 @@ HTML_TEMPLATE = """
                 body: JSON.stringify({ user_id })
             });
             fetchPremiumUsers();
-            fetchAuditFeed();
+        }
+
+        async function triggerVerificationPanel() {
+            const channelId = document.getElementById('verify-channel-id').value;
+            if (!channelId) return alert("Please enter a Discord Channel ID.");
+            const res = await fetch('/api/dispatch-panel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: 'verification', channel_id: channelId })
+            });
+            const data = await res.json();
+            alert(data.message || (data.success ? "Verification Panel posted." : "Failed to post panel."));
+        }
+
+        async function triggerUnsyncPanel() {
+            const channelId = document.getElementById('unsync-channel-id').value;
+            if (!channelId) return alert("Please enter a Discord Channel ID.");
+            const res = await fetch('/api/dispatch-panel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: 'unsync', channel_id: channelId })
+            });
+            const data = await res.json();
+            alert(data.message || (data.success ? "Unsync Panel posted." : "Failed to post panel."));
+        }
+
+        async function loadTicketConfig() {
+            const res = await fetch('/api/ticket-config');
+            const data = await res.json();
+            document.getElementById('ticket-title').value = data.title || '';
+            document.getElementById('ticket-devid').value = data.dev_product_id || '';
+            document.getElementById('ticket-instructions').value = data.instructions || '';
+            stepImages = data.step_images || [];
+            renderStepImages();
+        }
+
+        function handleImageSelected(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                stepImages.push(e.target.result);
+                renderStepImages();
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function moveImage(index, dir) {
+            const newIndex = index + dir;
+            if (newIndex < 0 || newIndex >= stepImages.length) return;
+            const temp = stepImages[index];
+            stepImages[index] = stepImages[newIndex];
+            stepImages[newIndex] = temp;
+            renderStepImages();
+        }
+
+        function removeImage(index) {
+            stepImages.splice(index, 1);
+            renderStepImages();
+        }
+
+        function renderStepImages() {
+            const container = document.getElementById('step-images-list');
+            container.innerHTML = '';
+            stepImages.forEach((imgUrl, i) => {
+                const div = document.createElement('div');
+                div.className = "flex items-center justify-between p-2.5 bg-slate-900 border border-slate-800 rounded-xl gap-3";
+                div.innerHTML = `
+                    <div class="flex items-center gap-3 min-w-0">
+                        <span class="text-xs font-bold text-amber-400">Step ${i+1}</span>
+                        <img src="${imgUrl}" class="w-12 h-12 object-cover rounded-lg border border-slate-700">
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="moveImage(${i}, -1)" ${i===0?'disabled':''} class="px-2 py-1 text-xs bg-slate-800 rounded text-slate-300 disabled:opacity-30">Up</button>
+                        <button type="button" onclick="moveImage(${i}, 1)" ${i===stepImages.length-1?'disabled':''} class="px-2 py-1 text-xs bg-slate-800 rounded text-slate-300 disabled:opacity-30">Down</button>
+                        <button type="button" onclick="removeImage(${i})" class="px-2 py-1 text-xs bg-rose-500/20 text-rose-400 rounded">Delete</button>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        document.getElementById('ticket-config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const title = document.getElementById('ticket-title').value;
+            const dev_product_id = document.getElementById('ticket-devid').value;
+            const instructions = document.getElementById('ticket-instructions').value;
+
+            await fetch('/api/ticket-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, dev_product_id, instructions, step_images: stepImages })
+            });
+
+            alert("Ticket Configuration Saved.");
+        });
+
+        async function deployScriptToRoblox() {
+            const code = document.getElementById('deploy-lua-code').value;
+            const statusEl = document.getElementById('deploy-status');
+            statusEl.innerText = "Publishing payload...";
+            statusEl.className = "text-xs font-semibold text-amber-400";
+
+            const res = await fetch('/api/deploy-script', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ script: code })
+            });
+            const data = await res.json();
+            if (data.success) {
+                statusEl.innerText = "Successfully published place script to Roblox.";
+                statusEl.className = "text-xs font-semibold text-emerald-400";
+            } else {
+                statusEl.innerText = "Error: " + data.error;
+                statusEl.className = "text-xs font-semibold text-rose-400";
+            }
         }
 
         async function fetchAuditFeed() {
@@ -366,12 +639,6 @@ HTML_TEMPLATE = """
                 `;
                 feed.appendChild(div);
             });
-        }
-
-        function loadDashboardData() {
-            fetchRevenue();
-            fetchPremiumUsers();
-            fetchAuditFeed();
         }
 
         checkAuth();
@@ -412,6 +679,26 @@ def api_logout():
 @web_app.route("/api/auth-status", methods=["GET"])
 def api_auth_status():
     return jsonify({"authenticated": is_authenticated()})
+
+# Dispatch Panel Route (/verification-set and /un-sync-set trigger)
+@web_app.route("/api/dispatch-panel", methods=["POST"])
+def dispatch_panel_route():
+    if not is_authenticated(): return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json() or {}
+    panel_type = data.get("type")
+    channel_id = data.get("channel_id")
+
+    if not channel_id or not panel_type:
+        return jsonify({"success": False, "error": "Missing panel type or channel_id"}), 400
+
+    if bot_cog_ref and bot.loop:
+        asyncio.run_coroutine_threadsafe(
+            bot_cog_ref.dispatch_panel_to_channel(panel_type, channel_id),
+            bot.loop
+        )
+        log_system_event("Dispatched Panel", f"Owner dispatched {panel_type} panel to channel {channel_id}.")
+        return jsonify({"success": True, "message": f"Dispatched {panel_type} panel to channel {channel_id}."})
+    return jsonify({"success": False, "error": "Bot loop not active"}), 503
 
 # Revenue Analytics Endpoint (Open Cloud)
 @web_app.route("/api/revenue", methods=["GET"])
@@ -466,9 +753,7 @@ def api_revenue():
 # Premium Users Management Endpoint
 @web_app.route("/api/premium-users", methods=["GET"])
 def get_premium_users():
-    if not is_authenticated():
-        return jsonify({"error": "Unauthorized"}), 401
-
+    if not is_authenticated(): return jsonify({"error": "Unauthorized"}), 401
     users = []
     if db_premium is not None:
         for doc in db_premium.find():
@@ -480,19 +765,14 @@ def get_premium_users():
 
 @web_app.route("/api/premium-users/add", methods=["POST"])
 def add_premium_user():
-    if not is_authenticated():
-        return jsonify({"error": "Unauthorized"}), 401
-
+    if not is_authenticated(): return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json() or {}
-    user_id = data.get("user_id")
-    username = data.get("username", "User")
+    user_id, username = data.get("user_id"), data.get("username", "User")
     days = int(data.get("days") or 30)
 
-    if not user_id:
-        return jsonify({"error": "Missing user_id"}), 400
+    if not user_id: return jsonify({"error": "Missing user_id"}), 400
 
     expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-
     if db_premium is not None:
         db_premium.update_one(
             {"user_id": str(user_id)},
@@ -507,9 +787,7 @@ def add_premium_user():
 
 @web_app.route("/api/premium-users/remove", methods=["POST"])
 def remove_premium_user():
-    if not is_authenticated():
-        return jsonify({"error": "Unauthorized"}), 401
-
+    if not is_authenticated(): return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json() or {}
     user_id = str(data.get("user_id"))
 
@@ -522,11 +800,30 @@ def remove_premium_user():
     log_system_event("Revoked Premium", f"Revoked Premium from Discord User ID {user_id}.")
     return jsonify({"success": True})
 
+# Ticket Config Endpoint
+@web_app.route("/api/ticket-config", methods=["GET", "POST"])
+def manage_ticket_config():
+    if not is_authenticated(): return jsonify({"error": "Unauthorized"}), 401
+    global LOCAL_TICKET_CONFIG
+
+    if request.method == "POST":
+        data = request.get_json() or {}
+        if db_layout_ticket_config is not None:
+            db_layout_ticket_config.update_one({"config_id": "global"}, {"$set": data}, upsert=True)
+        else:
+            LOCAL_TICKET_CONFIG = data
+        log_system_event("Updated Ticket Config", "Owner updated layout ticket and step-by-step images.")
+        return jsonify({"success": True})
+
+    if db_layout_ticket_config is not None:
+        cfg = db_layout_ticket_config.find_one({"config_id": "global"}) or LOCAL_TICKET_CONFIG
+        cfg.pop("_id", None)
+        return jsonify(cfg)
+    return jsonify(LOCAL_TICKET_CONFIG)
+
 @web_app.route("/api/audit-logs", methods=["GET"])
 def get_audit_logs():
-    if not is_authenticated():
-        return jsonify({"error": "Unauthorized"}), 401
-
+    if not is_authenticated(): return jsonify({"error": "Unauthorized"}), 401
     logs = []
     if db_audit is not None:
         for doc in db_audit.find().sort("_id", -1).limit(50):
@@ -539,7 +836,7 @@ def get_audit_logs():
 @web_app.route("/api/auto-build", methods=["POST"])
 def auto_build_endpoint():
     data = request.get_json() or {}
-    user_id = data.get("user_id")
+    user_id = str(data.get("user_id"))
     target_server_id = data.get("target_server_id")
     blueprint_url = data.get("blueprint_url")
     blueprint_data = data.get("blueprint_data")
@@ -548,20 +845,40 @@ def auto_build_endpoint():
     if not target_server_id or not blueprint_data:
         return jsonify({"success": False, "error": "Missing target_server_id or blueprint_data"}), 400
 
-    if bot_cog_ref and bot.loop:
-        asyncio.run_coroutine_threadsafe(
-            bot_cog_ref.handle_direct_handshake_build(
-                user_id=user_id,
-                target_server_id=target_server_id,
-                blueprint_url=blueprint_url,
-                blueprint_data=blueprint_data,
-                log_channel_id=log_channel_id
-            ),
-            bot.loop
-        )
-        return jsonify({"success": True, "message": "Direct handshake build queued in background"}), 200
+    # CHECK PREMIUM AUTO-BUILD STATUS
+    if is_user_premium(user_id):
+        if bot_cog_ref and bot.loop:
+            asyncio.run_coroutine_threadsafe(
+                bot_cog_ref.handle_direct_handshake_build(
+                    user_id=user_id,
+                    target_server_id=target_server_id,
+                    blueprint_url=blueprint_url,
+                    blueprint_data=blueprint_data,
+                    log_channel_id=log_channel_id
+                ),
+                bot.loop
+            )
+            log_system_event("Premium Auto-Build Queued", f"User {user_id} triggered premium auto-build for server {target_server_id}.")
+            return jsonify({"success": True, "message": "Premium user detected. Direct handshake build queued immediately."}), 200
 
-    return jsonify({"success": False, "error": "Bot instance or event loop not ready"}), 503
+    # NON-PREMIUM USER: SAVE TO PENDING BLUEPRINTS QUEUE (LOGGED IN DB, NO WEBHOOK DISPATCH)
+    pending_entry = {
+        "user_id": user_id,
+        "target_server_id": target_server_id,
+        "blueprint_url": blueprint_url,
+        "blueprint_data": blueprint_data,
+        "log_channel_id": log_channel_id,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    if db_pending_blueprints is not None:
+        db_pending_blueprints.update_one({"user_id": user_id}, {"$set": pending_entry}, upsert=True)
+    log_system_event("Pending Design Saved", f"Non-premium user {user_id} submitted design. Queued for dev product purchase verification.")
+
+    return jsonify({
+        "success": True,
+        "status": "pending_payment",
+        "message": "Design saved to database queue. Purchase developer product via ticket channel to complete deployment."
+    }), 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
@@ -601,7 +918,7 @@ async def on_ready():
 
     try:
         synced = await bot.tree.sync()
-        print(f"Successfully registered & synced {len(synced)} global slash command(s).")
+        print(f"Successfully registered and synced {len(synced)} global slash command(s).")
     except Exception as e:
         print(f"Failed to sync global slash commands: {e}")
 
