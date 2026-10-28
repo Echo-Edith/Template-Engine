@@ -18,6 +18,7 @@ MONGO_URI = os.environ.get("MONGO_URI")
 ROBLOX_OPEN_CLOUD_KEY = (os.environ.get("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
 ROBLOX_UNIVERSE_ID = (os.environ.get("ROBLOX_UNIVERSE_ID") or "").strip()
 ROBLOX_GROUP_ID = (os.environ.get("ROBLOX_GROUP_ID") or "").strip()
+ROBLOX_COOKIE = (os.environ.get("ROBLOX_COOKIE") or os.environ.get("ROBLOSECURITY") or "").strip()
 VERCEL_TE_SITE_URL = (os.environ.get("VERCEL_TE_SITE_URL") or "https://your-vercel-app.vercel.app").strip()
 SYSTEM_LOG_WEBHOOK_URL = (os.environ.get("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
 
@@ -90,7 +91,7 @@ bot_cog_ref = None
 def is_authenticated():
     return session.get("authenticated", False)
 
-# --- OWNER CONTROL PANEL TEMPLATE (TABBED & HAMBURGER SIDEBAR) ---
+# --- OWNER CONTROL PANEL TEMPLATE ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en" class="dark">
@@ -199,8 +200,8 @@ HTML_TEMPLATE = """
                     <div class="glass-card rounded-2xl p-6">
                         <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-4 mb-6">
                             <div>
-                                <h3 class="text-lg font-bold text-white">Roblox Group Revenue</h3>
-                                <p class="text-xs text-slate-400">Powered by Roblox Open Cloud API</p>
+                                <h3 class="text-lg font-bold text-white">Roblox Group & Experience Revenue</h3>
+                                <p class="text-xs text-slate-400">Powered by Roblox Economy APIs</p>
                             </div>
                             <div class="flex items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
                                 <button onclick="setRevenueTimeframe('1d')" id="tf-1d" class="px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30">1D</button>
@@ -220,7 +221,7 @@ HTML_TEMPLATE = """
                                 <div class="text-2xl font-black text-emerald-400 mt-1">R$ <span id="stat-sale-goods">0</span></div>
                             </div>
                             <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
-                                <span class="text-xs font-medium text-slate-400">Pending Robux (Est. 30%)</span>
+                                <span class="text-xs font-medium text-slate-400">Pending Robux</span>
                                 <div class="text-2xl font-black text-indigo-400 mt-1">R$ <span id="stat-pending">0</span></div>
                             </div>
                             <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
@@ -249,8 +250,8 @@ HTML_TEMPLATE = """
                             <table class="w-full text-left text-xs">
                                 <thead class="bg-slate-900/80 text-slate-400 border-b border-slate-800">
                                     <tr>
-                                        <th class="p-3">User</th>
-                                        <th class="p-3">Discord ID</th>
+                                        <th class="p-3">User Profile</th>
+                                        <th class="p-3">Discord Mention</th>
                                         <th class="p-3">Expires At</th>
                                         <th class="p-3 text-right">Action</th>
                                     </tr>
@@ -266,22 +267,30 @@ HTML_TEMPLATE = """
                     <div class="glass-card rounded-2xl p-6 space-y-6">
                         <div>
                             <h3 class="text-base font-bold text-white">Layout Ticket & Panel Controls</h3>
-                            <p class="text-xs text-slate-400">Post account verification or unsync panels directly to Discord, and configure step-by-step product images.</p>
+                            <p class="text-xs text-slate-400">Post account verification, unsync, or layout ticket panels directly to Discord channels.</p>
                         </div>
 
                         <!-- PANEL DISPATCH ACTIONS -->
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
                             <div>
-                                <h4 class="text-xs font-bold text-white mb-1">Post Account Verification Panel</h4>
-                                <p class="text-[10px] text-slate-400 mb-2">Sends /verification-set panel to specified Discord channel.</p>
+                                <h4 class="text-xs font-bold text-white mb-1">Post Layout Ticket Panel</h4>
+                                <p class="text-[10px] text-slate-400 mb-2">Sends purchase ticket to channel.</p>
+                                <div class="flex gap-2">
+                                    <input type="text" id="ticket-channel-id" placeholder="Channel ID" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                                    <button type="button" onclick="triggerTicketPanel()" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-bold">Post</button>
+                                </div>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white mb-1">Post Verification Panel</h4>
+                                <p class="text-[10px] text-slate-400 mb-2">Sends /verification-set panel.</p>
                                 <div class="flex gap-2">
                                     <input type="text" id="verify-channel-id" placeholder="Channel ID" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
                                     <button type="button" onclick="triggerVerificationPanel()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold">Post</button>
                                 </div>
                             </div>
                             <div>
-                                <h4 class="text-xs font-bold text-white mb-1">Post Account Unsync Panel</h4>
-                                <p class="text-[10px] text-slate-400 mb-2">Sends /un-sync-set panel to specified Discord channel.</p>
+                                <h4 class="text-xs font-bold text-white mb-1">Post Unsync Panel</h4>
+                                <p class="text-[10px] text-slate-400 mb-2">Sends /un-sync-set panel.</p>
                                 <div class="flex gap-2">
                                     <input type="text" id="unsync-channel-id" placeholder="Channel ID" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
                                     <button type="button" onclick="triggerUnsyncPanel()" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold">Post</button>
@@ -454,9 +463,9 @@ HTML_TEMPLATE = """
                     document.getElementById('stat-total-rev').innerText = "0";
                     return;
                 }
-                document.getElementById('stat-total-rev').innerText = (data.totalRevenue || 0).toLocaleString();
-                document.getElementById('stat-sale-goods').innerText = (data.saleOfGoods || 0).toLocaleString();
-                document.getElementById('stat-pending').innerText = (data.pendingRobux || 0).toLocaleString();
+                document.getElementById('stat-total-rev').innerText = (data.total || data.totalRevenue || 0).toLocaleString();
+                document.getElementById('stat-sale-goods').innerText = (data.sale_of_goods || data.saleOfGoods || 0).toLocaleString();
+                document.getElementById('stat-pending').innerText = (data.pending_robux || data.pendingRobux || 0).toLocaleString();
                 document.getElementById('stat-commissions').innerText = (data.commissions || 0).toLocaleString();
             } catch(e) { console.error(e); }
         }
@@ -469,9 +478,13 @@ HTML_TEMPLATE = """
             list.forEach(user => {
                 const tr = document.createElement('tr');
                 tr.className = "hover:bg-slate-900/40 transition";
+                const pfpUrl = `https://cdn.discordapp.com/embed/avatars/${parseInt(user.user_id) % 5}.png`;
                 tr.innerHTML = `
-                    <td class="p-3 font-semibold text-white">${user.username || 'User'}</td>
-                    <td class="p-3 font-mono text-slate-400">${user.user_id}</td>
+                    <td class="p-3 font-semibold text-white flex items-center gap-2.5">
+                        <img src="${pfpUrl}" class="w-6 h-6 rounded-full border border-slate-700">
+                        <span>${user.username || 'User'}</span>
+                    </td>
+                    <td class="p-3 font-mono text-amber-400">&lt;@${user.user_id}&gt;</td>
                     <td class="p-3 text-slate-400">${new Date(user.expires_at).toLocaleDateString()}</td>
                     <td class="p-3 text-right">
                         <button onclick="revokePremium('${user.user_id}')" class="text-rose-400 hover:text-rose-300 font-semibold text-xs">Revoke</button>
@@ -506,6 +519,18 @@ HTML_TEMPLATE = """
                 body: JSON.stringify({ user_id })
             });
             fetchPremiumUsers();
+        }
+
+        async function triggerTicketPanel() {
+            const channelId = document.getElementById('ticket-channel-id').value;
+            if (!channelId) return alert("Please enter a Discord Channel ID.");
+            const res = await fetch('/api/dispatch-panel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: 'ticket', channel_id: channelId })
+            });
+            const data = await res.json();
+            alert(data.message || (data.success ? "Ticket Panel posted." : "Failed to post panel."));
         }
 
         async function triggerVerificationPanel() {
@@ -680,7 +705,7 @@ def api_logout():
 def api_auth_status():
     return jsonify({"authenticated": is_authenticated()})
 
-# Dispatch Panel Route (/verification-set and /un-sync-set trigger)
+# Dispatch Panel Route (/verification-set, /un-sync-set, ticket panel)
 @web_app.route("/api/dispatch-panel", methods=["POST"])
 def dispatch_panel_route():
     if not is_authenticated(): return jsonify({"error": "Unauthorized"}), 401
@@ -700,55 +725,53 @@ def dispatch_panel_route():
         return jsonify({"success": True, "message": f"Dispatched {panel_type} panel to channel {channel_id}."})
     return jsonify({"success": False, "error": "Bot loop not active"}), 503
 
-# Revenue Analytics Endpoint (Open Cloud)
+# Revenue Analytics Endpoint (Roblox API)
 @web_app.route("/api/revenue", methods=["GET"])
 def api_revenue():
     if not is_authenticated():
         return jsonify({"error": "Unauthorized"}), 401
 
-    if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_UNIVERSE_ID:
-        return jsonify({"error": "Missing Open Cloud credentials"}), 400
-
     timeframe = request.args.get("timeframe", "1d").lower()
-    tf_days = 1
-    if timeframe == "7d": tf_days = 7
-    elif timeframe == "30d": tf_days = 30
-    elif timeframe in ["1y", "365d"]: tf_days = 365
+    timeframe_map = {"1d": "Day", "7d": "Week", "30d": "Month", "1y": "Year", "365d": "Year"}
+    tf_param = timeframe_map.get(timeframe, "Day")
 
-    now = datetime.now(timezone.utc)
-    start_time = (now - timedelta(days=tf_days)).strftime("%Y-%m-%dT00:00:00Z")
-    end_time = now.strftime("%Y-%m-%dT00:00:00Z")
+    headers = {}
+    if ROBLOX_COOKIE:
+        clean_cookie = ROBLOX_COOKIE if ROBLOX_COOKIE.startswith(".ROBLOSECURITY=") else f".ROBLOSECURITY={ROBLOX_COOKIE}"
+        headers["Cookie"] = clean_cookie
+    if ROBLOX_OPEN_CLOUD_KEY:
+        headers["x-api-key"] = ROBLOX_OPEN_CLOUD_KEY
 
-    url = f"https://apis.roblox.com/analytics-query-api/v1/universes/{ROBLOX_UNIVERSE_ID}/metrics"
-    headers = {
-        "x-api-key": ROBLOX_OPEN_CLOUD_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "metric": "DailyRevenue",
-        "granularity": "OneDay",
-        "startTime": start_time,
-        "endTime": end_time
-    }
+    urls = []
+    if ROBLOX_GROUP_ID:
+        urls.append(f"https://economy.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/revenue/summary/{tf_param}")
+    if ROBLOX_UNIVERSE_ID:
+        urls.append(f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/economy/revenue/summary/{tf_param}")
 
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            total_rev = 0
-            if "queryResults" in data:
-                for row in data["queryResults"]:
-                    total_rev += row.get("value", 0)
-            return jsonify({
-                "timeframe": timeframe,
-                "saleOfGoods": total_rev,
-                "commissions": 0,
-                "totalRevenue": total_rev,
-                "pendingRobux": int(total_rev * 0.3)
-            })
-        return jsonify({"error": f"Open Cloud error: {resp.status_code}"}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                return jsonify({
+                    "timeframe": timeframe,
+                    "sale_of_goods": data.get("itemSaleRevenue", data.get("itemSale", 0)),
+                    "advance_rebates": data.get("publishingAdvanceRebates", 0),
+                    "commissions": data.get("commissionRevenue", data.get("comission", 0)),
+                    "total": data.get("totalRevenue", data.get("total", 0)),
+                    "pending_robux": data.get("pendingRobux", 0)
+                })
+        except Exception as e:
+            print(f"[Revenue API Fetch Warning] {e}")
+
+    return jsonify({
+        "timeframe": timeframe,
+        "sale_of_goods": 0,
+        "advance_rebates": 0,
+        "commissions": 0,
+        "total": 0,
+        "pending_robux": 0
+    })
 
 # Premium Users Management Endpoint
 @web_app.route("/api/premium-users", methods=["GET"])
@@ -861,7 +884,7 @@ def auto_build_endpoint():
             log_system_event("Premium Auto-Build Queued", f"User {user_id} triggered premium auto-build for server {target_server_id}.")
             return jsonify({"success": True, "message": "Premium user detected. Direct handshake build queued immediately."}), 200
 
-    # NON-PREMIUM USER: SAVE TO PENDING BLUEPRINTS QUEUE (LOGGED IN DB, NO WEBHOOK DISPATCH)
+    # NON-PREMIUM USER: SAVE TO PENDING BLUEPRINTS QUEUE
     pending_entry = {
         "user_id": user_id,
         "target_server_id": target_server_id,
