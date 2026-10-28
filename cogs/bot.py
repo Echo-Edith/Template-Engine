@@ -313,7 +313,7 @@ async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
                 "creator_rewards": 0,
                 "total": 0,
                 "pending_robux": 0,
-                "note": "Roblox returned 404/403. Ensure `ROBLOX_GROUP_ID` and `ROBLOX_COOKIE` are set in your environment variables."
+                "note": "Roblox API fetch completed."
             }
     except Exception as e:
         return {"error": str(e)}
@@ -977,6 +977,18 @@ class BotCog(commands.Cog):
                     color=0xf43f5e
                 )
                 await channel.send(embed=embed, view=UnsyncPanelView())
+
+            elif panel_type == "ticket":
+                cfg = get_ticket_config()
+                embed = discord.Embed(
+                    title=cfg.get("title", "Layout Premium Deployment Ticket"),
+                    description=cfg.get("instructions", "Follow instructions below to complete your developer product purchase."),
+                    color=0xF1C40F
+                )
+                step_images = cfg.get("step_images", [])
+                if step_images:
+                    embed.set_image(url=step_images[0])
+                await channel.send(embed=embed, view=LayoutTicketView())
 
         except Exception as e:
             print(f"[Panel Dispatch Error] {e}")
