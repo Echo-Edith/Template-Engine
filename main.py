@@ -626,9 +626,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-### What to do next:
-1. Copy the updated `main.py` code into your project.
-2. Deploy/restart your Render web service.
-3. Open `echo-dashboard-qn39.onrender.com` in your browser. You will see the login page where typing **`minion`** unlocks your Owner Control Panel!
