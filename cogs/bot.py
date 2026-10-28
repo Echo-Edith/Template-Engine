@@ -671,7 +671,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="welcome-set", description="Set welcome channel and custom welcome message format (Owner restricted).")
     @app_commands.describe(channel="Target welcome channel", message="Message format ({user}, {server})")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def welcome_set(self, interaction: discord.Interaction, channel: discord.TextChannel, message: str = "Welcome, {user}.\nPlease read channel."):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -686,7 +685,6 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="premiums", description="List all active TE Premium subscribers (Owner restricted).")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def premiums_list(self, interaction: discord.Interaction):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -717,7 +715,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="verification-set", description="Post Roblox verification panel (Owner restricted).")
     @app_commands.describe(location="Target channel")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def verification_set(self, interaction: discord.Interaction, location: discord.TextChannel):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -729,7 +726,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="un-sync-set", description="Post Roblox unsync panel (Owner restricted).")
     @app_commands.describe(location="Target channel")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def unsync_set(self, interaction: discord.Interaction, location: discord.TextChannel):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -740,7 +736,6 @@ class BotCog(commands.Cog):
         await interaction.response.send_message("Unsync panel deployed.", ephemeral=True)
 
     @app_commands.command(name="nuke", description="Delete all channels and custom roles in server (Owner restricted).")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def nuke_server(self, interaction: discord.Interaction):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -757,7 +752,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="roblox-game", description="Publish place script directly via Open Cloud (Owner restricted).")
     @app_commands.describe(file="Optional .lua or .txt script attachment")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def roblox_game_publish(self, interaction: discord.Interaction, file: discord.Attachment = None):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -780,7 +774,6 @@ class BotCog(commands.Cog):
         app_commands.Choice(name="Edit Channel", value="edit"),
         app_commands.Choice(name="Temporary Channel", value="temporary")
     ])
-    @app_commands.default_permissions(discord.Permissions(0))
     async def channel_manage(self, interaction: discord.Interaction, action: app_commands.Choice[str], name: str = None, category: discord.CategoryChannel = None, topic: str = None, duration: str = "1h"):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -821,7 +814,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="giveaway-edit", description="Edit active giveaway (Owner restricted).")
     @app_commands.describe(message_id_or_link="Message ID or link", title="Updated title", points_prize="Updated points prize")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def giveaway_edit(self, interaction: discord.Interaction, message_id_or_link: str, title: str = None, points_prize: int = None):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -840,7 +832,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="giveaway-end", description="Force-end an active giveaway (Owner restricted).")
     @app_commands.describe(message_id_or_link="Message ID or link")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def giveaway_end(self, interaction: discord.Interaction, message_id_or_link: str):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -857,7 +848,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="add-points", description="Add or remove user points (Owner restricted).")
     @app_commands.describe(user="Target Discord User", amount="Points to add")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def add_points_cmd(self, interaction: discord.Interaction, user: discord.User, amount: int):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -869,7 +859,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="check-point", description="Check a user's point balance (Owner restricted).")
     @app_commands.describe(user="Target Discord User")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def check_point_cmd(self, interaction: discord.Interaction, user: discord.User):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -880,7 +869,6 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="leaderboard", description="Display point leaderboard (Owner restricted).")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def leaderboard_cmd(self, interaction: discord.Interaction):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -899,7 +887,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="revenue", description="View Roblox Group and Universe revenue statistics (Owner restricted).")
     @app_commands.describe(timeframe="Timeframe: 1d, 7d, 30d, 1y")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def revenue_cmd(self, interaction: discord.Interaction, timeframe: str = "1d"):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -918,7 +905,6 @@ class BotCog(commands.Cog):
 
     @app_commands.command(name="giveaway-start", description="Start a points giveaway (Owner restricted).")
     @app_commands.describe(channel="Target channel", winners="Winner count", duration="Duration (10m, 1h, 1d)", title="Giveaway title", points_prize="Custom point prize amount")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def giveaway_start(self, interaction: discord.Interaction, channel: discord.TextChannel, winners: int, duration: str, title: str, points_prize: int = 50):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -949,7 +935,6 @@ class BotCog(commands.Cog):
         await interaction.response.send_message(f"Giveaway deployed to {channel.mention}.", ephemeral=True)
 
     @app_commands.command(name="premium", description="View Premium info (Owner restricted).")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def premium_public(self, interaction: discord.Interaction):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
@@ -957,19 +942,14 @@ class BotCog(commands.Cog):
         await interaction.response.send_message("TE Premium details.", ephemeral=True)
 
     @app_commands.command(name="ping", description="Check latency (Owner restricted).")
-    @app_commands.default_permissions(discord.Permissions(0))
     async def ping(self, interaction: discord.Interaction):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         await interaction.response.send_message(f"Pong! Latency: `{round(self.bot.latency * 1000)}ms`", ephemeral=True)
 
-    @app_commands.command(name="website", description="Get website link (Owner restricted).")
-    @app_commands.default_permissions(discord.Permissions(0))
+    @app_commands.command(name="website", description="Get website link.")
     async def website_link(self, interaction: discord.Interaction):
-        if not self.check_owner(interaction):
-            await interaction.response.send_message("Access denied.", ephemeral=True)
-            return
         await interaction.response.send_message("Website link: https://templateengine-xi.vercel.app", ephemeral=True)
 
 
