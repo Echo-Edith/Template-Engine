@@ -53,26 +53,38 @@ bot = commands.Bot(
 )
 
 @bot.event
+async def setup_hook():
+    try:
+        if "cogs.bot" not in bot.extensions:
+            await bot.load_extension("cogs.bot")
+            print("[Setup Hook] Successfully loaded extension cog: cogs.bot")
+        else:
+            await bot.reload_extension("cogs.bot")
+            print("[Setup Hook] Successfully reloaded extension cog: cogs.bot")
+    except Exception as e:
+        print(f"[Setup Hook CRITICAL ERROR] Loading cog cogs.bot: {e}")
+
+@bot.event
 async def on_ready():
     print("-----------------------------------------")
     print(f"Logged in as: {bot.user} (ID: {bot.user.id})")
     print("-----------------------------------------")
 
     try:
-        if "cogs.bot" not in bot.extensions:
-            await bot.load_extension("cogs.bot")
-            print("Successfully loaded extension cog: cogs.bot")
-        else:
-            await bot.reload_extension("cogs.bot")
-            print("Successfully reloaded extension cog: cogs.bot")
-    except Exception as e:
-        print(f"CRITICAL ERROR loading cog cogs.bot: {e}")
-
-    try:
         synced = await bot.tree.sync()
         print(f"Successfully registered and synced {len(synced)} global slash command(s).")
     except Exception as e:
         print(f"Failed to sync global slash commands: {e}")
+
+@bot.command(name="sync")
+async def sync_cmd(ctx: commands.Context):
+    if ctx.author.id == 1219266886143967245: # BOT_OWNER_ID
+        msg = await ctx.send("Syncing slash commands globally with Discord...")
+        try:
+            synced = await bot.tree.sync()
+            await msg.edit(content=f"Successfully synced **{len(synced)}** slash commands globally across all servers!")
+        except Exception as e:
+            await msg.edit(content=f"Error syncing commands: `{e}`")
 
 async def runner():
     token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
