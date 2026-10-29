@@ -257,6 +257,13 @@ class BotCog(commands.Cog):
                 invs = await guild.invites()
                 SERVER_INVITE_CACHE[guild.id] = {inv.code: inv.uses for inv in invs}
             except Exception: pass
+        
+        # Force global sync when bot is ready
+        try:
+            synced = await self.bot.tree.sync()
+            print(f"[BotCog OnReady] Synchronized {len(synced)} global slash command(s).")
+        except Exception as e:
+            print(f"[BotCog Sync Error] {e}")
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
@@ -264,6 +271,11 @@ class BotCog(commands.Cog):
         try:
             invs = await guild.invites()
             SERVER_INVITE_CACHE[guild.id] = {inv.code: inv.uses for inv in invs}
+        except Exception: pass
+        
+        # Sync tree on joining new server
+        try:
+            await self.bot.tree.sync(guild=guild)
         except Exception: pass
 
     @commands.Cog.listener()
