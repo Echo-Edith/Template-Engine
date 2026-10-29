@@ -1,4 +1,138 @@
 import os
+import re
+import json
+import random
+import asyncio
+import aiohttp
+import discord
+from datetime import datetime, timezone, timedelta
+from discord.ext import commands, tasks
+from discord import app_commands
+from pymongo import MongoClient
+
+BOT_OWNER_ID = 1219266886143967245
+MAIN_OWNER_GUILD_ID = 1284513257574629458
+
+MONTHLY_ANALYTICS_CHANNEL_ID = 1564263447057670154
+GIVEAWAY_BANNER_URL = "https://res.cloudinary.com/dtz0urit6/image/upload/f_png,q_auto/cloudinary-tools-uploads/qxpfnwtebf6jqybaayjo.png"
+
+SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
+MONGO_URI = os.getenv("MONGO_URI")
+ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
+ROBLOX_COOKIE = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip()
+ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
+ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
+ROBLOX_UNIVERSE_ID = (os.getenv("ROBLOX_UNIVERSE_ID") or "").strip()
+ROBLOX_GROUP_ID = (os.getenv("ROBLOX_GROUP_ID") or "").strip()
+
+def get_formatted_roblox_cookie():
+    if not ROBLOX_COOKIE:
+        return ""
+    clean = ROBLOX_COOKIE.strip('"\'')
+    if clean.startswith(".ROBLOSECURITY="):
+        return clean
+    return f".ROBLOSECURITY={clean}"
+
+db_premium = None
+db_build_access = None
+db_users = None
+db_giveaways = None
+db_settings = None
+db_premium_config = None
+db_layout_ticket_config = None
+db_pending_blueprints = None
+db_pending_invites = None
+
+if MONGO_URI:
+    try:
+        mongo_client = MongoClient(MONGO_URI)
+        try:
+            db = mongo_client.get_default_database()
+        except Exception:
+            db = mongo_client["static_studio_db"]
+        db_premium = db["premium_users"]
+        db_build_access = db["build_authorized_users"]
+        db_users = db["persistent_users"]
+        db_giveaways = db["giveaways"]
+        db_settings = db["guild_settings"]
+        db_premium_config = db["premium_config"]
+        db_layout_ticket_config = db["layout_ticket_config"]
+        db_pending_blueprints = db["pending_blueprints"]
+        db_pending_invites = db["pending_invites"]
+    except Exception as e:
+        print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
+
+LOCAL_PERSISTENT_USERS = {}
+LOCAL_PENDING_INVITES = {}
+LOCAL_GIVEAWAYS = {}
+LOCAL_GUILD_SETTINGS = {}
+PENDING_VERIFICATION_CODES = {}
+SERVER_INVITE_CACHE = {}
+
+def parse_duration_to_timedelta(duration_str: str) -> timedelta:
+    if not duration_str or duration_str.lower() in ["inf", "infinite"]:
+        return timedelta(days=36500)
+    match = re.match(r"^(\d+)\s*(s|h|d|mo|y)$", duration_str.strip().lower())
+    if not match:
+        return timedelta(days=30)
+    val, unit = match.groups()
+    num = int(val)
+    if unit == "s": return timedelta(seconds=num)
+    elif unit == "h": return timedelta(hours=num)
+    elif unit == "d": return timedelta(days=num)
+    elif unit == "mo": return timedelta(days=num * 30)
+    elif unit == "y": return timedelta(days=num * 365)
+    return timedelta(days=30)
+
+def set_guild_welcome_setting(guild_id: str, channel_id: str = None, message_template: str = None):
+    g_id = str(guild_id)
+    update_data = {}
+    if channel_id is not None: update_data["welcome_channel_id"] = str(channel_id)
+    if message_template is not None: update_data["welcome_message"] = message_template
+
+    if db_settings is not None:
+        db_settings.update_one({"guild_id": g_id}, {"$set": update_data}, upsert=True)
+    else:
+        current = LOCAL_GUILD_SETTINGS.get(g_id, {})
+        current.update(update_data)
+        LOCAL_GUILD_SETTINGS[g_id] = current
+
+def get_guild_settings(guild_id: str) -> dict:
+    g_id = str(guild_id)
+    if db_settings is not None:
+        return db_settings.find_one({"guild_id": g_id}) or {}
+    return LOCAL_GUILD_SETTINGS.get(g_id, {})
+
+def get_user_points(discord_id: str) -> int:
+    uid = str(discord_id)
+    if db_users is not None:
+        doc = db_users.find_one({"discord_id": uid})
+        return doc.get("points", 0) if doc else 0
+    doc = LOCAL_PERSISTENT_USERS.get(uid, {})
+    return doc.get("points", 0)
+
+def add_user_points(discord_id: str, amount: int) -> int:
+    uid = str(discord_id)
+    now = datetime.now(timezone.utc).isoformat()
+    if db_users is not None:
+        db_users.update_one(
+            {"discord_id": uid},
+            {
+                "$inc": {"points": amount},
+                "$setOnInsert": {"discord_id": uid},
+                "$set": {"updated_at": now}
+            },
+            upsert=True
+        )
+        doc = db_users.find_one({"discord_id": uid})
+        return doc.get("points", 0)
+    else:
+        user_data = LOCAL_PERSISTENT_USERS.get(uid, {"discord_id": uid, "points": 0})
+        user_data["points"] = user_data.get("points", 0) + amount
+        user_data["updated_at"] = now
+        LOCAL_PERSISTENT_USERS[uid] = user_data
+        return user_data["points"]
+
 def set_user_premium(user_id: str, duration_td: timedelta):
     user_id_str = str(user_id)
     now = datetime.now(timezone.utc)
@@ -41,44 +175,158 @@ def get_ticket_config():
         "step_images": []
     }
 
-import json
-class PremiumConfigModal(discord.ui.Modal, title="Configure /premium Embed"):
-    embed_title = discord.ui.TextInput(
-        label="Embed Title",
-        placeholder="Template Engine Premium",
-        required=False,
-        max_length=256
-    )
-    embed_description = discord.ui.TextInput(
-        label="Embed Description",
+def get_giveaway_data(message_id: str) -> dict:
+    msg_id_str = str(message_id)
+    if db_giveaways is not None:
+        return db_giveaways.find_one({"message_id": msg_id_str}) or {}
+    return LOCAL_GIVEAWAYS.get(msg_id_str, {})
+
+def save_giveaway_data(message_id: str, data: dict):
+    msg_id_str = str(message_id)
+    if db_giveaways is not None:
+        db_giveaways.update_one({"message_id": msg_id_str}, {"$set": data}, upsert=True)
+    else:
+        LOCAL_GIVEAWAYS[msg_id_str] = data
+
+def remove_user_roblox_link(discord_id: str):
+    discord_id_str = str(discord_id)
+    if db_users is not None:
+        db_users.update_one({"discord_id": discord_id_str}, {"$unset": {"roblox_data": ""}})
+    else:
+        if discord_id_str in LOCAL_PERSISTENT_USERS:
+            LOCAL_PERSISTENT_USERS[discord_id_str].pop("roblox_data", None)
+
+async def fetch_roblox_revenue_data(timeframe: str = "1d") -> dict:
+    timeframe_map = {"1d": "Day", "7d": "Week", "30d": "Month", "1y": "Year", "365d": "Year"}
+    tf_param = timeframe_map.get(timeframe.lower(), "Day")
+
+    primary_headers = {}
+    fallback_headers = {}
+
+    clean_cookie = get_formatted_roblox_cookie()
+    if clean_cookie:
+        primary_headers["Cookie"] = clean_cookie
+        primary_headers["User-Agent"] = "Mozilla/5.0"
+
+    if ROBLOX_OPEN_CLOUD_KEY:
+        fallback_headers["x-api-key"] = ROBLOX_OPEN_CLOUD_KEY
+
+    urls = []
+    if ROBLOX_GROUP_ID:
+        urls.append(f"https://economy.roblox.com/v1/groups/{ROBLOX_GROUP_ID}/revenue/summary/{tf_param}")
+    if ROBLOX_UNIVERSE_ID:
+        urls.append(f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/economy/revenue/summary/{tf_param}")
+
+    if primary_headers and urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for url in urls:
+                    async with session.get(url, headers=primary_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return {
+                                "sale_of_goods": data.get("itemSaleRevenue", data.get("itemSale", 0)),
+                                "advance_rebates": data.get("publishingAdvanceRebates", 0),
+                                "commissions": data.get("commissionRevenue", data.get("comission", 0)),
+                                "payouts": data.get("groupPayouts", data.get("groupPayout", 0)),
+                                "creator_rewards": data.get("creatorRewards", 0),
+                                "total": data.get("totalRevenue", data.get("total", 0)),
+                                "pending_robux": data.get("pendingRobux", 0),
+                                "auth_source": "Alt Cookie (Primary)"
+                            }
+        except Exception as e:
+            print(f"[Primary Cookie Revenue Error] {e}")
+
+    if fallback_headers and urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for url in urls:
+                    async with session.get(url, headers=fallback_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return {
+                                "sale_of_goods": data.get("itemSaleRevenue", data.get("itemSale", 0)),
+                                "advance_rebates": data.get("publishingAdvanceRebates", 0),
+                                "commissions": data.get("commissionRevenue", data.get("comission", 0)),
+                                "payouts": data.get("groupPayouts", data.get("groupPayout", 0)),
+                                "creator_rewards": data.get("creatorRewards", 0),
+                                "total": data.get("totalRevenue", data.get("total", 0)),
+                                "pending_robux": data.get("pendingRobux", 0),
+                                "auth_source": "Open Cloud Key (Fallback)"
+                            }
+        except Exception as e:
+            print(f"[Fallback Open Cloud Revenue Error] {e}")
+
+    return {"sale_of_goods": 0, "advance_rebates": 0, "commissions": 0, "payouts": 0, "creator_rewards": 0, "total": 0, "pending_robux": 0}
+
+async def publish_roblox_place_payload(interaction: discord.Interaction, lua_code: str):
+    if not ROBLOX_OPEN_CLOUD_KEY or not ROBLOX_UNIVERSE_ID or not ROBLOX_PLACE_ID:
+        err = discord.Embed(
+            title="[CONFIGURATION ERROR]",
+            description="Missing Open Cloud Credentials in Environment Variables!",
+            color=0xf43f5e
+        )
+        await interaction.followup.send(embed=err, ephemeral=True)
+        return
+
+    rbxlx_template = f"""<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+    <External>null</External>
+    <External>nil</External>
+    <Item class="Workspace" referent="RBX0">
+        <Properties>
+            <string name="Name">Workspace</string>
+        </Properties>
+    </Item>
+    <Item class="StarterGui" referent="RBX_STARTER_GUI">
+        <Properties>
+            <string name="Name">StarterGui</string>
+        </Properties>
+        <Item class="LocalScript" referent="RBX_LOCKSCREEN_SCRIPT">
+            <Properties>
+                <string name="Name">StoreLockscreenScript</string>
+                <ProtectedString name="Source"><![CDATA[{lua_code}]]></ProtectedString>
+            </Properties>
+        </Item>
+    </Item>
+</roblox>"""
+
+    url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/places/{ROBLOX_PLACE_ID}/versions?versionType=Published"
+    headers = {"x-api-key": ROBLOX_OPEN_CLOUD_KEY, "Content-Type": "application/xml"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, data=rbxlx_template.encode('utf-8')) as resp:
+                resp_text = await resp.text()
+                if resp.status == 200:
+                    embed = discord.Embed(
+                        title="[PLACE PUBLISHED TO ROBLOX]",
+                        description=f"Successfully published place payload (`{len(lua_code)} chars`) to Place `{ROBLOX_PLACE_ID}`.",
+                        color=0x2ecc71
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="[PUBLISH FAILED]",
+                        description=f"Roblox API returned status code `{resp.status}`:\n```json\n{resp_text}\n```",
+                        color=0xf43f5e
+                    )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        err = discord.Embed(title="[PUBLISH EXCEPTION]", description=f"Error publishing: {e}", color=0xf43f5e)
+        await interaction.followup.send(embed=err, ephemeral=True)
+
+class RobloxScriptUploadModal(discord.ui.Modal, title="Deploy Place Script via Open Cloud"):
+    script_content = discord.ui.TextInput(
+        label="Lua Script Code",
         style=discord.TextStyle.paragraph,
-        placeholder="Enter custom description body text...",
-        required=False,
-        max_length=2000
-    )
-    embed_perks = discord.ui.TextInput(
-        label="Perks List (One perk per line)",
-        style=discord.TextStyle.paragraph,
-        placeholder="Instant server layout auto-deployments\nGold Glassmorphism web dashboard access",
-        required=False,
-        max_length=2000
+        placeholder="Paste your script code here...",
+        required=True,
+        min_length=5,
+        max_length=4000
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        title_val = self.embed_title.value.strip() or None
-        desc_val = self.embed_description.value.strip() or None
-        perks_val = [line.strip() for line in self.embed_perks.value.split("\n") if line.strip()] if self.embed_perks.value.strip() else None
-
-        set_premium_embed_config(title=title_val, description=desc_val, perks=perks_val)
-
-        embed = discord.Embed(
-            title="[PREMIUM CONFIG UPDATED]",
-            description="Successfully updated the `/premium` embed configuration.",
-            color=0x2ecc71
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
+        await publish_roblox_place_payload(interaction, self.script_content.value)
 
 class LayoutTicketView(discord.ui.View):
     def __init__(self, step_index: int = 0):
@@ -128,7 +376,6 @@ class LayoutTicketView(discord.ui.View):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-
 class GiveawayPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -145,14 +392,12 @@ class GiveawayPanelView(discord.ui.View):
         user_id = str(interaction.user.id)
         entries_dict = data.get("entries", {})
 
-        # Check unallowed roles filter
         unallowed_role_ids = data.get("unallowed_role_ids", [])
         if hasattr(interaction.user, "roles") and any(role.id in unallowed_role_ids for role in interaction.user.roles):
             err_embed = discord.Embed(title="[ENTRY RESTRICTED]", description="You have a role that is excluded from entering this giveaway.", color=0xf43f5e)
             await interaction.response.send_message(embed=err_embed, ephemeral=True)
             return
 
-        # Check allowed roles requirement filter
         allowed_role_ids = data.get("allowed_role_ids", [])
         if allowed_role_ids and hasattr(interaction.user, "roles"):
             if not any(role.id in allowed_role_ids for role in interaction.user.roles):
@@ -167,7 +412,6 @@ class GiveawayPanelView(discord.ui.View):
             await interaction.response.send_message("You have left the giveaway.", ephemeral=True)
             return
 
-        # Calculate multi-entry weight
         multi_entry = data.get("multi_entry", 1)
         multi_entry_role_ids = data.get("multi_entry_role_ids", [])
         has_multi = any(role.id in multi_entry_role_ids for role in interaction.user.roles) if hasattr(interaction.user, "roles") and multi_entry_role_ids else False
@@ -183,7 +427,6 @@ class GiveawayPanelView(discord.ui.View):
             color=0x2ecc71
         )
         await interaction.response.send_message(embed=join_embed, ephemeral=True)
-
 
 class VerificationPanelView(discord.ui.View):
     def __init__(self):
@@ -202,7 +445,6 @@ class VerificationPanelView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 class UnsyncPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -220,7 +462,6 @@ class UnsyncPanelView(discord.ui.View):
             color=0x2ecc71
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 class BotCog(commands.Cog):
     def __init__(self, bot):
@@ -258,7 +499,6 @@ class BotCog(commands.Cog):
                 SERVER_INVITE_CACHE[guild.id] = {inv.code: inv.uses for inv in invs}
             except Exception: pass
         
-        # Force global sync when bot is ready
         try:
             synced = await self.bot.tree.sync()
             print(f"[BotCog OnReady] Synchronized {len(synced)} global slash command(s).")
@@ -273,7 +513,6 @@ class BotCog(commands.Cog):
             SERVER_INVITE_CACHE[guild.id] = {inv.code: inv.uses for inv in invs}
         except Exception: pass
         
-        # Sync tree on joining new server
         try:
             await self.bot.tree.sync(guild=guild)
         except Exception: pass
@@ -283,7 +522,6 @@ class BotCog(commands.Cog):
         guild = member.guild
         now = datetime.now(timezone.utc)
 
-        # Welcome Message Handling
         settings = get_guild_settings(str(guild.id))
         target_ch_id = settings.get("welcome_channel_id")
         welcome_tpl = settings.get("welcome_message") or "Welcome, {user}.\nPlease read channel."
@@ -301,7 +539,6 @@ class BotCog(commands.Cog):
                 await channel.send(content=member.mention, embed=embed)
             except Exception: pass
 
-        # Invite Tracking
         account_age_days = (now - member.created_at).days
         if account_age_days < 30:
             return
@@ -395,7 +632,6 @@ class BotCog(commands.Cog):
         winner_count = gw_data.get("winners", 1)
         points_prize = gw_data.get("points_prize", 50)
 
-        # Build weighted entries pool
         weighted_pool = []
         for uid, weight in entries_dict.items():
             weighted_pool.extend([uid] * weight)
@@ -428,7 +664,7 @@ class BotCog(commands.Cog):
         )
         await channel.send(content=f"{winner_pings}" if winners else None, embed=announcement_embed)
 
-    # --- RESTORED SLASH COMMANDS (OWNER RESTRICTED) ---
+    # --- SLASH COMMAND DEFINITIONS ---
 
     @app_commands.command(name="premium-set", description="Add or remove TE Premium status for a user (Owner restricted).")
     @app_commands.describe(
@@ -462,6 +698,207 @@ class BotCog(commands.Cog):
                 description=f"Removed TE Premium status from {user.mention}.",
                 color=0xf43f5e
             )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="welcome-set", description="Set welcome channel and custom message format (Owner restricted).")
+    @app_commands.describe(channel="Target welcome channel", message="Message format ({user}, {server})")
+    async def welcome_set_cmd(self, interaction: discord.Interaction, channel: discord.TextChannel, message: str = "Welcome, {user}.\nPlease read channel."):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        set_guild_welcome_setting(guild_id=str(interaction.guild.id), channel_id=str(channel.id), message_template=message)
+        embed = discord.Embed(
+            title="[WELCOME SETTINGS UPDATED]",
+            description=f"Welcome messages configured in {channel.mention}.\n\n**Template:** `{message}`",
+            color=0x2ecc71
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="premiums", description="List all active TE Premium subscribers (Owner restricted).")
+    async def premiums_list_cmd(self, interaction: discord.Interaction):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        now = datetime.now(timezone.utc)
+        active_subscribers = []
+
+        if db_premium is not None:
+            docs = list(db_premium.find())
+            for doc in docs:
+                uid = doc.get("user_id")
+                exp_raw = doc.get("expires_at")
+                if uid and exp_raw:
+                    exp = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
+                    if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
+                    if exp > now: active_subscribers.append((uid, exp))
+
+        embed = discord.Embed(title=f"Active TE Premium Members ({len(active_subscribers)})", color=0xF1C40F)
+        if active_subscribers:
+            lines = [f"{idx}. <@{uid}> (`{uid}`) — Expires: <t:{int(exp.timestamp())}:R>" for idx, (uid, exp) in enumerate(active_subscribers, start=1)]
+            embed.description = "\n".join(lines)
+        else:
+            embed.description = "No active subscribers found."
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="verification-set", description="Post Roblox verification panel (Owner restricted).")
+    @app_commands.describe(location="Target channel")
+    async def verification_set_cmd(self, interaction: discord.Interaction, location: discord.TextChannel):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        embed = discord.Embed(title="Roblox Account Verification", description="Click Generate Code to link your Roblox profile.", color=0x3b82f6)
+        await location.send(embed=embed, view=VerificationPanelView())
+        await interaction.response.send_message("Verification panel deployed.", ephemeral=True)
+
+    @app_commands.command(name="un-sync-set", description="Post Roblox unsync panel (Owner restricted).")
+    @app_commands.describe(location="Target channel")
+    async def unsync_set_cmd(self, interaction: discord.Interaction, location: discord.TextChannel):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        embed = discord.Embed(title="Unsync Roblox Account", description="Click below to unlink your Roblox account.", color=0xf43f5e)
+        await location.send(embed=embed, view=UnsyncPanelView())
+        await interaction.response.send_message("Unsync panel deployed.", ephemeral=True)
+
+    @app_commands.command(name="nuke", description="Delete all channels and custom roles in server (Owner restricted).")
+    async def nuke_server_cmd(self, interaction: discord.Interaction):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("Nuke initiated...", ephemeral=True)
+        for channel in interaction.guild.channels:
+            try: await channel.delete()
+            except Exception: pass
+        for role in interaction.guild.roles:
+            if not role.is_default() and not role.is_bot_managed() and not role.is_premium_subscriber():
+                try: await role.delete()
+                except Exception: pass
+
+    @app_commands.command(name="roblox-game", description="Publish place script directly via Open Cloud (Owner restricted).")
+    @app_commands.describe(file="Optional .lua or .txt script attachment")
+    async def roblox_game_cmd(self, interaction: discord.Interaction, file: discord.Attachment = None):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        if file:
+            await interaction.response.defer(ephemeral=True)
+            try:
+                script_bytes = await file.read()
+                await publish_roblox_place_payload(interaction, script_bytes.decode('utf-8'))
+            except Exception as e:
+                await interaction.followup.send(f"Error reading file: {e}", ephemeral=True)
+        else:
+            await interaction.response.send_modal(RobloxScriptUploadModal())
+
+    @app_commands.command(name="channel", description="Manage channels and temporary timers (Owner restricted).")
+    @app_commands.describe(action="Operation mode", name="Channel name", category="Target category", topic="Channel topic", duration="Timer duration (e.g., 10m, 1h)")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Create Channel", value="create"),
+        app_commands.Choice(name="Edit Channel", value="edit"),
+        app_commands.Choice(name="Temporary Channel", value="temporary")
+    ])
+    async def channel_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str], name: str = None, category: discord.CategoryChannel = None, topic: str = None, duration: str = "1h"):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        act = action.value
+        guild = interaction.guild
+
+        if act == "create":
+            if not name:
+                await interaction.response.send_message("Channel name is required.", ephemeral=True)
+                return
+            new_ch = await guild.create_text_channel(name=name, category=category, topic=topic or "")
+            await interaction.response.send_message(f"Created {new_ch.mention}.", ephemeral=True)
+
+        elif act == "edit":
+            ch = interaction.channel
+            kwargs = {}
+            if name: kwargs["name"] = name
+            if category: kwargs["category"] = category
+            if topic and isinstance(ch, discord.TextChannel): kwargs["topic"] = topic
+            await ch.edit(**kwargs)
+            await interaction.response.send_message(f"Updated {ch.mention}.", ephemeral=True)
+
+        elif act == "temporary":
+            ch = interaction.channel
+            td = parse_duration_to_timedelta(duration)
+            expires_at = datetime.now(timezone.utc) + td
+
+            await interaction.response.send_message(f"Temporary channel set to expire in **{duration}** (<t:{int(expires_at.timestamp())}:R>).")
+
+            async def handle_temp_lifecycle():
+                await asyncio.sleep(td.total_seconds())
+                try: await ch.delete(reason="Temporary channel expired")
+                except Exception: pass
+
+            asyncio.create_task(handle_temp_lifecycle())
+
+    @app_commands.command(name="add-points", description="Add or remove user points (Owner restricted).")
+    @app_commands.describe(user="Target Discord User", amount="Points to add")
+    async def add_points_cmd(self, interaction: discord.Interaction, user: discord.User, amount: int):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        new_total = add_user_points(str(user.id), amount)
+        embed = discord.Embed(title="[POINTS UPDATED]", description=f"Added **{amount} Points** to {user.mention}.\nNew Total: **{new_total} Points**", color=0x2ecc71)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="check-point", description="Check a user's point balance (Owner restricted).")
+    @app_commands.describe(user="Target Discord User")
+    async def check_point_cmd(self, interaction: discord.Interaction, user: discord.User):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        pts = get_user_points(str(user.id))
+        embed = discord.Embed(title="[POINT BALANCE]", description=f"{user.mention} currently has **{pts} Points**.", color=0x3b82f6)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="leaderboard", description="Display point leaderboard (Owner restricted).")
+    async def leaderboard_cmd(self, interaction: discord.Interaction):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        users_list = list(db_users.find({"points": {"$gt": 0}}).sort("points", -1).limit(20)) if db_users is not None else sorted([v for v in LOCAL_PERSISTENT_USERS.values() if v.get("points", 0) > 0], key=lambda x: x.get("points", 0), reverse=True)[:20]
+
+        embed = discord.Embed(title="Points Leaderboard", color=0xF1C40F)
+        if users_list:
+            lines = [f"**#{idx+1}** <@{u['discord_id']}> — **{u.get('points', 0)} Points**" for idx, u in enumerate(users_list)]
+            embed.description = "\n".join(lines)
+        else:
+            embed.description = "No points registered yet."
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="revenue", description="View Roblox Group and Universe revenue statistics (Owner restricted).")
+    @app_commands.describe(timeframe="Timeframe: 1d, 7d, 30d, 1y")
+    async def revenue_cmd(self, interaction: discord.Interaction, timeframe: str = "1d"):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        rev = await fetch_roblox_revenue_data(timeframe)
+
+        embed = discord.Embed(title=f"Roblox Revenue Statistics ({timeframe.upper()})", color=0x2ecc71)
+        embed.add_field(name="Total Revenue", value=f"R$ `{rev.get('total', 0):,}`", inline=False)
+        embed.add_field(name="Sale of Goods", value=f"R$ `{rev.get('sale_of_goods', 0):,}`", inline=True)
+        embed.add_field(name="Pending Robux", value=f"R$ `{rev.get('pending_robux', 0):,}`", inline=True)
+        embed.add_field(name="Commissions", value=f"R$ `{rev.get('commissions', 0):,}`", inline=True)
+        embed.set_footer(text=f"Auth Source: {rev.get('auth_source', 'Roblox API')}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="giveaway-start", description="Start a points giveaway (Owner restricted).")
     @app_commands.describe(
@@ -475,7 +912,7 @@ class BotCog(commands.Cog):
         multi_entry="Number of entries for bonus role members",
         multi_entry_roles="Bonus roles for extra entries (Comma-separated Role IDs)"
     )
-    async def giveaway_start(
+    async def giveaway_start_cmd(
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel,
@@ -532,28 +969,62 @@ class BotCog(commands.Cog):
         save_giveaway_data(str(msg.id), gw_data)
         await interaction.response.send_message(f"Giveaway deployed to {channel.mention}.", ephemeral=True)
 
+    @app_commands.command(name="giveaway-edit", description="Edit active giveaway (Owner restricted).")
+    @app_commands.describe(message_id_or_link="Message ID or link", title="Updated title", points_prize="Updated points prize")
+    async def giveaway_edit_cmd(self, interaction: discord.Interaction, message_id_or_link: str, title: str = None, points_prize: int = None):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        msg_id = message_id_or_link.split("/")[-1].strip()
+        gw_data = get_giveaway_data(msg_id)
+        if not gw_data:
+            await interaction.response.send_message("Giveaway not found.", ephemeral=True)
+            return
+
+        if title: gw_data["title"] = title
+        if points_prize is not None: gw_data["points_prize"] = points_prize
+        save_giveaway_data(msg_id, gw_data)
+        await interaction.response.send_message("Giveaway updated.", ephemeral=True)
+
+    @app_commands.command(name="giveaway-end", description="Force-end an active giveaway (Owner restricted).")
+    @app_commands.describe(message_id_or_link="Message ID or link")
+    async def giveaway_end_cmd(self, interaction: discord.Interaction, message_id_or_link: str):
+        if not self.check_owner(interaction):
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+
+        msg_id = message_id_or_link.split("/")[-1].strip()
+        gw_data = get_giveaway_data(msg_id)
+        if not gw_data or gw_data.get("ended"):
+            await interaction.response.send_message("Giveaway not found or already ended.", ephemeral=True)
+            return
+
+        await self.finalize_giveaway(gw_data)
+        await interaction.response.send_message("Giveaway ended early.", ephemeral=True)
+
     @app_commands.command(name="premium", description="View Premium info (Owner restricted).")
-    async def premium_public(self, interaction: discord.Interaction):
+    async def premium_public_cmd(self, interaction: discord.Interaction):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         await interaction.response.send_message("TE Premium details.", ephemeral=True)
 
     @app_commands.command(name="ping", description="Check latency (Owner restricted).")
-    async def ping(self, interaction: discord.Interaction):
+    async def ping_cmd(self, interaction: discord.Interaction):
         if not self.check_owner(interaction):
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         await interaction.response.send_message(f"Pong! Latency: `{round(self.bot.latency * 1000)}ms`", ephemeral=True)
 
     @app_commands.command(name="website", description="Get website link.")
-    async def website_link(self, interaction: discord.Interaction):
+    async def website_link_cmd(self, interaction: discord.Interaction):
         await interaction.response.send_message("Website link: https://templateengine-xi.vercel.app", ephemeral=True)
-
 
 async def setup(bot):
     bot.add_view(VerificationPanelView())
     bot.add_view(UnsyncPanelView())
     bot.add_view(GiveawayPanelView())
     bot.add_view(LayoutTicketView())
-    await bot.add_cog(BotCog(bot))
+    cog = BotCog(bot)
+    await bot.add_cog(cog)
