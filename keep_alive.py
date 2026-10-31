@@ -1,7 +1,4 @@
 import os
-import re
-import json
-import random
 import requests
 from datetime import datetime, timezone, timedelta
 from flask import Flask, redirect, request, session, render_template, jsonify
@@ -22,40 +19,23 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 application = app
 handler = app
 
-BLUEPRINTS_DIR = "/tmp/blueprints" if os.getenv("VERCEL") else os.path.join(os.getcwd(), "blueprints")
-os.makedirs(BLUEPRINTS_DIR, exist_ok=True)
-
 # Discord Configuration
 CLIENT_ID = (os.getenv("DISCORD_CLIENT_ID") or "").strip()
 CLIENT_SECRET = (os.getenv("DISCORD_CLIENT_SECRET") or "").strip()
 BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
 
-RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
 # Roblox Integration Configuration
-ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
-ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
 ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
 ROBLOX_STORE_URL = (os.getenv("ROBLOX_STORE_URL") or f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store").strip()
 
-# Target Channels & Webhooks
-SUBSCRIPTION_LOG_CHANNEL_ID = (os.getenv("SUBSCRIPTION_LOG_CHANNEL_ID") or "1564262413514182739").strip()
-DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
-PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
-
-SYSTEM_LOG_WEBHOOK_URL = (os.getenv("SYSTEM_LOG_WEBHOOK_URL") or "").strip()
-WEBSITE_WEBHOOK_URL = (os.getenv("WEBSITE_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
-DESIGN_WEBHOOK_URL = (os.getenv("DESIGN_WEBHOOK_URL") or SYSTEM_LOG_WEBHOOK_URL).strip()
-
 MONGO_URI = os.getenv("MONGO_URI")
-
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 
 db_bans = None
 db_premium = None
 db_users = None
-db_stats = None
 
 if MONGO_URI:
     try:
@@ -67,7 +47,6 @@ if MONGO_URI:
         db_bans = db["bans"]
         db_premium = db["premium_users"]
         db_users = db["persistent_users"]
-        db_stats = db["stats"]
     except Exception as e:
         print(f"[MongoDB Warning] Could not connect to Mongo: {e}")
 
@@ -75,11 +54,9 @@ WEBSITE_BANS = {}
 LOCAL_PREMIUM_USERS = {}
 LOCAL_PERSISTENT_USERS = {}
 
-
 @app.before_request
 def make_session_permanent():
     session.permanent = True
-
 
 def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict = None):
     if not discord_id:
@@ -112,7 +89,6 @@ def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict 
     else:
         LOCAL_PERSISTENT_USERS[discord_id_str] = update_payload
 
-
 def load_user_session_db(discord_id: str) -> dict:
     if not discord_id:
         return {}
@@ -125,7 +101,6 @@ def load_user_session_db(discord_id: str) -> dict:
             print(f"[Load User Error] {e}")
             return {}
     return LOCAL_PERSISTENT_USERS.get(discord_id_str, {})
-
 
 def is_user_premium(user_id: str) -> bool:
     if not user_id:
@@ -151,7 +126,6 @@ def is_user_premium(user_id: str) -> bool:
         exp = LOCAL_PREMIUM_USERS.get(user_id_str)
         return exp > now if exp else False
 
-
 def calculate_account_age(discord_id: str) -> str:
     try:
         snowflake = int(discord_id)
@@ -168,7 +142,6 @@ def calculate_account_age(discord_id: str) -> str:
     except Exception:
         return "Unknown"
 
-
 def is_user_banned(user_id):
     if not user_id:
         return None
@@ -179,87 +152,6 @@ def is_user_banned(user_id):
         except Exception:
             return None
     return WEBSITE_BANS.get(user_id_str)
-
-
-# --- WEBHOOK & BOT DISPATCH LOGGING HELPERS ---
-def send_webhook_log(webhook_url: str, embed_payload: dict) -> bool:
-    if not webhook_url:
-        return False
-    try:
-        res = requests.post(webhook_url, json={"embeds": [embed_payload]}, timeout=6)
-        return res.status_code in (200, 204)
-    except Exception as e:
-        print(f"[Webhook Log Exception] {e}")
-    return False
-
-
-def send_bot_native_log(channel_id: str, embed_payload: dict) -> bool:
-    if not BOT_TOKEN:
-        return False
-
-    target_channel = str(channel_id).strip()
-    url = f"{DISCORD_API_BASE_URL}/channels/{target_channel}/messages"
-    headers = {
-        "Authorization": f"Bot {BOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    body = {"embeds": [embed_payload]}
-
-    try:
-        res = requests.post(url, headers=headers, json=body, timeout=8)
-        return res.status_code in (200, 201)
-    except Exception as e:
-        print(f"[Discord API Log Exception] {e}")
-
-    return False
-
-
-def dispatch_event_log(event_type: str, title: str, user_data: dict, action_desc: str, color: int = 0x3b82f6, extra_fields: dict = None):
-    """
-    Non-Premium Users -> Dispatched via Webhooks (WEBSITE_WEBHOOK_URL / DESIGN_WEBHOOK_URL).
-    TE Premium Users  -> Dispatched via Native Bot API for direct automated building.
-    """
-    user_data = user_data or {}
-    user_id = str(user_data.get("id", "0"))
-    username = user_data.get("username", "Anonymous")
-    account_age = calculate_account_age(user_id) if user_id != "0" else "Unknown"
-
-    has_premium = is_user_premium(user_id)
-    premium_tag = "👑 TE PREMIUM MEMBER" if has_premium else "Standard Member"
-
-    user_info_block = (
-        f"User: <@{user_id}>\n"
-        f"Membership: `{premium_tag}`\n"
-        f"Username: `{username}`\n"
-        f"User ID: `{user_id}`\n"
-        f"Account Age: `{account_age}`"
-    )
-
-    fields = [
-        {"name": "User Information", "value": user_info_block, "inline": False},
-        {"name": "Activity Details", "value": action_desc, "inline": False}
-    ]
-
-    if extra_fields:
-        for k, v in extra_fields.items():
-            fields.append({"name": k, "value": f"`{v}`", "inline": False})
-
-    embed = {
-        "title": title,
-        "color": color,
-        "fields": fields,
-        "footer": {"text": "Template Engine Infrastructure"},
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-    if has_premium:
-        target_channel = PREMIUM_DESIGN_CHANNEL_ID if event_type == "design" else SUBSCRIPTION_LOG_CHANNEL_ID
-        send_bot_native_log(target_channel, embed)
-    else:
-        target_webhook = DESIGN_WEBHOOK_URL if event_type == "design" else WEBSITE_WEBHOOK_URL
-        send_webhook_log(target_webhook, embed)
-
 
 @app.route("/")
 def home():
@@ -307,8 +199,6 @@ def home():
     except Exception as e:
         return f"Template Engine Error: {str(e)}", 500
 
-
-# --- SUBMIT DESIGN DISPATCH ---
 @app.route("/api/submit-design", methods=["POST"])
 def submit_design_endpoint():
     try:
@@ -320,41 +210,15 @@ def submit_design_endpoint():
         user_id = str(user.get("id"))
         has_premium = is_user_premium(user_id)
 
-        target_server_id = payload.get("target_server_id", "Unknown")
-        server_name = payload.get("server_name", "Custom Server")
-        categories_count = payload.get("categories_count", 0)
-        channels_count = payload.get("channels_count", 0)
-        roles_count = payload.get("roles_count", 0)
-
-        action_text = (
-            f"Submitted layout blueprint for server **{server_name}** (`{target_server_id}`).\n"
-            f"• Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`\n"
-            f"• Status: {'🚀 Instant Auto-Deploy (Premium)' if has_premium else '📝 Pending Manual Review (Standard)'}"
-        )
-
-        dispatch_event_log(
-            event_type="design",
-            title="📐 [Design Blueprint Submitted]",
-            user_data=user,
-            action_desc=action_text,
-            color=0xF1C40F if has_premium else 0x3b82f6,
-            extra_fields={
-                "Target Server ID": target_server_id,
-                "Invite Link": payload.get("invite_link", "N/A")
-            }
-        )
-
         return jsonify({
             "success": True,
             "is_premium": has_premium,
-            "message": "Design blueprint successfully dispatched."
+            "message": "Design blueprint successfully submitted."
         }), 200
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-
-# --- DISCORD OAUTH2 LOGIN & CALLBACK ---
 @app.route("/login")
 def login():
     if not CLIENT_ID:
@@ -371,7 +235,6 @@ def login():
         f"&scope=identify%20email"
     )
     return redirect(discord_auth_url)
-
 
 @app.route("/callback")
 def callback():
@@ -422,31 +285,19 @@ def callback():
                 session["roblox_user"] = db_record["roblox_data"]
 
             save_user_session_db(user_data["id"], user_obj, session.get("roblox_user"))
-
-            # Log login ONLY for authenticated users
-            dispatch_event_log(
-                event_type="login",
-                title="🔐 [Website OAuth Login]",
-                user_data=user_obj,
-                action_desc="Authenticated via Discord OAuth2.",
-                color=0x3b82f6
-            )
     except Exception as e:
         print(f"[OAuth Callback Error] {e}")
 
     return redirect("/")
-
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/")
 
-
 @app.route("/health")
 def health():
     return jsonify({"status": "alive"}), 200
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
