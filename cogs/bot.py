@@ -10,21 +10,16 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
-# --- CONFIGURATION & CONSTANTS ---
 BOT_OWNER_ID = 1219266886143967245
-GIVEAWAY_BANNER_URL = "https://res.cloudinary.com/dtz0urit6/image/upload/f_png,q_auto/cloudinary-tools-uploads/qxpfnwtebf6jqybaayjo.png"
 
-# Dedicated Logging Channels
-CHANNEL_LOG_WEBSITE_LOGIN = 1563524100276617248      # Website entry-Login ONLY
-CHANNEL_LOG_NON_PREMIUM_DESIGNS = 1563524101522464900 # Designs (non-premium only)
-CHANNEL_LOG_PREMIUM_DESIGNS = 1563544108696477802     # Designs (Premium only)
-CHANNEL_LOG_SUBSCRIPTIONS = 1564262413514182739       # Subscriptions (New, Renewed, Expired)
+CHANNEL_LOG_WEBSITE_LOGIN = 1563524100276617248
+CHANNEL_LOG_NON_PREMIUM_DESIGNS = 1563524101522464900
+CHANNEL_LOG_PREMIUM_DESIGNS = 1563544108696477802
+CHANNEL_LOG_SUBSCRIPTIONS = 1564262413514182739
 
 MONGO_URI = os.getenv("MONGO_URI")
-ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
 ROBLOX_COOKIE = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip()
 ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
-ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
 ROBLOX_UNIVERSE_ID = (os.getenv("ROBLOX_UNIVERSE_ID") or "").strip()
 
 def get_formatted_roblox_cookie():
@@ -35,11 +30,8 @@ def get_formatted_roblox_cookie():
         return clean
     return f".ROBLOSECURITY={clean}"
 
-# --- DATABASE SETUP ---
 db_premium = None
 db_users = None
-db_giveaways = None
-db_settings = None
 db_sub_tracker = None
 
 if MONGO_URI:
@@ -51,33 +43,12 @@ if MONGO_URI:
             db = mongo_client["static_studio_db"]
         db_premium = db["premium_users"]
         db_users = db["persistent_users"]
-        db_giveaways = db["giveaways"]
-        db_settings = db["guild_settings"]
         db_sub_tracker = db["roblox_subscription_tracker"]
     except Exception as e:
-        print(f"[Bot Mongo Warning] Could not connect to MongoDB: {e}")
+        print(f"[Bot Mongo Warning] {e}")
 
-LOCAL_PERSISTENT_USERS = {}
 LOCAL_PREMIUM_USERS = {}
-LOCAL_GIVEAWAYS = {}
-LOCAL_GUILD_SETTINGS = {}
 LOCAL_SUB_TRACKER = {}
-
-# --- HELPER FUNCTIONS ---
-def parse_duration_to_timedelta(duration_str: str) -> timedelta:
-    if not duration_str or duration_str.lower() in ["inf", "infinite"]:
-        return timedelta(days=36500)
-    match = re.match(r"^(\d+)\s*(s|h|d|mo|y)$", duration_str.strip().lower())
-    if not match:
-        return timedelta(days=30)
-    val, unit = match.groups()
-    num = int(val)
-    if unit == "s": return timedelta(seconds=num)
-    elif unit == "h": return timedelta(hours=num)
-    elif unit == "d": return timedelta(days=num)
-    elif unit == "mo": return timedelta(days=num * 30)
-    elif unit == "y": return timedelta(days=num * 365)
-    return timedelta(days=30)
 
 def is_user_premium(user_id: str) -> bool:
     uid = str(user_id)
@@ -103,110 +74,42 @@ def is_user_premium(user_id: str) -> bool:
             return exp > now
         return False
 
-# --- SEPARATED LOGGING FUNCTIONS ---
-
-async def log_website_login(bot: commands.Bot, user: discord.User, ip_address: str = "Hidden/Proxy"):
-    """Logs ONLY when a user enters/logs into the website."""
-    is_prem = is_user_premium(str(user.id))
-    now = datetime.now(timezone.utc)
-
-    login_embed = discord.Embed(
-        title="Website Entry Login",
-        description=(
-            f"**User:** {user.mention} (`{user.id}`)\n"
-            f"**Username:** `{user.name}`\n"
-            f"**Status:** {'**TE Premium**' if is_prem else '**Standard User**'}\n"
-            f"**Access Time:** <t:{int(now.timestamp())}:F>"
-        ),
-        color=0xF1C40F if is_prem else 0x3b82f6,
-        timestamp=now
-    )
-    login_embed.set_footer(text="Template Engine Website Analytics")
-
-    ch_login = bot.get_channel(CHANNEL_LOG_WEBSITE_LOGIN)
-    if ch_login:
-        try:
-            await ch_login.send(embed=login_embed)
-        except Exception as e:
-            print(f"[Log Error - Website Login] {e}")
-
-async def log_submitted_design(bot: commands.Bot, user: discord.User, guild: discord.Guild, design_title: str, categories_count: int, channels_count: int):
-    """Logs submitted designs strictly to Non-Premium OR Premium design channels."""
-    is_prem = is_user_premium(str(user.id))
-    now = datetime.now(timezone.utc)
-
-    design_embed = discord.Embed(
-        title="New Design Submitted",
-        description=(
-            f"**Design Title:** `{design_title}`\n"
-            f"**Creator:** {user.mention} (`{user.id}`)\n"
-            f"**Target Guild:** {guild.name if guild else 'Web Dashboard'} (`{guild.id if guild else 'N/A'}`)\n"
-            f"**Tier:** {'**TE Premium**' if is_prem else '**Standard Member**'}\n"
-            f"**Structure:** `{categories_count}` Categories | `{channels_count}` Channels"
-        ),
-        color=0xF1C40F if is_prem else 0x3b82f6,
-        timestamp=now
-    )
-    design_embed.set_footer(text="Template Engine Design Repository")
-
-    if is_prem:
-        ch_premium = bot.get_channel(CHANNEL_LOG_PREMIUM_DESIGNS)
-        if ch_premium:
-            try:
-                await ch_premium.send(embed=design_embed)
-            except Exception as e:
-                print(f"[Log Error - Premium Designs] {e}")
-    else:
-        ch_non_premium = bot.get_channel(CHANNEL_LOG_NON_PREMIUM_DESIGNS)
-        if ch_non_premium:
-            try:
-                await ch_non_premium.send(embed=design_embed)
-            except Exception as e:
-                print(f"[Log Error - Non-Premium Designs] {e}")
-
-# --- CORE AUTO-BUILD LOGIC ENGINE ---
-async def build_layout_for_guild(bot: commands.Bot, guild: discord.Guild, user: discord.User, layout_data: dict) -> dict:
-    """Core auto-build logic engine for premium users."""
-    user_id_str = str(user.id)
-    if not is_user_premium(user_id_str):
-        return {"success": False, "error": "TE Premium status is required to use the auto-builder."}
-
-    if not layout_data or "categories" not in layout_data:
-        return {"success": False, "error": "Invalid layout template configuration structure."}
-
+# Core Auto-Build Logic Engine
+async def build_layout_for_guild(bot: commands.Bot, guild: discord.Guild, layout_data: dict) -> dict:
+    """Creates all categories and text/voice channels in target server."""
     categories_created = 0
     channels_created = 0
 
     try:
-        for cat_data in layout_data.get("categories", []):
+        categories_data = layout_data.get("layout", {}).get("categories", [])
+        if not categories_data and "categories" in layout_data:
+            categories_data = layout_data.get("categories", [])
+
+        for cat_data in categories_data:
             cat_name = cat_data.get("name", "CATEGORY")
-            category = await guild.create_category(name=cat_name)
+            emoji = cat_data.get("emoji", "")
+            full_cat_name = f"{emoji} {cat_name}".strip() if emoji else cat_name
+            
+            category = await guild.create_category(name=full_cat_name)
             categories_created += 1
 
             for ch_data in cat_data.get("channels", []):
                 ch_name = ch_data.get("name", "channel")
+                ch_emoji = ch_data.get("emoji", "")
                 ch_type = ch_data.get("type", "text")
                 ch_topic = ch_data.get("topic", "")
+                
+                clean_ch_name = f"{ch_emoji}-{ch_name}".strip("-") if ch_emoji else ch_name
 
                 if ch_type == "voice":
-                    await guild.create_voice_channel(name=ch_name, category=category)
+                    await guild.create_voice_channel(name=clean_ch_name, category=category)
                 else:
-                    await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
+                    await guild.create_text_channel(name=clean_ch_name, category=category, topic=ch_topic)
                 channels_created += 1
                 await asyncio.sleep(0.4)
 
-        await log_submitted_design(
-            bot=bot,
-            user=user,
-            guild=guild,
-            design_title=layout_data.get("name", "Custom Design"),
-            categories_count=categories_created,
-            channels_count=channels_created
-        )
-
         return {
             "success": True,
-            "layout_name": layout_data.get("name", "Custom Layout"),
             "categories_created": categories_created,
             "channels_created": channels_created
         }
@@ -221,13 +124,34 @@ class BotCog(commands.Cog):
     def cog_unload(self):
         self.scan_roblox_subscriptions.cancel()
 
-    def check_owner(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == BOT_OWNER_ID
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Listens for premium auto-build dispatches sent from the website server."""
+        if message.channel.id != CHANNEL_LOG_PREMIUM_DESIGNS:
+            return
 
-    # --- AUTOMATED ROBLOX SUBSCRIPTION TRACKER TASK ---
+        if "AUTOBUILD_PAYLOAD_START" in message.content:
+            try:
+                raw_json = message.content.split("```json")[1].split("```")[0].strip() if "```json" in message.content else message.content.split("```")[1].split("```")[0].strip()
+                payload = json.loads(raw_json)
+
+                target_server_id = payload.get("target_server_id")
+                if not target_server_id or not str(target_server_id).isdigit():
+                    return
+
+                guild = self.bot.get_guild(int(target_server_id))
+                if not guild:
+                    print(f"[Auto-Build] Bot is not in target guild ID: {target_server_id}")
+                    return
+
+                res = await build_layout_for_guild(self.bot, guild, payload)
+                if res.get("success"):
+                    print(f"[Auto-Build Success] Created {res.get('categories_created')} categories & {res.get('channels_created')} channels in guild {guild.name}")
+            except Exception as e:
+                print(f"[Auto-Build Execution Error] {e}")
+
     @tasks.loop(hours=6.0)
     async def scan_roblox_subscriptions(self):
-        """Scans Roblox subscriptions via cookie and logs New, Renewed, or Expired states."""
         cookie = get_formatted_roblox_cookie()
         if not cookie or not ROBLOX_UNIVERSE_ID or not ROBLOX_SUBSCRIPTION_ID:
             return
@@ -310,33 +234,6 @@ class BotCog(commands.Cog):
                         )
                         embed.set_footer(text="Roblox Subscription System - Automatic Renewal")
                         await log_channel.send(embed=embed)
-                    else:
-                        if db_sub_tracker is not None:
-                            db_sub_tracker.update_one({"roblox_id": roblox_id}, {"$set": {"last_seen": now.isoformat(), "state": state}})
-
-            all_records = list(db_sub_tracker.find()) if db_sub_tracker is not None else list(LOCAL_SUB_TRACKER.values())
-            for record in all_records:
-                r_id = record["roblox_id"]
-                if r_id not in active_roblox_ids and not record.get("logged_expired"):
-                    exp_raw = record.get("expiration_time")
-                    if exp_raw:
-                        exp_dt = datetime.fromisoformat(exp_raw.replace("Z", "+00:00"))
-                        if exp_dt.tzinfo is None: exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-
-                        if now >= (exp_dt + timedelta(days=1)):
-                            if db_sub_tracker is not None:
-                                db_sub_tracker.update_one({"roblox_id": r_id}, {"$set": {"logged_expired": True, "state": "EXPIRED"}})
-                            else:
-                                LOCAL_SUB_TRACKER[r_id]["logged_expired"] = True
-
-                            embed = discord.Embed(
-                                title="SUBSCRIPTION EXPIRED",
-                                description=f"**Roblox User ID:** `{r_id}`\n**Expired On:** `<t:{int(exp_dt.timestamp())}:F>`\n**Grace Period:** 24h Elapsed (Confirmed Non-Renewed Expiration)",
-                                color=0xf43f5e,
-                                timestamp=now
-                            )
-                            embed.set_footer(text="Roblox Subscription System - Non-Renewed Expiration")
-                            await log_channel.send(embed=embed)
 
         except Exception as e:
             print(f"[Subscription Scanner Exception] {e}")
