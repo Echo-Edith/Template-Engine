@@ -646,13 +646,21 @@ display: inline-block;
 {% endif %}
 {% endif %}
 
-<!-- AUTHENTICATION ACTIONS GRID -->
+<!-- AUTHENTICATION & PREMIUM ACTIONS GRID -->
 <div class="auth-actions-grid">
 {% if not user %}
 <a href="/login" class="btn-glass btn-discord">
 <i class="fa-brands fa-discord fa-lg"></i> Log In with Discord
 </a>
 {% endif %}
+
+<!-- ADD BOT BUTTON FOR PREMIUM USERS (LANDING PAGE) -->
+{% if user and is_premium and discord_client_id %}
+<a id="landing-bot-invite-btn" href="https://discord.com/api/oauth2/authorize?client_id={{ discord_client_id }}&permissions=8&scope=bot%20applications.commands" target="_blank" class="btn-glass btn-premium">
+<i class="fa-brands fa-discord fa-lg"></i> Add Bot to Server (Auto-Build)
+</a>
+{% endif %}
+
 {% if roblox_store_url and not is_premium %}
 <a href="{{ roblox_store_url }}" target="_blank" class="btn-glass btn-premium">
 <i class="fa-solid fa-crown"></i> Get TE Premium (299 Robux)
@@ -823,6 +831,7 @@ Confirm & Submit
 document.addEventListener("DOMContentLoaded", () => {
     checkAuthStatus();
     applyPremiumTheme();
+    updateBotInviteLink();
 
     const continueBtn = document.getElementById('verify-continue-btn');
     if (continueBtn) {
@@ -898,9 +907,7 @@ function navigateTo(pageId) {
     } else {
         panelWrapper.classList.remove('layout-mode');
     }
-    if (pageId === 'page-generator' || pageId === 'page-final') {
-        updateBotInviteLink();
-    }
+    updateBotInviteLink();
     if (pageId === 'page-permissions') {
         applyPremiumTheme();
         initPermissionsPage();
@@ -942,15 +949,17 @@ async function handleAIGeneration() {
                 server_id: serverId
             })
         });
-        const result = await response.json();
-        if (result.success && result.blueprint) {
-            currentLayout = result.blueprint;
-        } else if (result.error) {
-            alert('Generation error: ' + result.error);
+
+        if (response.ok) {
+            const result = await response.json();
+            if (result.success && result.blueprint) {
+                currentLayout = result.blueprint;
+            } else if (result.error) {
+                console.warn('AI generation server message:', result.error);
+            }
         }
     } catch (err) {
-        console.error(err);
-        alert('An error occurred during AI generation. Proceeding with default template.');
+        console.error('AI endpoint request error:', err);
     } finally {
         btn.disabled = false;
         btn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> <span>Generate Server Layout</span>`;
@@ -1187,8 +1196,12 @@ function updateBotInviteLink() {
     if (sanitizedServerId) {
         inviteUrl += `&guild_id=${sanitizedServerId}`;
     }
-    const btn = document.getElementById('bot-invite-btn');
-    if (btn) btn.href = inviteUrl;
+    
+    const landingBtn = document.getElementById('landing-bot-invite-btn');
+    if (landingBtn) landingBtn.href = inviteUrl;
+
+    const finalBtn = document.getElementById('bot-invite-btn');
+    if (finalBtn) finalBtn.href = inviteUrl;
 }
 
 function handleInitialSubmitClick() {
@@ -1250,7 +1263,7 @@ async function handleSubmitDesign() {
         const desc = document.getElementById('final-desc-text');
         if (resData.is_premium) {
             if (heading) heading.innerText = "👑 TE Premium Design Dispatched!";
-            if (desc) desc.innerText = "Your blueprint has been sent to the bot to deploy directly!";
+            if (desc) desc.innerText = "Your layout blueprint has been sent directly to the bot for auto-deployment!";
         } else {
             if (heading) heading.innerText = "Blueprint Submitted to Staff!";
             if (desc) desc.innerText = "Your blueprint has been sent to staff for deployment review.";
