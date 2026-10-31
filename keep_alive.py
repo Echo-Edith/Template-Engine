@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from datetime import datetime, timezone, timedelta
 from flask import Flask, redirect, request, session, render_template, jsonify
@@ -141,6 +142,17 @@ def is_user_banned(user_id):
             return None
     return WEBSITE_BANS.get(user_id_str)
 
+def calculate_account_age_days(discord_id: str) -> str:
+    try:
+        snowflake = int(discord_id)
+        timestamp_ms = (snowflake >> 22) + 1420070400000
+        created_at = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        days = (now - created_at).days
+        return f"{days} days"
+    except Exception:
+        return "Unknown"
+
 @app.route("/")
 def home():
     try:
@@ -187,6 +199,57 @@ def home():
     except Exception as e:
         return f"Template Engine Error: {str(e)}", 500
 
+@app.route("/generate-blueprint", methods=["POST"])
+def generate_blueprint_endpoint():
+    try:
+        payload = request.get_json(silent=True, force=True) or {}
+        prompt = payload.get("prompt", "Default Server Layout")
+        
+        # Generator creates structure based on prompt keyword hints
+        generated_layout = {
+            "server_name": f"{prompt[:20].title()} Community",
+            "roles": [
+                {"name": "Owner", "color": "#f1c40f"},
+                {"name": "Admin", "color": "#e74c3c"},
+                {"name": "Moderator", "color": "#9b59b6"},
+                {"name": "VIP Member", "color": "#3498db"},
+                {"name": "Member", "color": "#2ecc71"}
+            ],
+            "categories": [
+                {
+                    "name": "INFORMATION",
+                    "emoji": "📌",
+                    "channels": [
+                        {"name": "welcome", "emoji": "👋", "type": "text", "topic": "Welcome to the server!"},
+                        {"name": "rules", "emoji": "📜", "type": "text", "topic": "Server guidelines"},
+                        {"name": "announcements", "emoji": "📢", "type": "text", "topic": "Official announcements"}
+                    ]
+                },
+                {
+                    "name": "COMMUNITY CHATS",
+                    "emoji": "💬",
+                    "channels": [
+                        {"name": "general-chat", "emoji": "💬", "type": "text", "topic": "General discussions"},
+                        {"name": "bot-commands", "emoji": "🤖", "type": "text", "topic": "Bot interaction channel"},
+                        {"name": "media-gallery", "emoji": "🖼️", "type": "text", "topic": "Share images and videos"}
+                    ]
+                },
+                {
+                    "name": "VOICE CHANNELS",
+                    "emoji": "🔊",
+                    "channels": [
+                        {"name": "General Lounge", "emoji": "🎙️", "type": "voice", "topic": ""},
+                        {"name": "Gaming Room", "emoji": "🎮", "type": "voice", "topic": ""}
+                    ]
+                }
+            ]
+        }
+
+        return jsonify({"success": True, "blueprint": generated_layout}), 200
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route("/api/submit-design", methods=["POST"])
 def submit_design_endpoint():
     try:
@@ -198,25 +261,32 @@ def submit_design_endpoint():
         user_id = str(user.get("id"))
         has_premium = is_user_premium(user_id)
 
-        # Build payload for Discord Bot log channel
-        target_server_id = payload.get("target_server_id", "N/A")
-        server_name = payload.get("server_name", "Custom Server")
-        layout = payload.get("layout", {})
+        target_server_id = str(payload.get("target_server_id", "N/A"))
+        invite_link = str(payload.get("invite_link", "N/A"))
+        prompt_desc = str(payload.get("prompt", "No prompt provided"))
 
+        categories_count = payload.get("categories_count", 0)
+        channels_count = payload.get("channels_count", 0)
+        roles_count = payload.get("roles_count", 0)
+
+        account_age = calculate_account_age_days(user_id)
         target_channel = CHANNEL_LOG_PREMIUM_DESIGNS if has_premium else CHANNEL_LOG_NON_PREMIUM_DESIGNS
 
         if BOT_TOKEN and target_channel:
+            embed_fields = [
+                {"name": "User Mention", "value": f"<@{user_id}>", "inline": True},
+                {"name": "User ID", "value": f"`{user_id}`", "inline": True},
+                {"name": "Account Age", "value": f"`{account_age}`", "inline": True},
+                {"name": "Target Guild", "value": f"`{target_server_id}`", "inline": True},
+                {"name": "Invite Link", "value": invite_link, "inline": True},
+                {"name": "Server Overview", "value": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`", "inline": False},
+                {"name": "Prompt Description", "value": f"```{prompt_desc}```", "inline": False}
+            ]
+
             embed = {
-                "title": "PREMIUM AUTO-BUILD DISPATCH" if has_premium else "NEW DESIGN SUBMITTED",
-                "description": (
-                    f"**Creator:** <@{user_id}> (`{user_id}`)\n"
-                    f"**Target Guild ID:** `{target_server_id}`\n"
-                    f"**Server Name:** `{server_name}`\n"
-                    f"**Tier:** {'TE Premium (Auto-Building)' if has_premium else 'Standard Member'}\n"
-                    f"**Categories:** `{payload.get('categories_count', 0)}` | **Channels:** `{payload.get('channels_count', 0)}`"
-                ),
+                "title": "PREMIUM DESIGN BLUEPRINT SUBMITTED" if has_premium else "DESIGN BLUEPRINT SUBMITTED",
                 "color": 0xF1C40F if has_premium else 0x3b82f6,
-                "footer": {"text": f"AUTO_BUILD:{target_server_id}" if has_premium else "Template Engine Review"},
+                "fields": embed_fields,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
@@ -225,9 +295,9 @@ def submit_design_endpoint():
                 "Authorization": f"Bot {BOT_TOKEN}",
                 "Content-Type": "application/json"
             }
-            # Append raw layout payload in content string so bot listener catches it instantly
+
             body = {
-                "content": f"AUTOBUILD_PAYLOAD_START\n```{request.get_data(as_text=True)}```\nAUTOBUILD_PAYLOAD_END",
+                "content": f"AUTOBUILD_PAYLOAD_START\n```{json.dumps(payload, indent=2)}```\nAUTOBUILD_PAYLOAD_END",
                 "embeds": [embed]
             }
             requests.post(url, headers=headers, json=body, timeout=5)
