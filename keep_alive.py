@@ -26,6 +26,10 @@ BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").str
 
 RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
 
+# Dedicated Channel Log IDs
+CHANNEL_LOG_NON_PREMIUM_DESIGNS = "1563524101522464900"
+CHANNEL_LOG_PREMIUM_DESIGNS = "1563544108696477802"
+
 # Roblox Integration Configuration
 ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
 ROBLOX_STORE_URL = (os.getenv("ROBLOX_STORE_URL") or f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store").strip()
@@ -126,22 +130,6 @@ def is_user_premium(user_id: str) -> bool:
         exp = LOCAL_PREMIUM_USERS.get(user_id_str)
         return exp > now if exp else False
 
-def calculate_account_age(discord_id: str) -> str:
-    try:
-        snowflake = int(discord_id)
-        timestamp_ms = (snowflake >> 22) + 1420070400000
-        created_at = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
-        now = datetime.now(timezone.utc)
-
-        days_old = (now - created_at).days
-        if days_old >= 365:
-            years = days_old // 365
-            rem_days = days_old % 365
-            return f"{years} yr{'' if years == 1 else 's'}, {rem_days} day{'' if rem_days == 1 else 's'} ({days_old} days total)"
-        return f"{days_old} day{'' if days_old == 1 else 's'}"
-    except Exception:
-        return "Unknown"
-
 def is_user_banned(user_id):
     if not user_id:
         return None
@@ -210,10 +198,44 @@ def submit_design_endpoint():
         user_id = str(user.get("id"))
         has_premium = is_user_premium(user_id)
 
+        # Build payload for Discord Bot log channel
+        target_server_id = payload.get("target_server_id", "N/A")
+        server_name = payload.get("server_name", "Custom Server")
+        layout = payload.get("layout", {})
+
+        target_channel = CHANNEL_LOG_PREMIUM_DESIGNS if has_premium else CHANNEL_LOG_NON_PREMIUM_DESIGNS
+
+        if BOT_TOKEN and target_channel:
+            embed = {
+                "title": "PREMIUM AUTO-BUILD DISPATCH" if has_premium else "NEW DESIGN SUBMITTED",
+                "description": (
+                    f"**Creator:** <@{user_id}> (`{user_id}`)\n"
+                    f"**Target Guild ID:** `{target_server_id}`\n"
+                    f"**Server Name:** `{server_name}`\n"
+                    f"**Tier:** {'TE Premium (Auto-Building)' if has_premium else 'Standard Member'}\n"
+                    f"**Categories:** `{payload.get('categories_count', 0)}` | **Channels:** `{payload.get('channels_count', 0)}`"
+                ),
+                "color": 0xF1C40F if has_premium else 0x3b82f6,
+                "footer": {"text": f"AUTO_BUILD:{target_server_id}" if has_premium else "Template Engine Review"},
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+            url = f"{DISCORD_API_BASE_URL}/channels/{target_channel}/messages"
+            headers = {
+                "Authorization": f"Bot {BOT_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            # Append raw layout payload in content string so bot listener catches it instantly
+            body = {
+                "content": f"AUTOBUILD_PAYLOAD_START\n```{request.get_data(as_text=True)}```\nAUTOBUILD_PAYLOAD_END",
+                "embeds": [embed]
+            }
+            requests.post(url, headers=headers, json=body, timeout=5)
+
         return jsonify({
             "success": True,
             "is_premium": has_premium,
-            "message": "Design blueprint successfully submitted."
+            "message": "Design blueprint successfully dispatched."
         }), 200
 
     except Exception as e:
