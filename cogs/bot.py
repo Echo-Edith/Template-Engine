@@ -1,5 +1,6 @@
 import os
 import re
+import io
 import json
 import random
 import asyncio
@@ -21,6 +22,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 ROBLOX_COOKIE = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip()
 ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
 ROBLOX_UNIVERSE_ID = (os.getenv("ROBLOX_UNIVERSE_ID") or "").strip()
+CLIENT_ID = (os.getenv("DISCORD_CLIENT_ID") or "").strip()
 
 def get_formatted_roblox_cookie():
     if not ROBLOX_COOKIE:
@@ -74,9 +76,18 @@ def is_user_premium(user_id: str) -> bool:
             return exp > now
         return False
 
-# Core Auto-Build Logic Engine
+def calculate_account_age_days(discord_id: str) -> str:
+    try:
+        snowflake = int(discord_id)
+        timestamp_ms = (snowflake >> 22) + 1420070400000
+        created_at = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        days = (now - created_at).days
+        return f"{days} days"
+    except Exception:
+        return "Unknown"
+
 async def build_layout_for_guild(bot: commands.Bot, guild: discord.Guild, layout_data: dict) -> dict:
-    """Creates all categories and text/voice channels in target server."""
     categories_created = 0
     channels_created = 0
 
@@ -116,6 +127,37 @@ async def build_layout_for_guild(bot: commands.Bot, guild: discord.Guild, layout
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+class RetryBuildView(discord.ui.View):
+    def __init__(self, bot, target_server_id: str, payload: dict):
+        super().__init__(timeout=86400)
+        self.bot = bot
+        self.target_server_id = target_server_id
+        self.payload = payload
+
+        invite_url = f"https://discord.com/api/oauth2/authorize?client_id={CLIENT_ID}&permissions=8&scope=bot%20applications.commands&guild_id={target_server_id}"
+        self.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
+
+    @discord.ui.button(label="Retry Auto-Deploy", style=discord.ButtonStyle.primary, custom_id="btn_retry_autobuild")
+    async def retry_build(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        guild = self.bot.get_guild(int(self.target_server_id))
+        if not guild:
+            await interaction.followup.send(
+                f"The bot is still not present in server ID `{self.target_server_id}`. Please invite the bot first, then click retry.",
+                ephemeral=True
+            )
+            return
+
+        res = await build_layout_for_guild(self.bot, guild, self.payload)
+        if res.get("success"):
+            await interaction.followup.send(
+                f"Auto-build successful! Created {res.get('categories_created')} categories & {res.get('channels_created')} channels in **{guild.name}**.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(f"Auto-build error: `{res.get('error')}`", ephemeral=True)
+
 class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -126,8 +168,7 @@ class BotCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Listens for premium auto-build dispatches sent from the website server."""
-        if message.channel.id != CHANNEL_LOG_PREMIUM_DESIGNS:
+        if message.channel.id != CHANNEL_LOG_PREMIUM_DESIGNS and message.channel.id != CHANNEL_LOG_NON_PREMIUM_DESIGNS:
             return
 
         if "AUTOBUILD_PAYLOAD_START" in message.content:
@@ -135,20 +176,57 @@ class BotCog(commands.Cog):
                 raw_json = message.content.split("```json")[1].split("```")[0].strip() if "```json" in message.content else message.content.split("```")[1].split("```")[0].strip()
                 payload = json.loads(raw_json)
 
+                # Attach blueprint file to the log message
+                blueprint_data = payload.get("layout", payload)
+                json_bytes = json.dumps(blueprint_data, indent=2).encode("utf-8")
+                file_attachment = discord.File(io.BytesIO(json_bytes), filename="blueprint.json")
+
                 target_server_id = payload.get("target_server_id")
-                if not target_server_id or not str(target_server_id).isdigit():
-                    return
+                user_id = message.embeds[0].fields[1].value.strip("`") if message.embeds and len(message.embeds[0].fields) > 1 else None
 
-                guild = self.bot.get_guild(int(target_server_id))
+                guild = self.bot.get_guild(int(target_server_id)) if target_server_id and str(target_server_id).isdigit() else None
+
+                # Bot not in target server -> Notify User via DM & Log Warning in Channel
                 if not guild:
-                    print(f"[Auto-Build] Bot is not in target guild ID: {target_server_id}")
+                    if user_id:
+                        try:
+                            user_obj = await self.bot.fetch_user(int(user_id))
+                            if user_obj:
+                                dm_embed = discord.Embed(
+                                    title="BOT NOT FOUND IN SERVER",
+                                    description=(
+                                        f"Your auto-build request for Target Guild ID `{target_server_id}` could not start because the bot is not in your server.\n\n"
+                                        f"Please click **Add Bot to Server** below to invite it, then click **Retry Auto-Deploy**."
+                                    ),
+                                    color=0xf43f5e
+                                )
+                                view = RetryBuildView(self.bot, str(target_server_id), payload)
+                                await user_obj.send(embed=dm_embed, view=view)
+                        except Exception as dm_err:
+                            print(f"[DM User Error] {dm_err}")
+
+                    log_warn_embed = discord.Embed(
+                        title="AUTO-BUILD PENDING (BOT NOT IN GUILD)",
+                        description=f"User <@{user_id}> submitted a design for Target Guild `{target_server_id}`, but the bot is not present in that server. A DM prompt was sent to the user.",
+                        color=0xf43f5e,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    await message.channel.send(embed=log_warn_embed, file=file_attachment)
                     return
 
+                # Execute auto-build for premium users
                 res = await build_layout_for_guild(self.bot, guild, payload)
                 if res.get("success"):
-                    print(f"[Auto-Build Success] Created {res.get('categories_created')} categories & {res.get('channels_created')} channels in guild {guild.name}")
+                    confirm_embed = discord.Embed(
+                        title="AUTO-BUILD EXECUTED SUCCESSFULLY",
+                        description=f"Created `{res.get('categories_created')}` categories and `{res.get('channels_created')}` channels in **{guild.name}** (`{guild.id}`).",
+                        color=0x2ecc71,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    await message.channel.send(embed=confirm_embed, file=file_attachment)
+
             except Exception as e:
-                print(f"[Auto-Build Execution Error] {e}")
+                print(f"[Auto-Build Execution Exception] {e}")
 
     @tasks.loop(hours=6.0)
     async def scan_roblox_subscriptions(self):
@@ -172,8 +250,6 @@ class BotCog(commands.Cog):
                     data = await resp.json()
 
             subscribers = data.get("subscribers", [])
-            active_roblox_ids = set()
-
             for sub in subscribers:
                 roblox_id = str(sub.get("user", {}).get("id"))
                 state = str(sub.get("state", "")).upper()
@@ -181,8 +257,6 @@ class BotCog(commands.Cog):
 
                 if not roblox_id:
                     continue
-
-                active_roblox_ids.add(roblox_id)
 
                 record = db_sub_tracker.find_one({"roblox_id": roblox_id}) if db_sub_tracker is not None else LOCAL_SUB_TRACKER.get(roblox_id)
 
@@ -202,38 +276,11 @@ class BotCog(commands.Cog):
 
                     embed = discord.Embed(
                         title="NEW SUBSCRIPTION DETECTED",
-                        description=f"**Roblox User ID:** `{roblox_id}`\n**State:** `{state}`\n**Cycle Expires:** `{expiration_raw or 'N/A'}`",
+                        description=f"Roblox User ID: `{roblox_id}`\nState: `{state}`\nExpiration: `{expiration_raw or 'N/A'}`",
                         color=0x2ecc71,
                         timestamp=now
                     )
-                    embed.set_footer(text="Roblox Subscription System - New Purchase")
                     await log_channel.send(embed=embed)
-
-                else:
-                    old_expiration = record.get("expiration_time")
-
-                    if expiration_raw and old_expiration and expiration_raw != old_expiration and state in ["ACTIVE", "RENEWING"]:
-                        renew_count = record.get("renew_count", 0) + 1
-                        update_fields = {
-                            "state": state,
-                            "last_seen": now.isoformat(),
-                            "expiration_time": expiration_raw,
-                            "renew_count": renew_count,
-                            "logged_expired": False
-                        }
-                        if db_sub_tracker is not None:
-                            db_sub_tracker.update_one({"roblox_id": roblox_id}, {"$set": update_fields})
-                        else:
-                            LOCAL_SUB_TRACKER[roblox_id].update(update_fields)
-
-                        embed = discord.Embed(
-                            title="SUBSCRIPTION RENEWED",
-                            description=f"**Roblox User ID:** `{roblox_id}`\n**Renewal Count:** `#{renew_count}`\n**New Cycle Expiration:** `{expiration_raw}`",
-                            color=0x8b5cf6,
-                            timestamp=now
-                        )
-                        embed.set_footer(text="Roblox Subscription System - Automatic Renewal")
-                        await log_channel.send(embed=embed)
 
         except Exception as e:
             print(f"[Subscription Scanner Exception] {e}")
