@@ -856,22 +856,8 @@ function applyPremiumTheme() {
 
 let currentLayout = {
     server_name: "New Server",
-    roles: [
-        { name: "Owner", color: "#f1c40f" },
-        { name: "Admin", color: "#e74c3c" },
-        { name: "Member", color: "#2ecc71" }
-    ],
-    categories: [
-        {
-            name: "INFORMATION",
-            emoji: "📌",
-            permissions: {},
-            channels: [
-                { name: "welcome", emoji: "👋", type: "text", topic: "Welcome channel", read_only: false, permissions: {} },
-                { name: "announcements", emoji: "📢", type: "text", topic: "Server updates", read_only: true, permissions: {} }
-            ]
-        }
-    ]
+    roles: [],
+    categories: []
 };
 
 let activeCatIdx = 0;
@@ -947,21 +933,22 @@ async function handleAIGeneration() {
             })
         });
 
-        if (response.ok) {
-            const result = await response.json();
-            if (result.success && result.blueprint) {
-                currentLayout = result.blueprint;
-            }
+        const result = await response.json();
+        if (response.ok && result.success && result.blueprint) {
+            currentLayout = result.blueprint;
+            activeCatIdx = 0;
+            activeChanIdx = 0;
+            renderDashboard();
+            navigateTo('page-layout');
+        } else {
+            alert(result.error || 'AI layout generation failed. Please try again.');
         }
     } catch (err) {
         console.error('AI endpoint request error:', err);
+        alert('An error occurred during AI generation. Please check your connection.');
     } finally {
         btn.disabled = false;
         btn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> <span>Generate Server Layout</span>`;
-        activeCatIdx = 0;
-        activeChanIdx = 0;
-        renderDashboard();
-        navigateTo('page-layout');
     }
 }
 
@@ -1254,7 +1241,7 @@ async function handleSubmitDesign() {
         const heading = document.getElementById('final-title-heading');
         const desc = document.getElementById('final-desc-text');
         if (resData.is_premium) {
-            if (heading) heading.innerText = "👑 TE Premium Design Dispatched!";
+            if (heading) heading.innerText = "TE Premium Design Dispatched!";
             if (desc) desc.innerText = "Your layout blueprint has been sent directly to the bot for auto-deployment!";
         } else {
             if (heading) heading.innerText = "Blueprint Submitted to Staff!";
