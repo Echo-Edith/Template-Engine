@@ -27,7 +27,7 @@ function checkAuthStatus() {
     
     if (!IS_ROBLOX_LINKED) {
         if (btn) btn.disabled = true;
-        if (label) label.innerText = "Verify Roblox via Discord First (/verification-set)";
+        if (label) label.innerText = "Sync Roblox Account in Discord Server First";
         return;
     }
     
@@ -641,7 +641,7 @@ display: inline-block;
 <div class="editor-card" style="margin-bottom: 12px; text-align:center; background: rgba(255,255,255,0.02);">
 <i class="fa-solid fa-link" style="color: var(--accent-purple); font-size: 1.2rem; margin-bottom: 8px;"></i>
 <span style="font-weight: 600; font-size: 0.88rem; display:block; margin-bottom: 4px;">Roblox Sync Required</span>
-<p style="font-size:0.78rem; color: var(--text-sub);">Use <code>/verification-set</code> in your Discord server to link your Roblox profile once.</p>
+<p style="font-size:0.78rem; color: var(--text-sub);">Go to the Template Engine Discord server and head over to <code>#account-sync</code> to sync your Roblox profile.</p>
 </div>
 {% endif %}
 {% endif %}
@@ -1272,3 +1272,8 @@ function resetBuilder() {
 </script>
 </body>
 </html>
+```
+
+### Summary of Updates:
+- Updated the card description on Page 1 to state: **"Go to the Template Engine Discord server and head over to `#account-sync` to sync your Roblox profile."**
+- Updated the verification status label on Page 1 to **"Sync Roblox Account in Discord Server First"**.
