@@ -654,7 +654,7 @@ display: inline-block;
 </a>
 {% endif %}
 
-<!-- ADD BOT BUTTON FOR PREMIUM USERS (LANDING PAGE) -->
+<!-- ADD BOT BUTTON FOR PREMIUM USERS (LANDING PAGE ONLY) -->
 {% if user and is_premium and discord_client_id %}
 <a id="landing-bot-invite-btn" href="https://discord.com/api/oauth2/authorize?client_id={{ discord_client_id }}&permissions=8&scope=bot%20applications.commands" target="_blank" class="btn-glass btn-premium">
 <i class="fa-brands fa-discord fa-lg"></i> Add Bot to Server (Auto-Build)
@@ -791,9 +791,6 @@ display: inline-block;
 <h1 id="final-title-heading">Blueprint Submitted!</h1>
 <p id="final-desc-text">Your blueprint has been sent to staff for deployment review.</p>
 </div>
-<a id="bot-invite-btn" href="#" target="_blank" class="btn-glass" style="margin-bottom: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--accent-purple); text-decoration: none;">
-<i class="fa-brands fa-discord"></i> Add Bot to Server
-</a>
 <button class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="resetBuilder()" style="margin-top: 10px;">
 Start New Layout
 </button>
@@ -954,8 +951,6 @@ async function handleAIGeneration() {
             const result = await response.json();
             if (result.success && result.blueprint) {
                 currentLayout = result.blueprint;
-            } else if (result.error) {
-                console.warn('AI generation server message:', result.error);
             }
         }
     } catch (err) {
@@ -1086,8 +1081,8 @@ function deleteCategory(cIdx) {
 
 function deleteChannel(cIdx, chIdx) {
     currentLayout.categories[cIdx].channels.splice(chIdx, 1);
-    if (activeChanIdx >= currentLayout.categories[cIdx].channels.length) {
-        activeChanIdx = Math.max(0, currentLayout.categories[cIdx].channels.length - 1);
+    if (activeChanIdx >= currentLayout.categories.length) {
+        activeChanIdx = Math.max(0, currentLayout.categories.length - 1);
     }
     renderDashboard();
 }
@@ -1199,9 +1194,6 @@ function updateBotInviteLink() {
     
     const landingBtn = document.getElementById('landing-bot-invite-btn');
     if (landingBtn) landingBtn.href = inviteUrl;
-
-    const finalBtn = document.getElementById('bot-invite-btn');
-    if (finalBtn) finalBtn.href = inviteUrl;
 }
 
 function handleInitialSubmitClick() {
