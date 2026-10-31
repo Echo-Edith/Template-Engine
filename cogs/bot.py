@@ -76,17 +76,6 @@ def is_user_premium(user_id: str) -> bool:
             return exp > now
         return False
 
-def calculate_account_age_days(discord_id: str) -> str:
-    try:
-        snowflake = int(discord_id)
-        timestamp_ms = (snowflake >> 22) + 1420070400000
-        created_at = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
-        now = datetime.now(timezone.utc)
-        days = (now - created_at).days
-        return f"{days} days"
-    except Exception:
-        return "Unknown"
-
 async def build_layout_for_guild(bot: commands.Bot, guild: discord.Guild, layout_data: dict) -> dict:
     categories_created = 0
     channels_created = 0
@@ -168,50 +157,68 @@ class BotCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        if message.author == self.bot.user:
+            return
+
         if message.channel.id != CHANNEL_LOG_PREMIUM_DESIGNS and message.channel.id != CHANNEL_LOG_NON_PREMIUM_DESIGNS:
             return
 
         if "AUTOBUILD_PAYLOAD_START" in message.content:
             try:
-                raw_json = message.content.split("```json")[1].split("```")[0].strip() if "```json" in message.content else message.content.split("```")[1].split("```")[0].strip()
-                payload = json.loads(raw_json)
+                # Robust extraction of the JSON block payload
+                raw_match = re.search(r"AUTOBUILD_PAYLOAD_START```json\s*(.*?)\s*```AUTOBUILD_PAYLOAD_END", message.content, re.DOTALL)
+                if not raw_match:
+                    raw_match = re.search(r"```json\s*(.*?)\s*```", message.content, re.DOTALL)
+                
+                if not raw_match:
+                    return
 
-                # Attach blueprint file to the log message
+                payload = json.loads(raw_match.group(1).strip())
+
+                # Prepare file attachment
                 blueprint_data = payload.get("layout", payload)
                 json_bytes = json.dumps(blueprint_data, indent=2).encode("utf-8")
                 file_attachment = discord.File(io.BytesIO(json_bytes), filename="blueprint.json")
 
                 target_server_id = payload.get("target_server_id")
-                user_id = message.embeds[0].fields[1].value.strip("`") if message.embeds and len(message.embeds[0].fields) > 1 else None
+                user_id = payload.get("submitting_user_id")
+                is_premium = payload.get("is_premium", False)
+
+                # Send blueprint JSON file to channel
+                await message.channel.send(file=file_attachment)
+
+                # Auto-build functionality is strictly for Premium Users
+                if not is_premium:
+                    return
 
                 guild = self.bot.get_guild(int(target_server_id)) if target_server_id and str(target_server_id).isdigit() else None
 
-                # Bot not in target server -> Notify User via DM & Log Warning in Channel
+                # Bot not in target server -> Notify user via DM and post alert in channel
                 if not guild:
                     if user_id:
                         try:
                             user_obj = await self.bot.fetch_user(int(user_id))
                             if user_obj:
                                 dm_embed = discord.Embed(
-                                    title="BOT NOT FOUND IN SERVER",
+                                    title="BOT NOT FOUND IN TARGET SERVER",
                                     description=(
-                                        f"Your auto-build request for Target Guild ID `{target_server_id}` could not start because the bot is not in your server.\n\n"
-                                        f"Please click **Add Bot to Server** below to invite it, then click **Retry Auto-Deploy**."
+                                        f"Your auto-build request for Target Guild ID `{target_server_id}` could not start because the bot is not present in that server.\n\n"
+                                        f"Please click **Add Bot to Server** below to invite the bot, then click **Retry Auto-Deploy**."
                                     ),
                                     color=0xf43f5e
                                 )
                                 view = RetryBuildView(self.bot, str(target_server_id), payload)
                                 await user_obj.send(embed=dm_embed, view=view)
                         except Exception as dm_err:
-                            print(f"[DM User Error] {dm_err}")
+                            print(f"[DM User Warning Error] {dm_err}")
 
                     log_warn_embed = discord.Embed(
-                        title="AUTO-BUILD PENDING (BOT NOT IN GUILD)",
-                        description=f"User <@{user_id}> submitted a design for Target Guild `{target_server_id}`, but the bot is not present in that server. A DM prompt was sent to the user.",
+                        title="AUTO-BUILD PENDING (BOT NOT IN SERVER)",
+                        description=f"User <@{user_id}> submitted a premium design for Target Guild `{target_server_id}`, but the bot is not in that server. Direct Message notification sent to user.",
                         color=0xf43f5e,
                         timestamp=datetime.now(timezone.utc)
                     )
-                    await message.channel.send(embed=log_warn_embed, file=file_attachment)
+                    await message.channel.send(embed=log_warn_embed)
                     return
 
                 # Execute auto-build for premium users
@@ -223,7 +230,7 @@ class BotCog(commands.Cog):
                         color=0x2ecc71,
                         timestamp=datetime.now(timezone.utc)
                     )
-                    await message.channel.send(embed=confirm_embed, file=file_attachment)
+                    await message.channel.send(embed=confirm_embed)
 
             except Exception as e:
                 print(f"[Auto-Build Execution Exception] {e}")
