@@ -338,6 +338,13 @@ def generate_blueprint_endpoint():
 
                 if ai_result.get("success") and ai_result.get("data"):
                     blueprint_data = ai_result["data"]
+
+                    # Ensure every channel has a non-empty clean name fallback
+                    for cat in blueprint_data.get("categories", []):
+                        for chan in cat.get("channels", []):
+                            if not chan.get("name"):
+                                chan["name"] = chan.get("formatted_name") or "general-channel"
+
                     return jsonify({"success": True, "blueprint": blueprint_data}), 200
                 elif ai_result.get("error"):
                     print(f"[ai_brain Warning] {ai_result['error']}")
