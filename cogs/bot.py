@@ -80,12 +80,15 @@ class BotCog(commands.Cog):
         action: app_commands.Choice[str],
         duration: str = "30d"
     ):
+        # Immediately defer to prevent Discord 3-second timeout ("Application did not respond")
+        await interaction.response.defer(ephemeral=True)
+
         # Permission check: Only Bot Owner or Users with Manage Server / Administrator permissions
         is_owner = (interaction.user.id == BOT_OWNER_ID)
         is_admin = interaction.permissions.administrator or interaction.permissions.manage_guild
 
         if not (is_owner or is_admin):
-            await interaction.response.send_message("❌ You do not have permission to use this command.", ephemeral=True)
+            await interaction.followup.send("❌ You do not have permission to use this command.", ephemeral=True)
             return
 
         user_id_str = str(user.id)
@@ -105,7 +108,7 @@ class BotCog(commands.Cog):
                 description=f"Successfully granted **TE Premium** to {user.mention} (`{user.id}`).\n\n**Duration:** `{duration}`\n**Expires:** {exp_str}",
                 color=0xF1C40F
             )
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
         elif action.value == "remove":
             remove_user_premium(user_id_str)
@@ -114,7 +117,7 @@ class BotCog(commands.Cog):
                 description=f"Successfully revoked **TE Premium** from {user.mention} (`{user.id}`).",
                 color=0xF43F5E
             )
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -------------------------------------------------------------
     # SUB-ROUTINE: NUKE TARGET SERVER BEFORE AUTO-BUILDING
