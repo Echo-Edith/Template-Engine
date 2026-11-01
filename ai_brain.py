@@ -57,8 +57,12 @@ GEMINI_MODELS = [
 
 # --- HELPER FUNCTIONS ---
 def strip_emojis(text: str) -> str:
-    """Removes emojis from channel or category name strings to prevent duplicate visual rendering."""
-    return re.sub(r'[\u1F600-\u1F64F\u1F300-\u1F5FF\u1F680-\u1F6FF\u2600-\u26FF\u2700-\u27BF]', '', text or '').strip()
+    """Removes emojis from strings while strictly preserving regular alphanumeric character text."""
+    if not text:
+        return ""
+    # Use accurate 32-bit unicode surrogate ranges to strip emojis without affecting ASCII text
+    clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27ff\u2300-\u23ff]', '', text)
+    return clean.strip()
 
 
 def calculate_account_age(discord_id: str) -> str:
@@ -222,10 +226,16 @@ async def generate_server_layout(
     # Process layout formatting
     sep = channel_separator.strip() if channel_separator else ""
     for category in layout_data.get("categories", []):
-        category["name"] = strip_emojis(category.get("name", ""))
+        cat_name = category.get("name", "")
+        cleaned_cat = strip_emojis(cat_name)
+        category["name"] = cleaned_cat if cleaned_cat else cat_name
         
         for channel in category.get("channels", []):
-            clean_name = strip_emojis(channel.get("name", ""))
+            raw_name = channel.get("name") or channel.get("clean_name") or channel.get("title") or ""
+            clean_name = strip_emojis(raw_name)
+            if not clean_name:
+                clean_name = raw_name.lower().replace(" ", "-")
+                
             emoji = channel.get("emoji", "💬")
             channel["name"] = clean_name
 
