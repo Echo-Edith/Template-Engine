@@ -89,7 +89,13 @@ class BotCog(commands.Cog):
                     if not target_guild_id or target_guild_id == "N/A" or target_guild_id == "Unknown":
                         return
 
+                    # 1. FETCH GUILD (Cache + API Fallback)
                     guild = self.bot.get_guild(int(target_guild_id))
+                    if not guild:
+                        try:
+                            guild = await self.bot.fetch_guild(int(target_guild_id))
+                        except Exception:
+                            guild = None
 
                     # IF BOT IS NOT IN TARGET GUILD
                     if not guild:
@@ -102,7 +108,7 @@ class BotCog(commands.Cog):
                                     
                                     dm_embed = discord.Embed(
                                         title="Bot Required to Auto-Build Server",
-                                        description=f"The Template Engine bot is not currently in server `{target_guild_id}`.\n\nPlease add the bot to your server using the button below and click **Retry Auto-Deploy**.",
+                                        description=f"The Template Engine bot is not currently in server `{target_guild_id}`.\n\nPlease add the bot to your server using the button below and retry.",
                                         color=discord.Color.gold()
                                     )
                                     
@@ -113,7 +119,39 @@ class BotCog(commands.Cog):
                                 print(f"[DM Error] Could not DM user: {dm_err}")
                         return
 
-                    # BOT IS IN GUILD -> EXECUTE AUTOMATIC BUILDING
+                    # 2. CHECK IF SUBMITTING USER IS SERVER OWNER OR ADMIN
+                    if user_id:
+                        try:
+                            member = await guild.fetch_member(int(user_id))
+                            is_owner = (guild.owner_id == member.id)
+                            is_admin = member.guild_permissions.administrator or is_owner
+
+                            if not is_admin:
+                                print(f"[Auto-Build Blocked] User {user_id} is not an Admin or Owner in {guild.id}")
+                                user_obj = await self.bot.fetch_user(int(user_id))
+                                if user_obj:
+                                    admin_embed = discord.Embed(
+                                        title="Administrator Permissions Required",
+                                        description=f"Auto-build cancelled. You must be the **Server Owner** or have **Administrator** permissions in **{guild.name}** to deploy server layouts.",
+                                        color=discord.Color.red()
+                                    )
+                                    await user_obj.send(embed=admin_embed)
+                                return
+                        except discord.NotFound:
+                            print(f"[Auto-Build Blocked] User {user_id} is not a member of guild {guild.id}")
+                            user_obj = await self.bot.fetch_user(int(user_id))
+                            if user_obj:
+                                not_member_embed = discord.Embed(
+                                    title="Not a Server Member",
+                                    description=f"Auto-build cancelled. You are not a member of server `{guild.id}`.",
+                                    color=discord.Color.red()
+                                )
+                                await user_obj.send(embed=not_member_embed)
+                            return
+                        except Exception as perm_err:
+                            print(f"[Permission Check Warning] {perm_err}")
+
+                    # BOT IS IN GUILD & USER IS AUTHORIZED -> EXECUTE AUTOMATIC BUILDING
                     print(f"[Auto-Build] Starting layout deployment for guild {guild.name} ({guild.id})")
                     
                     # 1. Create Roles
@@ -129,25 +167,34 @@ class BotCog(commands.Cog):
                         
                         existing_role = discord.utils.get(guild.roles, name=r_name)
                         if not existing_role:
-                            new_role = await guild.create_role(name=r_name, color=color_obj)
-                            role_map[r_name] = new_role
+                            try:
+                                new_role = await guild.create_role(name=r_name, color=color_obj)
+                                role_map[r_name] = new_role
+                            except Exception as r_err:
+                                print(f"[Role Create Warning] {r_err}")
                         else:
                             role_map[r_name] = existing_role
 
                     # 2. Create Categories & Channels
                     for cat_data in layout.get("categories", []):
                         cat_name = cat_data.get("name", "CATEGORY")
-                        category = await guild.create_category(name=cat_name)
+                        try:
+                            category = await guild.create_category(name=cat_name)
 
-                        for chan_data in cat_data.get("channels", []):
-                            ch_name = chan_data.get("name", "channel")
-                            ch_type = chan_data.get("type", "text")
-                            ch_topic = chan_data.get("topic", "")
+                            for chan_data in cat_data.get("channels", []):
+                                ch_name = chan_data.get("name", "channel")
+                                ch_type = chan_data.get("type", "text")
+                                ch_topic = chan_data.get("topic", "")
 
-                            if ch_type == "voice":
-                                await guild.create_voice_channel(name=ch_name, category=category)
-                            else:
-                                await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
+                                try:
+                                    if ch_type == "voice":
+                                        await guild.create_voice_channel(name=ch_name, category=category)
+                                    else:
+                                        await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
+                                except Exception as ch_err:
+                                    print(f"[Channel Create Warning] {ch_err}")
+                        except Exception as cat_err:
+                            print(f"[Category Create Warning] {cat_err}")
 
                     print(f"[Auto-Build Complete] Successfully built layout for {guild.name}")
 
