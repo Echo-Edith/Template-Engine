@@ -1,4 +1,4 @@
-import os
+cimport os
 import json
 import requests
 from datetime import datetime, timezone, timedelta
@@ -338,11 +338,10 @@ def submit_design_endpoint():
             payload["is_premium"] = has_premium
             json_bytes = json.dumps(payload, indent=2).encode("utf-8")
 
-            # Post via multipart/form-data to include both embed and file without exceeding character limits
+            # Post clean embed UI only (no message content text) with blueprint attachment
             files = {
                 "files[0]": ("blueprint.json", json_bytes, "application/json"),
                 "payload_json": (None, json.dumps({
-                    "content": f"PAYLOAD_ATTACHED | TargetGuild:{target_server_id} | User:{user_id}",
                     "embeds": [embed]
                 }), "application/json")
             }
