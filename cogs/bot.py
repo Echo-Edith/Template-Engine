@@ -163,29 +163,30 @@ class BotCog(commands.Cog):
         if message.channel.id != CHANNEL_LOG_PREMIUM_DESIGNS and message.channel.id != CHANNEL_LOG_NON_PREMIUM_DESIGNS:
             return
 
-        if "AUTOBUILD_PAYLOAD_START" in message.content:
+        # Check for attached blueprint or payload identifier
+        if "PAYLOAD_ATTACHED" in message.content or message.attachments:
             try:
-                # Robust extraction of the JSON block payload
-                raw_match = re.search(r"AUTOBUILD_PAYLOAD_START```json\s*(.*?)\s*```AUTOBUILD_PAYLOAD_END", message.content, re.DOTALL)
-                if not raw_match:
-                    raw_match = re.search(r"```json\s*(.*?)\s*```", message.content, re.DOTALL)
+                payload = None
                 
-                if not raw_match:
+                # Check for attached blueprint.json file
+                for attachment in message.attachments:
+                    if attachment.filename.endswith(".json"):
+                        file_bytes = await attachment.read()
+                        payload = json.loads(file_bytes.decode("utf-8"))
+                        break
+
+                # Fallback: Parse from inline content if present
+                if not payload and "AUTOBUILD_PAYLOAD_START" in message.content:
+                    raw_match = re.search(r"AUTOBUILD_PAYLOAD_START```json\s*(.*?)\s*```AUTOBUILD_PAYLOAD_END", message.content, re.DOTALL)
+                    if raw_match:
+                        payload = json.loads(raw_match.group(1).strip())
+
+                if not payload:
                     return
-
-                payload = json.loads(raw_match.group(1).strip())
-
-                # Prepare file attachment
-                blueprint_data = payload.get("layout", payload)
-                json_bytes = json.dumps(blueprint_data, indent=2).encode("utf-8")
-                file_attachment = discord.File(io.BytesIO(json_bytes), filename="blueprint.json")
 
                 target_server_id = payload.get("target_server_id")
                 user_id = payload.get("submitting_user_id")
                 is_premium = payload.get("is_premium", False)
-
-                # Send blueprint JSON file to channel
-                await message.channel.send(file=file_attachment)
 
                 # Auto-build functionality is strictly for Premium Users
                 if not is_premium:
@@ -231,6 +232,13 @@ class BotCog(commands.Cog):
                         timestamp=datetime.now(timezone.utc)
                     )
                     await message.channel.send(embed=confirm_embed)
+                else:
+                    err_embed = discord.Embed(
+                        title="AUTO-BUILD FAILED",
+                        description=f"Failed to build channels in **{guild.name}**: `{res.get('error')}`",
+                        color=0xf43f5e
+                    )
+                    await message.channel.send(embed=err_embed)
 
             except Exception as e:
                 print(f"[Auto-Build Execution Exception] {e}")
