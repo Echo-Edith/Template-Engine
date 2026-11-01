@@ -13,14 +13,16 @@ from pymongo import MongoClient
 BOT_OWNER_ID = 1219266886143967245
 MAIN_GUILD_ID = 1284513257574629458
 
-PREMIUM_SCAN_CHANNEL_ID = "1563544108696477802"
+PREMIUM_DESIGN_CHANNEL_ID = 1563544108696477802
+NON_PREMIUM_DESIGN_CHANNEL_ID = 1563524101522464900
+WEBSITE_LOGIN_CHANNEL_ID = 1563524100276617248
+SUBSCRIPTION_LOG_CHANNEL_ID = 1564262413514182739
 
 MONGO_URI = os.getenv("MONGO_URI")
 
 db_premium = None
-db_authorized_builders = None
+db_build_auth = None
 db_users = None
-db_stats = None
 
 if MONGO_URI:
     try:
@@ -30,206 +32,278 @@ if MONGO_URI:
         except Exception:
             db = mongo_client.get_database("static_studio_db")
         db_premium = db["premium_users"]
-        db_authorized_builders = db["build_authorized_users"]
+        db_build_auth = db["build_authorized_users"]
         db_users = db["persistent_users"]
-        db_stats = db["stats"]
     except Exception as e:
-        print(f"[MongoDB Warning] Could not connect to Mongo: {e}")
+        print(f"[MongoDB Warning] {e}")
 
 LOCAL_PREMIUM_USERS = {}
 LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
 
-def is_user_premium(user_id: str) -> bool:
-    if not user_id:
-        return False
-    user_id_str = str(user_id)
-    now = datetime.now(timezone.utc)
 
-    if db_premium is not None:
-        try:
-            doc = db_premium.find_one({"user_id": user_id_str})
-            if doc and "expires_at" in doc:
-                expires_at = doc["expires_at"]
-                if isinstance(expires_at, str):
-                    expires_at = datetime.fromisoformat(expires_at)
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=timezone.utc)
-                return expires_at > now
-        except Exception:
-            return False
-        return False
-    else:
-        exp = LOCAL_PREMIUM_USERS.get(user_id_str)
-        return exp > now if exp else False
+def strip_emojis(text: str) -> str:
+    if not text:
+        return ""
+    clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27ff\u2300-\u23ff]', '', str(text))
+    return clean.strip()
+
+
+def format_channel_name(name: str) -> str:
+    clean = strip_emojis(name)
+    if not clean:
+        clean = str(name).strip()
+    return clean.lower().replace(" ", "-")
+
 
 class BotCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    # -------------------------------------------------------------
+    # SLASH COMMAND: SET / REVOKE PREMIUM STATUS
+    # -------------------------------------------------------------
+    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium status for a user.")
+    @app_commands.describe(
+        user="The user to update premium status for",
+        action="Choose whether to grant ('add') or revoke ('remove') premium",
+        duration="Duration if adding (e.g. 1d, 7d, 30d, 1y, inf). Default is 30d."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Grant Premium", value="add"),
+        app_commands.Choice(name="Revoke Premium", value="remove")
+    ])
+    async def premium_set(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        action: app_commands.Choice[str],
+        duration: str = "30d"
+    ):
+        # Permission check: Only Bot Owner or Users with Manage Server / Administrator permissions
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator or interaction.permissions.manage_guild
+
+        if not (is_owner or is_admin):
+            await interaction.response.send_message("❌ You do not have permission to use this command.", ephemeral=True)
+            return
+
+        user_id_str = str(user.id)
+
+        if action.value == "add":
+            parsed_td = parse_duration_to_timedelta(duration)
+            set_user_premium(user_id_str, parsed_td)
+
+            if parsed_td == timedelta(days=36500):
+                exp_str = "Lifetime (Permanent)"
+            else:
+                exp_date = datetime.now(timezone.utc) + parsed_td
+                exp_str = f"<t:{int(exp_date.timestamp())}:R>"
+
+            embed = discord.Embed(
+                title="⭐ TE Premium Granted",
+                description=f"Successfully granted **TE Premium** to {user.mention} (`{user.id}`).\n\n**Duration:** `{duration}`\n**Expires:** {exp_str}",
+                color=0xF1C40F
+            )
+            await interaction.response.send_message(embed=embed)
+
+        elif action.value == "remove":
+            remove_user_premium(user_id_str)
+            embed = discord.Embed(
+                title="🗑️ TE Premium Revoked",
+                description=f"Successfully revoked **TE Premium** from {user.mention} (`{user.id}`).",
+                color=0xF43F5E
+            )
+            await interaction.response.send_message(embed=embed)
+
+    # -------------------------------------------------------------
+    # SUB-ROUTINE: NUKE TARGET SERVER BEFORE AUTO-BUILDING
+    # -------------------------------------------------------------
+    async def nuke_guild_structure(self, guild: discord.Guild):
+        """Removes all existing channels, categories, and custom roles."""
+        print(f"[Nuke Engine] Nuking channels and roles for guild: {guild.name} ({guild.id})")
+        for channel in list(guild.channels):
+            try:
+                await channel.delete(reason="Template Engine Auto-Build Server Reset")
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                print(f"[Nuke Warning] Could not delete channel {channel.name}: {e}")
+
+        for role in list(guild.roles):
+            if role.is_default() or role.managed:
+                continue
+            try:
+                await role.delete(reason="Template Engine Auto-Build Server Reset")
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                print(f"[Nuke Warning] Could not delete role {role.name}: {e}")
+
+    # -------------------------------------------------------------
+    # LISTEN FOR PREMIUM AUTO-BUILD LOG MESSAGES
+    # -------------------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Scan premium design log channel (1563544108696477802)
-        if str(message.channel.id) == PREMIUM_SCAN_CHANNEL_ID:
-            json_attachment = None
-            for attachment in message.attachments:
-                if attachment.filename.endswith(".json"):
-                    json_attachment = attachment
-                    break
+        if str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
+            return
 
-            if json_attachment:
+        json_attachment = None
+        for attachment in message.attachments:
+            if attachment.filename.endswith(".json"):
+                json_attachment = attachment
+                break
+
+        if not json_attachment:
+            return
+
+        try:
+            attachment_bytes = await json_attachment.read()
+            payload = json.loads(attachment_bytes.decode("utf-8"))
+        except Exception as e:
+            print(f"[Auto-Build Parsing Error] Could not read JSON attachment: {e}")
+            return
+
+        submitting_user_id = str(payload.get("submitting_user_id", "0"))
+        target_guild_id = str(payload.get("target_server_id", "0")).strip()
+        layout = payload.get("layout", {})
+
+        if not target_guild_id or target_guild_id == "0":
+            print("[Auto-Build Error] Target server ID is missing or 0.")
+            return
+
+        # 1. Fetch Target Guild via Cache or Discord API
+        guild = self.bot.get_guild(int(target_guild_id))
+        if not guild:
+            try:
+                guild = await self.bot.fetch_guild(int(target_guild_id))
+            except Exception as fetch_err:
+                print(f"[Auto-Build Fetch Error] Could not fetch target guild {target_guild_id}: {fetch_err}")
+                guild = None
+
+        if not guild:
+            await self.notify_missing_bot(submitting_user_id, target_guild_id)
+            return
+
+        # 2. Verify User Admin / Owner Rights in Target Guild
+        try:
+            member = await guild.fetch_member(int(submitting_user_id))
+        except Exception:
+            member = None
+
+        if not member:
+            await self.notify_user_permission_failed(submitting_user_id, target_guild_id, "User is not a member of the target server.")
+            return
+
+        is_owner = (guild.owner_id == member.id)
+        is_admin = member.guild_permissions.administrator
+
+        if not (is_owner or is_admin):
+            await self.notify_user_permission_failed(submitting_user_id, target_guild_id, "User lacks Administrator or Server Owner permissions in target server.")
+            return
+
+        # 3. Execute Nuke and Clean Auto-Build Deployment
+        print(f"[Auto-Build] Deploying layout to {guild.name} ({guild.id}) for user {submitting_user_id}")
+        await self.execute_auto_build(guild, layout)
+
+    async def notify_missing_bot(self, user_id: str, target_guild_id: str):
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+            if user:
+                embed = discord.Embed(
+                    title="Bot Missing in Target Server",
+                    description=f"Auto-deployment paused. The bot is not present in target server ID `{target_guild_id}`.\n\nPlease add the bot using the link below.",
+                    color=0xF43F5E
+                )
+                invite_url = f"https://discord.com/api/oauth2/authorize?client_id={self.bot.user.id}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
+                view = discord.ui.View()
+                view.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
+                await user.send(embed=embed, view=view)
+        except Exception as e:
+            print(f"[DM Warning] Failed sending DM to {user_id}: {e}")
+
+    async def notify_user_permission_failed(self, user_id: str, target_guild_id: str, reason: str):
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+            if user:
+                embed = discord.Embed(
+                    title="Auto-Build Deployment Cancelled",
+                    description=f"Cannot deploy layout to target server ID `{target_guild_id}`.\n\n**Reason:** {reason}",
+                    color=0xF43F5E
+                )
+                await user.send(embed=embed)
+        except Exception as e:
+            print(f"[DM Warning] Failed sending DM to {user_id}: {e}")
+
+    async def execute_auto_build(self, guild: discord.Guild, layout: dict):
+        try:
+            # Step 1: Nuke target server
+            await self.nuke_guild_structure(guild)
+
+            created_roles = {}
+            roles_data = layout.get("roles", [])
+
+            # Step 2: Create Roles
+            for r_info in roles_data:
+                role_name = strip_emojis(r_info.get("name", "Role"))
+                if not role_name:
+                    role_name = str(r_info.get("name", "Role"))
+                color_hex = str(r_info.get("color", "#8b5cf6")).lstrip('#')
                 try:
-                    content_bytes = await json_attachment.read()
-                    payload = json.loads(content_bytes.decode('utf-8'))
+                    color_int = int(color_hex, 16)
+                except ValueError:
+                    color_int = 0x8b5cf6
 
-                    target_guild_id = payload.get("target_server_id")
-                    user_id = payload.get("submitting_user_id")
-                    layout = payload.get("layout", {})
+                try:
+                    role = await guild.create_role(
+                        name=role_name,
+                        color=discord.Color(color_int),
+                        reason="Template Engine Auto-Build"
+                    )
+                    created_roles[role_name] = role
+                    await asyncio.sleep(0.2)
+                except Exception as e:
+                    print(f"[Auto-Build Role Error] {role_name}: {e}")
 
-                    if not target_guild_id or target_guild_id == "N/A" or target_guild_id == "Unknown":
-                        return
+            # Step 3: Create Categories & Channels
+            categories = layout.get("categories", [])
+            for cat_data in categories:
+                cat_raw_name = cat_data.get("name", "CATEGORY")
+                cat_emoji = cat_data.get("emoji", "")
+                cat_clean_name = strip_emojis(cat_raw_name) or cat_raw_name
+                cat_display = f"{cat_emoji} {cat_clean_name}".strip() if cat_emoji else cat_clean_name
 
-                    # 1. FETCH GUILD (Cache + API Fallback)
-                    guild = self.bot.get_guild(int(target_guild_id))
-                    if not guild:
-                        try:
-                            guild = await self.bot.fetch_guild(int(target_guild_id))
-                        except Exception:
-                            guild = None
+                try:
+                    category = await guild.create_category(
+                        name=cat_display,
+                        reason="Template Engine Auto-Build"
+                    )
+                    await asyncio.sleep(0.2)
 
-                    # IF BOT IS NOT IN TARGET GUILD
-                    if not guild:
-                        print(f"[Auto-Build Warning] Bot is not in target guild: {target_guild_id}")
-                        if user_id:
-                            try:
-                                user_obj = await self.bot.fetch_user(int(user_id))
-                                if user_obj:
-                                    invite_url = f"https://discord.com/api/oauth2/authorize?client_id={self.bot.user.id}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
-                                    
-                                    dm_embed = discord.Embed(
-                                        title="Bot Required to Auto-Build Server",
-                                        description=f"The Template Engine bot is not currently in server `{target_guild_id}`.\n\nPlease add the bot to your server using the button below and retry.",
-                                        color=discord.Color.gold()
-                                    )
-                                    
-                                    view = discord.ui.View()
-                                    view.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
-                                    await user_obj.send(embed=dm_embed, view=view)
-                            except Exception as dm_err:
-                                print(f"[DM Error] Could not DM user: {dm_err}")
-                        return
+                    for chan in cat_data.get("channels", []):
+                        chan_raw_name = chan.get("name") or chan.get("clean_name") or "channel"
+                        chan_emoji = chan.get("emoji", "")
+                        chan_clean_name = format_channel_name(chan_raw_name)
+                        chan_type = chan.get("type", "text")
+                        chan_topic = chan.get("topic", "")
 
-                    # 2. CHECK IF SUBMITTING USER IS SERVER OWNER OR ADMIN
-                    if user_id:
-                        try:
-                            member = await guild.fetch_member(int(user_id))
-                            is_owner = (guild.owner_id == member.id)
-                            is_admin = member.guild_permissions.administrator or is_owner
-
-                            if not is_admin:
-                                print(f"[Auto-Build Blocked] User {user_id} is not an Admin or Owner in {guild.id}")
-                                user_obj = await self.bot.fetch_user(int(user_id))
-                                if user_obj:
-                                    admin_embed = discord.Embed(
-                                        title="Administrator Permissions Required",
-                                        description=f"Auto-build cancelled. You must be the **Server Owner** or have **Administrator** permissions in **{guild.name}** to deploy server layouts.",
-                                        color=discord.Color.red()
-                                    )
-                                    await user_obj.send(embed=admin_embed)
-                                return
-                        except discord.NotFound:
-                            print(f"[Auto-Build Blocked] User {user_id} is not a member of guild {guild.id}")
-                            user_obj = await self.bot.fetch_user(int(user_id))
-                            if user_obj:
-                                not_member_embed = discord.Embed(
-                                    title="Not a Server Member",
-                                    description=f"Auto-build cancelled. You are not a member of server `{guild.id}`.",
-                                    color=discord.Color.red()
-                                )
-                                await user_obj.send(embed=not_member_embed)
-                            return
-                        except Exception as perm_err:
-                            print(f"[Permission Check Warning] {perm_err}")
-
-                    # BOT IS IN GUILD & USER IS AUTHORIZED -> EXECUTE AUTOMATIC BUILDING
-                    print(f"[Auto-Build] Starting layout deployment for guild {guild.name} ({guild.id})")
-                    
-                    # 1. NUKE EXISTING SERVER CHANNELS & NON-DEFAULT ROLES BEFORE BUILDING
-                    print(f"[Auto-Build Nuke] Wiping existing channels and custom roles in {guild.name}...")
-                    for channel in list(guild.channels):
-                        try:
-                            await channel.delete(reason="Template Engine Auto-Build: Clearing old layout")
-                        except Exception as delete_chan_err:
-                            print(f"[Nuke Warning] Could not delete channel {channel.name}: {delete_chan_err}")
-
-                    for role in list(guild.roles):
-                        if not role.is_default() and not role.managed:
-                            try:
-                                await role.delete(reason="Template Engine Auto-Build: Clearing old roles")
-                            except Exception as delete_role_err:
-                                print(f"[Nuke Warning] Could not delete role {role.name}: {delete_role_err}")
-
-                    # 2. Create Roles
-                    role_map = {}
-                    for r_data in layout.get("roles", []):
-                        r_name = r_data.get("name")
-                        r_color = r_data.get("color", "#8b5cf6")
-                        try:
-                            hex_val = int(r_color.lstrip('#'), 16)
-                            color_obj = discord.Color(hex_val)
-                        except Exception:
-                            color_obj = discord.Color.purple()
-                        
-                        existing_role = discord.utils.get(guild.roles, name=r_name)
-                        if not existing_role:
-                            try:
-                                new_role = await guild.create_role(name=r_name, color=color_obj)
-                                role_map[r_name] = new_role
-                            except Exception as r_err:
-                                print(f"[Role Create Warning] {r_err}")
+                        if chan_type == "voice":
+                            chan_display = f"{chan_emoji} {chan_clean_name}".strip() if chan_emoji else chan_clean_name
+                            await category.create_voice_channel(
+                                name=chan_display,
+                                reason="Template Engine Auto-Build"
+                            )
                         else:
-                            role_map[r_name] = existing_role
+                            chan_display = f"{chan_emoji}-{chan_clean_name}".strip('-') if chan_emoji else chan_clean_name
+                            await category.create_text_channel(
+                                name=chan_display,
+                                topic=chan_topic,
+                                reason="Template Engine Auto-Build"
+                            )
+                        await asyncio.sleep(0.2)
+                except Exception as e:
+                    print(f"[Auto-Build Cat Error] {cat_display}: {e}")
+        except Exception as top_err:
+            print(f"[Auto-Build Execution Error] {top_err}")
 
-                    # 3. Create Categories & Channels
-                    for cat_data in layout.get("categories", []):
-                        cat_name = cat_data.get("name", "CATEGORY")
-                        cat_emoji = cat_data.get("emoji", "").strip()
-                        
-                        # Avoid duplicating emoji if already in category name
-                        if cat_emoji and not cat_name.startswith(cat_emoji):
-                            full_cat_name = f"{cat_emoji} {cat_name}"
-                        else:
-                            full_cat_name = cat_name
-
-                        try:
-                            category = await guild.create_category(name=full_cat_name)
-
-                            for chan_data in cat_data.get("channels", []):
-                                ch_raw_name = chan_data.get("name", "channel").strip()
-                                ch_emoji = chan_data.get("emoji", "").strip()
-                                ch_type = chan_data.get("type", "text")
-                                ch_topic = chan_data.get("topic", "")
-
-                                # Ensure single emoji formatting (prevents doubling)
-                                if ch_emoji and not ch_raw_name.startswith(ch_emoji):
-                                    ch_name = f"{ch_emoji} {ch_raw_name}"
-                                else:
-                                    ch_name = ch_raw_name
-
-                                try:
-                                    if ch_type == "voice":
-                                        await guild.create_voice_channel(name=ch_name, category=category)
-                                    else:
-                                        await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
-                                except Exception as ch_err:
-                                    print(f"[Channel Create Warning] {ch_err}")
-                        except Exception as cat_err:
-                            print(f"[Category Create Warning] {cat_err}")
-
-                    print(f"[Auto-Build Complete] Successfully built layout for {guild.name}")
-
-                except Exception as build_err:
-                    print(f"[Auto-Build Failure] Error building layout: {build_err}")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BotCog(bot))
