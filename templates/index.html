@@ -18,19 +18,19 @@ const IS_TE_PREMIUM = {{ 'true' if is_premium else 'false' }};
 function checkAuthStatus() {
     const btn = document.getElementById('verify-continue-btn');
     const label = document.getElementById('continue-btn-label');
-    
+
     if (!IS_USER_LOGGED_IN) {
         if (btn) btn.disabled = true;
         if (label) label.innerText = "Log In with Discord First";
         return;
     }
-    
+
     if (!IS_ROBLOX_LINKED) {
         if (btn) btn.disabled = true;
         if (label) label.innerText = "Sync Roblox Account in Discord Server First";
         return;
     }
-    
+
     if (btn) {
         btn.disabled = false;
         btn.removeAttribute('disabled');
@@ -526,7 +526,7 @@ box-shadow: 0 20px 50px rgba(0,0,0,0.8);
 
 .perm-grid-inline {
 display: grid;
-grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
 gap: 10px;
 margin-top: 12px;
 }
@@ -535,10 +535,30 @@ margin-top: 12px;
 display: flex;
 align-items: center;
 justify-content: space-between;
-background: rgba(255, 255, 255, 0.03);
+background: rgba(255, 255, 255, 0.02);
 border: 1px solid var(--glass-inner-border);
 border-radius: 10px;
 padding: 10px 12px;
+cursor: pointer;
+user-select: none;
+transition: all 0.2s ease;
+}
+
+.perm-item-inline:hover {
+background: rgba(139, 92, 246, 0.08);
+border-color: rgba(139, 92, 246, 0.3);
+}
+
+.gold-theme .perm-item-inline:hover {
+background: rgba(241, 196, 15, 0.08);
+border-color: rgba(241, 196, 15, 0.3);
+}
+
+.perm-item-inline label {
+font-size: 0.85rem;
+font-weight: 600;
+cursor: pointer;
+flex-grow: 1;
 }
 
 .sync-channel-checkboxes {
@@ -844,13 +864,16 @@ document.addEventListener("DOMContentLoaded", () => {
 function applyPremiumTheme() {
     const btn = document.getElementById('submit-design-btn');
     const label = document.getElementById('submit-btn-label');
-    if (label) {
-        label.innerText = IS_TE_PREMIUM ? "Deploy Layout Instantly" : "Submit design to staff";
-    }
-    if (IS_TE_PREMIUM && btn) {
-        btn.classList.add('btn-premium');
-    } else if (btn) {
-        btn.classList.remove('btn-premium');
+    
+    if (btn) {
+        btn.disabled = false;
+        if (IS_TE_PREMIUM) {
+            btn.classList.add('btn-premium');
+            btn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Deploy Layout Instantly</span>`;
+        } else {
+            btn.classList.remove('btn-premium');
+            btn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit design to staff</span>`;
+        }
     }
 }
 
@@ -913,16 +936,16 @@ async function handleAIGeneration() {
     const serverId = document.getElementById('gen-server-id').value.trim();
     const serverLink = document.getElementById('gen-server-link').value.trim();
     const promptVal = document.getElementById('gen-prompt').value.trim();
-    
+
     if (!serverId || !serverLink || !promptVal) {
         alert('Please fill in all required fields (Prompt, Server ID, and Invite Link).');
         return;
     }
-    
+
     const btn = document.getElementById('generate-btn');
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner"></span> Generating Layout with AI...`;
-    
+
     try {
         const response = await fetch('/generate-blueprint', {
             method: 'POST',
@@ -962,36 +985,36 @@ function renderSidebar() {
     const container = document.getElementById('sidebar-category-container');
     container.innerHTML = '';
     document.getElementById('server-title-heading').innerText = currentLayout.server_name || "Server Structure";
-    
+
     (currentLayout.categories || []).forEach((cat, cIdx) => {
         const catDiv = document.createElement('div');
         catDiv.className = 'discord-category';
         const cleanCatName = stripEmoji(cat.name || 'CATEGORY');
         const displayName = cat.emoji ? `${cat.emoji} ${cleanCatName}` : cleanCatName;
-        
+
         const headerDiv = document.createElement('div');
         headerDiv.className = 'discord-category-title';
         headerDiv.innerHTML = `<span>▾ ${displayName}</span> <i class="fa-solid fa-xmark" onclick="deleteCategory(${cIdx})" style="cursor:pointer;"></i>`;
         catDiv.appendChild(headerDiv);
-        
+
         const channelList = document.createElement('div');
         (cat.channels || []).forEach((chan, chIdx) => {
             const item = document.createElement('div');
             const isActive = (cIdx === activeCatIdx && chIdx === activeChanIdx);
             item.className = `discord-channel-item ${isActive ? 'active' : ''}`;
             item.onclick = () => selectChannel(cIdx, chIdx);
-            
+
             const icon = chan.type === 'voice' ? '🔊' : '#';
             const cleanName = formatDiscordChannelName(chan.name);
             item.innerHTML = `<div style="display:flex; align-items:center; gap:8px;"> <span>${icon}</span> <span>${chan.emoji ? chan.emoji + ' ' : ''}${cleanName || 'channel'}</span> </div> <i class="fa-solid fa-xmark" onclick="event.stopPropagation(); deleteChannel(${cIdx}, ${chIdx})"></i>`;
             channelList.appendChild(item);
         });
-        
+
         const addChanBtn = document.createElement('button');
         addChanBtn.className = 'add-btn-inline';
         addChanBtn.innerHTML = `+ add channel`;
         addChanBtn.onclick = () => addChannel(cIdx);
-        
+
         catDiv.appendChild(channelList);
         catDiv.appendChild(addChanBtn);
         container.appendChild(catDiv);
@@ -1127,7 +1150,7 @@ function renderInlinePermissionsGrid() {
     const grid = document.getElementById('inline-perm-grid');
     grid.innerHTML = '';
     DISCORD_PERMISSIONS_LIST.forEach(p => {
-        grid.innerHTML += `<div class="perm-item-inline"> <span style="font-size:0.85rem; font-weight:600;">${p.label}</span> <input type="checkbox" id="inline-perm-cb-${p.id}" checked style="width:18px; height:18px; accent-color: var(--accent-purple);"> </div>`;
+        grid.innerHTML += `<div class="perm-item-inline" onclick="document.getElementById('inline-perm-cb-${p.id}').click()"> <label for="inline-perm-cb-${p.id}" onclick="event.stopPropagation()">${p.label}</label> <input type="checkbox" id="inline-perm-cb-${p.id}" style="width:18px; height:18px; accent-color: var(--accent-purple);" onclick="event.stopPropagation()"> </div>`;
     });
 }
 
@@ -1141,9 +1164,9 @@ function saveAndApplyPermissions() {
     const permBuffer = {};
     DISCORD_PERMISSIONS_LIST.forEach(p => {
         const cb = document.getElementById(`inline-perm-cb-${p.id}`);
-        permBuffer[p.id] = cb ? cb.checked : true;
+        permBuffer[p.id] = cb ? cb.checked : false;
     });
-    
+
     selectedTargets.forEach(cb => {
         const key = cb.value;
         let targetObj = null;
@@ -1159,11 +1182,11 @@ function saveAndApplyPermissions() {
             targetObj.permissions[activeRole] = { ...permBuffer };
         }
     });
-    
+
     document.querySelectorAll('.target-perm-cb').forEach(cb => cb.checked = false);
     DISCORD_PERMISSIONS_LIST.forEach(p => {
         const cb = document.getElementById(`inline-perm-cb-${p.id}`);
-        if (cb) cb.checked = true;
+        if (cb) cb.checked = false;
     });
     alert(`Successfully applied permissions for [${activeRole}] to ${selectedTargets.length} selected target(s)!`);
 }
@@ -1178,7 +1201,7 @@ function updateBotInviteLink() {
     if (sanitizedServerId) {
         inviteUrl += `&guild_id=${sanitizedServerId}`;
     }
-    
+
     const landingBtn = document.getElementById('landing-bot-invite-btn');
     if (landingBtn) landingBtn.href = inviteUrl;
 }
@@ -1214,12 +1237,12 @@ async function handleSubmitDesign() {
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner"></span> Dispatching Design...`;
     updateBotInviteLink();
-    
+
     let channelCount = 0;
     (currentLayout.categories || []).forEach(c => {
         channelCount += (c.channels || []).length;
     });
-    
+
     const payload = {
         target_server_id: serverId,
         server_name: currentLayout.server_name || "Custom Server",
@@ -1230,7 +1253,7 @@ async function handleSubmitDesign() {
         roles_count: (currentLayout.roles || []).length,
         layout: currentLayout
     };
-    
+
     try {
         const response = await fetch('/api/submit-design', {
             method: 'POST',
