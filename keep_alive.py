@@ -252,20 +252,24 @@ def submit_design_endpoint():
 
             url = f"{DISCORD_API_BASE_URL}/channels/{target_channel}/messages"
             headers = {
-                "Authorization": f"Bot {BOT_TOKEN}",
-                "Content-Type": "application/json"
+                "Authorization": f"Bot {BOT_TOKEN}"
             }
 
-            # Wrap json payload explicitly for parsing in bot cog listener
+            # Embed full tracking metadata into the blueprint payload
             payload["submitting_user_id"] = user_id
             payload["is_premium"] = has_premium
-            json_str = json.dumps(payload)
+            json_bytes = json.dumps(payload, indent=2).encode("utf-8")
 
-            body = {
-                "content": f"AUTOBUILD_PAYLOAD_START```json\n{json_str}\n```AUTOBUILD_PAYLOAD_END",
-                "embeds": [embed]
+            # Post via multipart/form-data to include both embed and file without exceeding character limits
+            files = {
+                "files[0]": ("blueprint.json", json_bytes, "application/json"),
+                "payload_json": (None, json.dumps({
+                    "content": f"PAYLOAD_ATTACHED | TargetGuild:{target_server_id} | User:{user_id}",
+                    "embeds": [embed]
+                }), "application/json")
             }
-            res = requests.post(url, headers=headers, json=body, timeout=8)
+
+            res = requests.post(url, headers=headers, files=files, timeout=12)
             print(f"[Design Submit Dispatch] Status: {res.status_code}")
 
         return jsonify({
