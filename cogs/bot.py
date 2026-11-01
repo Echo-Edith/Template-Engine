@@ -1,159 +1,95 @@
-import json
-import asyncio
-import aiohttp
-import discord
-from discord.ext import commands
-from discord import app_commands
-
-CHANNEL_LOG_PREMIUM_DESIGNS = 1563544108696477802
-
-class RetryAutoBuildView(discord.ui.View):
-    def __init__(self, client_id: str, target_guild_id: str, payload: dict):
-        super().__init__(timeout=None)
-        invite_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
-        self.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
-        self.payload = payload
-        self.target_guild_id = target_guild_id
-
-    @discord.ui.button(label="Retry Auto-Deploy", style=discord.ButtonStyle.primary, custom_id="btn_retry_autobuild")
-    async def retry_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.client.get_guild(int(self.target_guild_id))
-        if not guild:
-            await interaction.followup.send("Bot is still not present in the target server. Please invite the bot first!", ephemeral=True)
-            return
-
-        await interaction.followup.send("Bot detected in server! Starting layout auto-build...", ephemeral=True)
-        bot_cog = interaction.client.get_cog("BotCog")
-        if bot_cog:
-            await bot_cog.execute_autobuild(guild, self.payload)
-
-
-class BotCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    async def execute_autobuild(self, guild: discord.Guild, payload: dict):
-        layout = payload.get("layout", {})
-        roles_data = layout.get("roles", [])
-        categories_data = layout.get("categories", [])
-
-        # 1. Create Roles
-        created_roles = {}
-        for r in roles_data:
-            r_name = r.get("name")
-            if not r_name:
-                continue
-            r_color_hex = r.get("color", "#8b5cf6").lstrip("#")
-            try:
-                color_int = int(r_color_hex, 16)
-            except Exception:
-                color_int = 0x8b5cf6
-
-            existing = discord.utils.get(guild.roles, name=r_name)
-            if not existing:
-                try:
-                    role_obj = await guild.create_role(name=r_name, color=discord.Color(color_int))
-                    created_roles[r_name] = role_obj
-                except Exception as e:
-                    print(f"[Role Creation Error] {e}")
-            else:
-                created_roles[r_name] = existing
-
-        # 2. Create Categories & Channels
-        for cat_data in categories_data:
-            cat_name = cat_data.get("name", "CATEGORY")
-            emoji = cat_data.get("emoji", "")
-            full_cat_name = f"{emoji} {cat_name}".strip() if emoji else cat_name
-
-            try:
-                cat_obj = await guild.create_category(name=full_cat_name)
-            except Exception as e:
-                print(f"[Category Creation Error] {e}")
-                continue
-
-            for ch_data in cat_data.get("channels", []):
-                ch_name = ch_data.get("name", "channel").lower().replace(" ", "-")
-                ch_emoji = ch_data.get("emoji", "")
-                full_ch_name = f"{ch_emoji} {ch_name}".strip() if ch_emoji else ch_name
-                ch_type = ch_data.get("type", "text")
-                topic = ch_data.get("topic", "")
-                is_readonly = ch_data.get("read_only", False)
-
-                overwrites = {}
-                if is_readonly:
-                    overwrites[guild.default_role] = discord.PermissionOverwrite(send_messages=False)
-
-                try:
-                    if ch_type == "voice":
-                        await cat_obj.create_voice_channel(name=full_ch_name, overwrites=overwrites)
-                    else:
-                        await cat_obj.create_text_channel(name=full_ch_name, topic=topic, overwrites=overwrites)
-                except Exception as e:
-                    print(f"[Channel Creation Error] {e}")
-
+# ... existing code ...
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
+        if message.author == self.bot.user:
             return
 
-        # Intercept attached design blueprints in the Premium Log channel
-        if message.channel.id == CHANNEL_LOG_PREMIUM_DESIGNS and message.attachments:
+        # Check for premium design log channel (1563544108696477802)
+        if str(message.channel.id) == PREMIUM_SCAN_CHANNEL_ID:
+            # Check if message has attached blueprint.json file
+            json_attachment = None
             for attachment in message.attachments:
-                if attachment.filename == "blueprint.json":
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(attachment.url) as resp:
-                                if resp.status == 200:
-                                    payload_bytes = await resp.read()
-                                    payload = json.loads(payload_bytes.decode("utf-8"))
+                if attachment.filename.endswith(".json"):
+                    json_attachment = attachment
+                    break
 
-                                    target_guild_id = str(payload.get("target_server_id", ""))
-                                    user_id = str(payload.get("submitting_user_id", ""))
+            if json_attachment:
+                try:
+                    # Download and parse blueprint file
+                    content_bytes = await json_attachment.read()
+                    payload = json.loads(content_bytes.decode('utf-8'))
 
-                                    if not target_guild_id.isdigit():
-                                        return
+                    target_guild_id = payload.get("target_server_id")
+                    user_id = payload.get("submitting_user_id")
+                    layout = payload.get("layout", {})
 
-                                    guild = self.bot.get_guild(int(target_guild_id))
+                    if not target_guild_id or target_guild_id == "N/A":
+                        return
 
-                                    # Target server found -> Run instant auto-build
-                                    if guild:
-                                        await self.execute_autobuild(guild, payload)
-                                        confirm_embed = discord.Embed(
-                                            title="Auto-Deploy Completed",
-                                            description=f"Successfully built server architecture for **{guild.name}** (`{guild.id}`).",
-                                            color=0x2ecc71
-                                        )
-                                        await message.channel.send(embed=confirm_embed)
-                                    else:
-                                        # Bot is not present in target guild -> DM user & alert log channel
-                                        missing_embed = discord.Embed(
-                                            title="Auto-Deploy Pending (Bot Missing)",
-                                            description=f"The bot is not present in Target Guild ID `{target_guild_id}`. A direct message has been sent to the user with an invite link.",
-                                            color=0xE74C3C
-                                        )
-                                        await message.channel.send(embed=missing_embed)
+                    guild = self.bot.get_guild(int(target_guild_id))
 
-                                        # Direct message user with Add Bot & Retry buttons
-                                        if user_id.isdigit():
-                                            user = await self.bot.fetch_user(int(user_id))
-                                            if user:
-                                                dm_embed = discord.Embed(
-                                                    title="Action Required: Add Bot to Auto-Deploy Layout",
-                                                    description=f"You requested an instant auto-deploy for server ID `{target_guild_id}`, but the bot is not present in that server.\n\nPlease click **Add Bot to Server** below and then click **Retry Auto-Deploy**.",
-                                                    color=0xF1C40F
-                                                )
-                                                view = RetryAutoBuildView(
-                                                    client_id=str(self.bot.user.id),
-                                                    target_guild_id=target_guild_id,
-                                                    payload=payload
-                                                )
-                                                try:
-                                                    await user.send(embed=dm_embed, view=view)
-                                                except Exception as err:
-                                                    print(f"[DM User Error] {err}")
-                    except Exception as ex:
-                        print(f"[Auto-Build Execution Exception] {ex}")
+                    # IF BOT IS NOT IN THE TARGET GUILD
+                    if not guild:
+                        print(f"[Auto-Build Warning] Bot is not in target guild: {target_guild_id}")
+                        
+                        # DM the user with Add Bot link & Retry button
+                        if user_id:
+                            try:
+                                user_obj = await self.bot.fetch_user(int(user_id))
+                                if user_obj:
+                                    invite_url = f"https://discord.com/api/oauth2/authorize?client_id={self.bot.user.id}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
+                                    
+                                    dm_embed = discord.Embed(
+                                        title="Bot Required to Auto-Build Server",
+                                        description=f"The Template Engine bot is not currently in server `{target_guild_id}`.\n\nPlease add the bot to your server using the button below and click **Retry Auto-Deploy**.",
+                                        color=discord.Color.gold()
+                                    )
+                                    
+                                    view = discord.ui.View()
+                                    view.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
+                                    await user_obj.send(embed=dm_embed, view=view)
+                            except Exception as dm_err:
+                                print(f"[DM Error] Could not DM user: {dm_err}")
+                        return
 
-async def setup(bot):
-    await bot.add_cog(BotCog(bot))
+                    # BOT IS IN GUILD -> EXECUTE AUTOMATIC BUILDING
+                    print(f"[Auto-Build] Starting layout deployment for guild {guild.name} ({guild.id})")
+                    
+                    # 1. Create Roles
+                    role_map = {}
+                    for r_data in layout.get("roles", []):
+                        r_name = r_data.get("name")
+                        r_color = r_data.get("color", "#8b5cf6")
+                        try:
+                            hex_val = int(r_color.lstrip('#'), 16)
+                            color_obj = discord.Color(hex_val)
+                        except Exception:
+                            color_obj = discord.Color.purple()
+                        
+                        existing_role = discord.utils.get(guild.roles, name=r_name)
+                        if not existing_role:
+                            new_role = await guild.create_role(name=r_name, color=color_obj)
+                            role_map[r_name] = new_role
+                        else:
+                            role_map[r_name] = existing_role
+
+                    # 2. Create Categories & Channels
+                    for cat_data in layout.get("categories", []):
+                        cat_name = cat_data.get("name", "CATEGORY")
+                        category = await guild.create_category(name=cat_name)
+
+                        for chan_data in cat_data.get("channels", []):
+                            ch_name = chan_data.get("name", "channel")
+                            ch_type = chan_data.get("type", "text")
+                            ch_topic = chan_data.get("topic", "")
+
+                            if ch_type == "voice":
+                                await guild.create_voice_channel(name=ch_name, category=category)
+                            else:
+                                await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
+
+                    print(f"[Auto-Build Complete] Successfully built layout for {guild.name}")
+
+                except Exception as build_err:
+                    print(f"[Auto-Build Failure] Error building layout: {build_err}")
+# ... existing code ...
