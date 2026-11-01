@@ -1,4 +1,4 @@
-cimport os
+import os
 import json
 import requests
 from datetime import datetime, timezone, timedelta
