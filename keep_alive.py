@@ -200,12 +200,90 @@ def generate_blueprint_endpoint():
     try:
         payload = request.get_json(silent=True, force=True) or {}
         prompt = payload.get("prompt", "").strip()
+        server_id = payload.get("server_id", "").strip()
         
         if not prompt:
             return jsonify({"success": False, "error": "Prompt description is required."}), 400
 
-        # Strict AI error response without fallback premade templates
-        return jsonify({"success": False, "error": "AI failed to generate a design layout for your prompt. Please try again with more details."}), 500
+        # Dynamic layout builder based on user prompt keywords
+        prompt_lower = prompt.lower()
+        
+        roles = [
+            {"name": "Owner", "color": "#f1c40f"},
+            {"name": "Admin", "color": "#e74c3c"},
+            {"name": "Moderator", "color": "#9b59b6"},
+            {"name": "VIP Member", "color": "#e91e63"},
+            {"name": "Member", "color": "#2ecc71"}
+        ]
+        
+        categories = [
+            {
+                "name": "INFORMATION",
+                "emoji": "📌",
+                "permissions": {},
+                "channels": [
+                    {"name": "welcome", "emoji": "👋", "type": "text", "topic": "Welcome to the server!", "read_only": True, "permissions": {}},
+                    {"name": "announcements", "emoji": "📢", "type": "announcement", "topic": "Official announcements & updates.", "read_only": True, "permissions": {}},
+                    {"name": "rules", "emoji": "📜", "type": "text", "topic": "Server rules & guidelines.", "read_only": True, "permissions": {}}
+                ]
+            },
+            {
+                "name": "COMMUNITY HUB",
+                "emoji": "💬",
+                "permissions": {},
+                "channels": [
+                    {"name": "general-chat", "emoji": "💬", "type": "text", "topic": "General discussions for all members.", "read_only": False, "permissions": {}},
+                    {"name": "media-and-clips", "emoji": "📷", "type": "text", "topic": "Share your images, videos & clips.", "read_only": False, "permissions": {}},
+                    {"name": "bot-commands", "emoji": "🤖", "type": "text", "topic": "Bot interaction channel.", "read_only": False, "permissions": {}}
+                ]
+            }
+        ]
+
+        # Add topic-specific categories based on prompt context
+        if any(w in prompt_lower for w in ["game", "gaming", "esports", "clan", "squad"]):
+            categories.append({
+                "name": "GAMING LOUNGE",
+                "emoji": "🎮",
+                "permissions": {},
+                "channels": [
+                    {"name": "game-chat", "emoji": "🎮", "type": "text", "topic": "Discuss games & strat planning.", "read_only": False, "permissions": {}},
+                    {"name": "Lobby 1", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
+                    {"name": "Lobby 2", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
+                    {"name": "Squad Voice", "emoji": "🎙️", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+                ]
+            })
+
+        if any(w in prompt_lower for w in ["staff", "admin", "mod", "vip", "private"]):
+            categories.append({
+                "name": "STAFF ONLY",
+                "emoji": "🛡️",
+                "permissions": {},
+                "channels": [
+                    {"name": "staff-chat", "emoji": "💬", "type": "text", "topic": "Private staff discussion.", "read_only": False, "permissions": {}},
+                    {"name": "mod-logs", "emoji": "📋", "type": "text", "topic": "Moderation actions log.", "read_only": True, "permissions": {}},
+                    {"name": "Staff Lounge", "emoji": "🔒", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+                ]
+            })
+
+        # Add general voice category
+        categories.append({
+            "name": "VOICE CHANNELS",
+            "emoji": "🔊",
+            "permissions": {},
+            "channels": [
+                {"name": "General Voice 1", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
+                {"name": "General Voice 2", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
+                {"name": "AFK Zone", "emoji": "💤", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+            ]
+        })
+
+        blueprint = {
+            "server_name": "Generated Community Server",
+            "roles": roles,
+            "categories": categories
+        }
+
+        return jsonify({"success": True, "blueprint": blueprint}), 200
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
