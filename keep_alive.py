@@ -3,9 +3,16 @@ import re
 import json
 import random
 import requests
+import asyncio
 from datetime import datetime, timezone, timedelta
 from flask import Flask, redirect, request, session, render_template, jsonify
 from pymongo import MongoClient
+
+# Attempt to import ai_brain for Gemini AI generation
+try:
+    import ai_brain
+except ImportError:
+    ai_brain = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
@@ -305,12 +312,40 @@ def submit_design_endpoint():
 def generate_blueprint_endpoint():
     try:
         data = request.get_json(silent=True, force=True) or {}
-        prompt = (data.get("prompt") or "").strip().lower()
+        prompt = (data.get("prompt") or "").strip()
+        server_id = str(data.get("server_id") or "").strip()
+        server_link = str(data.get("server_link") or "").strip()
 
         if not prompt:
             return jsonify({"success": False, "error": "Prompt cannot be empty."}), 400
 
-        # Construct Server Roles
+        user = session.get("user") or {}
+
+        # 1. Use ai_brain.py if available and GEMINI_API_KEY is configured
+        if ai_brain and os.getenv("GEMINI_API_KEY"):
+            try:
+                # Execute async generate_server_layout function from ai_brain.py
+                ai_result = asyncio.run(
+                    ai_brain.generate_server_layout(
+                        prompt=prompt,
+                        channel_separator="│",
+                        server_id=server_id,
+                        server_link=server_link,
+                        user_info=user if user.get("id") else None,
+                        webhook_url=None
+                    )
+                )
+
+                if ai_result.get("success") and ai_result.get("data"):
+                    blueprint_data = ai_result["data"]
+                    return jsonify({"success": True, "blueprint": blueprint_data}), 200
+                elif ai_result.get("error"):
+                    print(f"[ai_brain Warning] {ai_result['error']}")
+            except Exception as ai_err:
+                print(f"[ai_brain Exception] {ai_err}")
+
+        # 2. Dynamic Keyword Fallback (Runs if ai_brain or GEMINI_API_KEY is missing/fails)
+        prompt_lower = prompt.lower()
         roles = [
             {"name": "Owner", "color": "#f1c40f"},
             {"name": "Admin", "color": "#e74c3c"},
@@ -319,16 +354,15 @@ def generate_blueprint_endpoint():
             {"name": "Member", "color": "#2ecc71"}
         ]
 
-        # Base Information Category
         categories = [
             {
                 "name": "INFORMATION",
                 "emoji": "📌",
                 "permissions": {},
                 "channels": [
-                    {"name": "welcome", "emoji": "👋", "type": "text", "topic": "Welcome to the server!", "read_only": True, "permissions": {}},
-                    {"name": "rules", "emoji": "📜", "type": "text", "topic": "Server rules and guidelines.", "read_only": True, "permissions": {}},
-                    {"name": "announcements", "emoji": "📢", "type": "text", "topic": "Official announcements.", "read_only": True, "permissions": {}}
+                    {"name": "welcome", "emoji": "👋", "type": "text", "topic": "Welcome to the server!", "read_only": True, "permissions": {"view": True, "send": False, "embed": True, "attach": True}},
+                    {"name": "rules", "emoji": "📜", "type": "text", "topic": "Server rules and guidelines.", "read_only": True, "permissions": {"view": True, "send": False, "embed": True, "attach": True}},
+                    {"name": "announcements", "emoji": "📢", "type": "text", "topic": "Official announcements.", "read_only": True, "permissions": {"view": True, "send": False, "embed": True, "attach": True}}
                 ]
             },
             {
@@ -336,47 +370,45 @@ def generate_blueprint_endpoint():
                 "emoji": "💬",
                 "permissions": {},
                 "channels": [
-                    {"name": "general-chat", "emoji": "💬", "type": "text", "topic": "Main general discussion.", "read_only": False, "permissions": {}},
-                    {"name": "bot-commands", "emoji": "🤖", "type": "text", "topic": "Bot commands channel.", "read_only": False, "permissions": {}},
-                    {"name": "media-gallery", "emoji": "📸", "type": "text", "topic": "Share photos and media.", "read_only": False, "permissions": {}}
+                    {"name": "general-chat", "emoji": "💬", "type": "text", "topic": "Main general discussion.", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}},
+                    {"name": "bot-commands", "emoji": "🤖", "type": "text", "topic": "Bot commands channel.", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}},
+                    {"name": "media-gallery", "emoji": "📸", "type": "text", "topic": "Share photos and media.", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}}
                 ]
             }
         ]
 
-        # Dynamic Additions based on Prompt Keywords
-        if any(w in prompt for w in ["game", "gaming", "esports", "roblox", "clan"]):
+        if any(w in prompt_lower for w in ["game", "gaming", "esports", "roblox", "clan"]):
             categories.append({
                 "name": "GAMING ZONE",
                 "emoji": "🎮",
                 "permissions": {},
                 "channels": [
-                    {"name": "game-chat", "emoji": "🎮", "type": "text", "topic": "Gaming discussions & clips.", "read_only": False, "permissions": {}},
-                    {"name": "lfg-squads", "emoji": "👥", "type": "text", "topic": "Find teammates here.", "read_only": False, "permissions": {}},
-                    {"name": "Squad Voice 1", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
-                    {"name": "Squad Voice 2", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+                    {"name": "game-chat", "emoji": "🎮", "type": "text", "topic": "Gaming discussions & clips.", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}},
+                    {"name": "lfg-squads", "emoji": "👥", "type": "text", "topic": "Find teammates here.", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}},
+                    {"name": "Squad Voice 1", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}},
+                    {"name": "Squad Voice 2", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}}
                 ]
             })
 
-        if any(w in prompt for w in ["staff", "admin", "mod", "vip", "support", "ticket"]):
+        if any(w in prompt_lower for w in ["staff", "admin", "mod", "vip", "support", "ticket"]):
             categories.append({
                 "name": "STAFF HEADQUARTERS",
                 "emoji": "🛡️",
                 "permissions": {},
                 "channels": [
-                    {"name": "staff-chat", "emoji": "💬", "type": "text", "topic": "Staff internal channel.", "read_only": False, "permissions": {}},
-                    {"name": "mod-logs", "emoji": "📋", "type": "text", "topic": "Action logs.", "read_only": True, "permissions": {}},
-                    {"name": "Staff Meeting Voice", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+                    {"name": "staff-chat", "emoji": "💬", "type": "text", "topic": "Staff internal channel.", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}},
+                    {"name": "mod-logs", "emoji": "📋", "type": "text", "topic": "Action logs.", "read_only": True, "permissions": {"view": True, "send": False, "embed": True, "attach": True}},
+                    {"name": "Staff Meeting Voice", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}}
                 ]
             })
 
-        # Voice Lounge
         categories.append({
             "name": "VOICE CHANNELS",
             "emoji": "🔊",
             "permissions": {},
             "channels": [
-                {"name": "General Lounge", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
-                {"name": "AFK Quiet Room", "emoji": "💤", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+                {"name": "General Lounge", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}},
+                {"name": "AFK Quiet Room", "emoji": "💤", "type": "voice", "topic": "", "read_only": False, "permissions": {"view": True, "send": True, "embed": True, "attach": True}}
             ]
         })
 
