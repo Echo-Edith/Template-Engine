@@ -61,8 +61,12 @@ async def setup_hook():
         else:
             await bot.reload_extension("cogs.bot")
             print("[Setup Hook] Successfully reloaded extension cog: cogs.bot")
+            
+        # Explicitly sync slash commands globally during setup_hook to guarantee Discord APP status badge
+        synced = await bot.tree.sync()
+        print(f"[Setup Hook] Successfully synced {len(synced)} global slash command(s) with Discord API.")
     except Exception as e:
-        print(f"[Setup Hook CRITICAL ERROR] Loading cog cogs.bot: {e}")
+        print(f"[Setup Hook CRITICAL ERROR] Syncing slash commands / cog cogs.bot: {e}")
 
 @bot.event
 async def on_ready():
@@ -71,8 +75,9 @@ async def on_ready():
     print("-----------------------------------------")
 
     try:
+        # Re-verify global command registration
         synced = await bot.tree.sync()
-        print(f"Successfully registered and synced {len(synced)} global slash command(s).")
+        print(f"[on_ready] Slash command registry verified ({len(synced)} commands active).")
     except Exception as e:
         print(f"Failed to sync global slash commands: {e}")
 
