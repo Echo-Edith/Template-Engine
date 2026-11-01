@@ -454,6 +454,7 @@ class BotCog(commands.Cog):
                     description=f"Auto-deployment paused. The bot is not present in target server ID `{target_guild_id}`.\n\nPlease add the bot using the link below.",
                     color=0xF43F5E
                 )
+                # Ensure scope=bot%20applications.commands is included to maintain APP badge status
                 invite_url = f"https://discord.com/api/oauth2/authorize?client_id={self.bot.user.id}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
                 view = discord.ui.View()
                 view.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
