@@ -338,7 +338,7 @@ def submit_design_endpoint():
             payload["is_premium"] = has_premium
             json_bytes = json.dumps(payload, indent=2).encode("utf-8")
 
-            # Post clean embed UI only (no message content text) with blueprint attachment
+            # Post ONLY the clean UI embed and the blueprint JSON attachment (No text message!)
             files = {
                 "files[0]": ("blueprint.json", json_bytes, "application/json"),
                 "payload_json": (None, json.dumps({
