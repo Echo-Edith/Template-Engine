@@ -13,7 +13,7 @@ TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 app = Flask(__name__, template_folder=TEMPLATE_DIR)
 app.secret_key = (os.getenv("FLASK_SECRET_KEY") or "super-secret-key-fallback-12345").strip()
 
-# Enforce long-term persistent browser sessions (365 Days)
+# Enforce persistent browser sessions (365 Days)
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=365)
 app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -30,6 +30,9 @@ CLIENT_ID = (os.getenv("DISCORD_CLIENT_ID") or "").strip()
 CLIENT_SECRET = (os.getenv("DISCORD_CLIENT_SECRET") or "").strip()
 BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
 
+RECAPTCHA_SECRET_KEY = (os.getenv("RECAPTCHA_SECRET_KEY") or "").strip()
+RECAPTCHA_SITE_KEY = (os.getenv("RECAPTCHA_SITE_KEY") or "").strip()
+
 # Roblox Integration Configuration
 ROBLOX_OPEN_CLOUD_KEY = (os.getenv("ROBLOX_OPEN_CLOUD_KEY") or "").strip()
 ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
@@ -37,7 +40,9 @@ ROBLOX_PLACE_ID = (os.getenv("ROBLOX_PLACE_ID") or "6094950399").strip()
 ROBLOX_STORE_URL = (os.getenv("ROBLOX_STORE_URL") or f"https://www.roblox.com/games/{ROBLOX_PLACE_ID}/store").strip()
 
 # Target Channels
-PREMIUM_DESIGN_CHANNEL_ID = "1563544108696477802"
+SUBSCRIPTION_LOG_CHANNEL_ID = (os.getenv("SUBSCRIPTION_LOG_CHANNEL_ID") or "1564262413514182739").strip()
+DESIGN_CHANNEL_ID = (os.getenv("DESIGN_CHANNEL_ID") or "1563524101522464900").strip()
+PREMIUM_DESIGN_CHANNEL_ID = (os.getenv("PREMIUM_DESIGN_CHANNEL_ID") or "1563544108696477802").strip()
 
 MONGO_URI = os.getenv("MONGO_URI")
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
@@ -65,9 +70,11 @@ WEBSITE_BANS = {}
 LOCAL_PREMIUM_USERS = {}
 LOCAL_PERSISTENT_USERS = {}
 
+
 @app.before_request
 def make_session_permanent():
     session.permanent = True
+
 
 def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict = None):
     if not discord_id:
@@ -100,6 +107,7 @@ def save_user_session_db(discord_id: str, discord_data: dict, roblox_data: dict 
     else:
         LOCAL_PERSISTENT_USERS[discord_id_str] = update_payload
 
+
 def load_user_session_db(discord_id: str) -> dict:
     if not discord_id:
         return {}
@@ -112,6 +120,7 @@ def load_user_session_db(discord_id: str) -> dict:
             print(f"[Load User Error] {e}")
             return {}
     return LOCAL_PERSISTENT_USERS.get(discord_id_str, {})
+
 
 def is_user_premium(user_id: str) -> bool:
     if not user_id:
@@ -137,16 +146,23 @@ def is_user_premium(user_id: str) -> bool:
         exp = LOCAL_PREMIUM_USERS.get(user_id_str)
         return exp > now if exp else False
 
-def calculate_account_age_days(discord_id: str) -> str:
+
+def calculate_account_age(discord_id: str) -> str:
     try:
         snowflake = int(discord_id)
         timestamp_ms = (snowflake >> 22) + 1420070400000
         created_at = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
         now = datetime.now(timezone.utc)
+
         days_old = (now - created_at).days
-        return f"{days_old} days"
+        if days_old >= 365:
+            years = days_old // 365
+            rem_days = days_old % 365
+            return f"{years} yr{'' if years == 1 else 's'}, {rem_days} day{'' if rem_days == 1 else 's'} ({days_old} days total)"
+        return f"{days_old} day{'' if days_old == 1 else 's'}"
     except Exception:
         return "Unknown"
+
 
 def is_user_banned(user_id):
     if not user_id:
@@ -159,29 +175,6 @@ def is_user_banned(user_id):
             return None
     return WEBSITE_BANS.get(user_id_str)
 
-def send_bot_embed_file_log(channel_id: str, embed_payload: dict, json_payload: dict) -> bool:
-    if not BOT_TOKEN:
-        print("[Bot Log Error] BOT_TOKEN missing")
-        return False
-
-    url = f"{DISCORD_API_BASE_URL}/channels/{channel_id}/messages"
-    headers = {"Authorization": f"Bot {BOT_TOKEN}"}
-
-    file_bytes = json.dumps(json_payload, indent=2).encode("utf-8")
-    payload_json_str = json.dumps({"embeds": [embed_payload]})
-
-    files = {
-        "payload_json": (None, payload_json_str, "application/json"),
-        "file": ("blueprint.json", file_bytes, "application/json")
-    }
-
-    try:
-        res = requests.post(url, headers=headers, files=files, timeout=10)
-        return res.status_code in (200, 201)
-    except Exception as e:
-        print(f"[Discord API Log Exception] {e}")
-
-    return False
 
 @app.route("/")
 def home():
@@ -211,6 +204,7 @@ def home():
                     roblox_user=roblox_user,
                     is_premium=user_is_premium,
                     dev_message=ban_info.get("message_from_dev", "Suspended by developer."),
+                    recaptcha_site_key="",
                     discord_client_id=CLIENT_ID,
                     roblox_store_url=ROBLOX_STORE_URL
                 )
@@ -221,146 +215,81 @@ def home():
             user=user,
             roblox_user=roblox_user,
             is_premium=user_is_premium,
+            recaptcha_site_key="",
             discord_client_id=CLIENT_ID,
             roblox_store_url=ROBLOX_STORE_URL
         )
     except Exception as e:
         return f"Template Engine Error: {str(e)}", 500
 
-@app.route("/generate-blueprint", methods=["POST"])
-def generate_blueprint_endpoint():
+
+# --- SUBMIT DESIGN DISPATCH ---
+@app.route("/api/submit-design", methods=["POST"])
+def submit_design_endpoint():
     try:
+        user = session.get("user")
+        if not user:
+            return jsonify({"success": False, "error": "Authentication required to submit design."}), 401
+
         payload = request.get_json(silent=True, force=True) or {}
-        prompt = (payload.get("prompt") or "").strip()
-        server_id = (payload.get("server_id") or "").strip()
+        user_id = str(user.get("id"))
+        has_premium = is_user_premium(user_id)
 
-        if not prompt or not server_id:
-            return jsonify({"success": False, "error": "Prompt and Server ID are required."}), 400
+        target_server_id = str(payload.get("target_server_id", "0")).strip()
+        server_name = payload.get("server_name", "Custom Server")
+        categories_count = payload.get("categories_count", 0)
+        channels_count = payload.get("channels_count", 0)
+        roles_count = payload.get("roles_count", 0)
+        invite_link = payload.get("invite_link", "N/A")
+        prompt_val = payload.get("prompt", "No prompt provided.")
+        layout_data = payload.get("layout", {})
 
-        prompt_lower = prompt.lower()
-        
-        # Build base dynamic categories based on prompt context
-        categories = [
-            {
-                "name": "INFORMATION",
-                "emoji": "📌",
-                "permissions": {},
-                "channels": [
-                    {"name": "welcome", "emoji": "👋", "type": "text", "topic": "Welcome to the server!", "read_only": False, "permissions": {}},
-                    {"name": "rules", "emoji": "📜", "type": "text", "topic": "Server rules and guidelines", "read_only": True, "permissions": {}},
-                    {"name": "announcements", "emoji": "📢", "type": "text", "topic": "Official announcements", "read_only": True, "permissions": {}}
-                ]
-            },
-            {
-                "name": "COMMUNITY HUB",
-                "emoji": "💬",
-                "permissions": {},
-                "channels": [
-                    {"name": "general", "emoji": "💬", "type": "text", "topic": "General discussion", "read_only": False, "permissions": {}},
-                    {"name": "media", "emoji": "📷", "type": "text", "topic": "Share photos, videos, and art", "read_only": False, "permissions": {}},
-                    {"name": "bot-commands", "emoji": "🤖", "type": "text", "topic": "Bot interactions", "read_only": False, "permissions": {}}
-                ]
-            }
-        ]
+        account_age = calculate_account_age(user_id)
 
-        # Add specialized categories according to prompt keywords
-        if any(w in prompt_lower for w in ["gaming", "game", "roblox", "esports", "play"]):
-            categories.append({
-                "name": "GAMING ZONE",
-                "emoji": "🎮",
-                "permissions": {},
-                "channels": [
-                    {"name": "game-chat", "emoji": "🎮", "type": "text", "topic": "Gaming discussions", "read_only": False, "permissions": {}},
-                    {"name": "clips-and-highlights", "emoji": "🎬", "type": "text", "topic": "Share your best gameplay moments", "read_only": False, "permissions": {}},
-                    {"name": "Squad 1", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
-                    {"name": "Squad 2", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
-                ]
-            })
-
-        if any(w in prompt_lower for w in ["trading", "shop", "market", "store", "crypto", "business"]):
-            categories.append({
-                "name": "MARKETPLACE",
-                "emoji": "🛒",
-                "permissions": {},
-                "channels": [
-                    {"name": "deals-and-offers", "emoji": "🏷️", "type": "text", "topic": "Latest store deals", "read_only": False, "permissions": {}},
-                    {"name": "vouch-reviews", "emoji": "⭐", "type": "text", "topic": "Customer vouches and reviews", "read_only": False, "permissions": {}}
-                ]
-            })
-
-        # Voice lounge
-        categories.append({
-            "name": "VOICE CHANNELS",
-            "emoji": "🔊",
-            "permissions": {},
-            "channels": [
-                {"name": "General Lounge", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
-                {"name": "Chilling Room", "emoji": "☕", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
-            ]
-        })
-
-        # Staff administration category
-        categories.append({
-            "name": "STAFF ONLY",
-            "emoji": "🛡️",
-            "permissions": {},
-            "channels": [
-                {"name": "staff-chat", "emoji": "🔒", "type": "text", "topic": "Private staff discussion", "read_only": False, "permissions": {}},
-                {"name": "audit-logs", "emoji": "📝", "type": "text", "topic": "Moderation and audit logs", "read_only": True, "permissions": {}}
-            ]
-        })
-
-        # Generate custom roles matching prompt scope
-        roles = [
-            {"name": "Owner", "color": "#f1c40f"},
-            {"name": "Admin", "color": "#e74c3c"},
-            {"name": "Moderator", "color": "#3498db"},
-            {"name": "VIP", "color": "#9b59b6"},
-            {"name": "Member", "color": "#2ecc71"}
-        ]
-
-        # Extract title from prompt or fallback
-        words = [w.capitalize() for w in prompt.split()[:3]]
-        server_name = " ".join(words) + " Community" if words else "Custom Generated Server"
-
-        blueprint = {
-            "server_name": server_name,
-            "roles": roles,
-            "categories": categories
-        }
-
-        return jsonify({"success": True, "blueprint": blueprint}), 200
-
-    except Exception as e:
-        print(f"[AI Generation Exception] {e}")
-        return jsonify({"success": False, "error": f"Generation Failed: {str(e)}"}), 500
-
+        # Formatted Embed UI (No plain text content)
         embed = {
-            "title": "TE Premium Design Dispatched",
-            "color": 0xF1C40F if has_premium else 0x3b82f6,
+            "title": "TE Premium Server Layout Submission" if has_premium else "Standard Server Layout Submission",
+            "color": 0xF1C40F if has_premium else 0x3B82F6,
             "fields": [
                 {"name": "User Mention", "value": f"<@{user_id}>", "inline": True},
                 {"name": "User ID", "value": f"`{user_id}`", "inline": True},
                 {"name": "Account Age", "value": f"`{account_age}`", "inline": True},
                 {"name": "Target Guild ID", "value": f"`{target_server_id}`", "inline": True},
-                {"name": "Invite Link", "value": f"`{invite_link}`", "inline": True},
-                {"name": "Server Overview", "value": overview_str, "inline": False},
-                {"name": "Prompt Description", "value": f"```\n{prompt_desc}\n```", "inline": False}
+                {"name": "Server Invite Link", "value": invite_link, "inline": True},
+                {"name": "Server Overview", "value": f"Categories: `{categories_count}` | Channels: `{channels_count}` | Roles: `{roles_count}`", "inline": False},
+                {"name": "Prompt Description", "value": prompt_val[:1024], "inline": False}
             ],
             "footer": {"text": "Template Engine Auto-Build Infrastructure"},
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
-        full_payload = {
+        target_channel = PREMIUM_DESIGN_CHANNEL_ID if has_premium else DESIGN_CHANNEL_ID
+
+        # Prepare JSON File payload for the bot listener
+        file_payload = {
             "submitting_user_id": user_id,
             "target_server_id": target_server_id,
             "server_name": server_name,
-            "invite_link": invite_link,
-            "prompt": prompt_desc,
-            "layout": payload.get("layout", {})
+            "prompt": prompt_val,
+            "layout": layout_data
         }
+        json_file_bytes = json.dumps(file_payload, indent=2).encode('utf-8')
 
-        send_bot_embed_file_log(PREMIUM_DESIGN_CHANNEL_ID, embed, full_payload)
+        if BOT_TOKEN:
+            url = f"{DISCORD_API_BASE_URL}/channels/{target_channel}/messages"
+            headers = {"Authorization": f"Bot {BOT_TOKEN}"}
+            
+            # Send multipart form data with JSON Embed payload + JSON File attachment
+            files = {
+                'payload_json': (None, json.dumps({'embeds': [embed]}), 'application/json'),
+                'files[0]': ('blueprint.json', json_file_bytes, 'application/json')
+            }
+            try:
+                res = requests.post(url, headers=headers, files=files, timeout=10)
+                if res.status_code not in (200, 201):
+                    print(f"[Log Dispatch Fail] Status Code: {res.status_code}, Response: {res.text}")
+            except Exception as req_err:
+                print(f"[Log Dispatch Error] {req_err}")
 
         return jsonify({
             "success": True,
@@ -371,6 +300,99 @@ def generate_blueprint_endpoint():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+@app.route("/generate-blueprint", methods=["POST"])
+def generate_blueprint_endpoint():
+    try:
+        data = request.get_json(silent=True, force=True) or {}
+        prompt = (data.get("prompt") or "").strip().lower()
+
+        if not prompt:
+            return jsonify({"success": False, "error": "Prompt cannot be empty."}), 400
+
+        # Construct Server Roles
+        roles = [
+            {"name": "Owner", "color": "#f1c40f"},
+            {"name": "Admin", "color": "#e74c3c"},
+            {"name": "Moderator", "color": "#e67e22"},
+            {"name": "VIP", "color": "#9b59b6"},
+            {"name": "Member", "color": "#2ecc71"}
+        ]
+
+        # Base Information Category
+        categories = [
+            {
+                "name": "INFORMATION",
+                "emoji": "📌",
+                "permissions": {},
+                "channels": [
+                    {"name": "welcome", "emoji": "👋", "type": "text", "topic": "Welcome to the server!", "read_only": True, "permissions": {}},
+                    {"name": "rules", "emoji": "📜", "type": "text", "topic": "Server rules and guidelines.", "read_only": True, "permissions": {}},
+                    {"name": "announcements", "emoji": "📢", "type": "text", "topic": "Official announcements.", "read_only": True, "permissions": {}}
+                ]
+            },
+            {
+                "name": "COMMUNITY HUB",
+                "emoji": "💬",
+                "permissions": {},
+                "channels": [
+                    {"name": "general-chat", "emoji": "💬", "type": "text", "topic": "Main general discussion.", "read_only": False, "permissions": {}},
+                    {"name": "bot-commands", "emoji": "🤖", "type": "text", "topic": "Bot commands channel.", "read_only": False, "permissions": {}},
+                    {"name": "media-gallery", "emoji": "📸", "type": "text", "topic": "Share photos and media.", "read_only": False, "permissions": {}}
+                ]
+            }
+        ]
+
+        # Dynamic Additions based on Prompt Keywords
+        if any(w in prompt for w in ["game", "gaming", "esports", "roblox", "clan"]):
+            categories.append({
+                "name": "GAMING ZONE",
+                "emoji": "🎮",
+                "permissions": {},
+                "channels": [
+                    {"name": "game-chat", "emoji": "🎮", "type": "text", "topic": "Gaming discussions & clips.", "read_only": False, "permissions": {}},
+                    {"name": "lfg-squads", "emoji": "👥", "type": "text", "topic": "Find teammates here.", "read_only": False, "permissions": {}},
+                    {"name": "Squad Voice 1", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
+                    {"name": "Squad Voice 2", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+                ]
+            })
+
+        if any(w in prompt for w in ["staff", "admin", "mod", "vip", "support", "ticket"]):
+            categories.append({
+                "name": "STAFF HEADQUARTERS",
+                "emoji": "🛡️",
+                "permissions": {},
+                "channels": [
+                    {"name": "staff-chat", "emoji": "💬", "type": "text", "topic": "Staff internal channel.", "read_only": False, "permissions": {}},
+                    {"name": "mod-logs", "emoji": "📋", "type": "text", "topic": "Action logs.", "read_only": True, "permissions": {}},
+                    {"name": "Staff Meeting Voice", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+                ]
+            })
+
+        # Voice Lounge
+        categories.append({
+            "name": "VOICE CHANNELS",
+            "emoji": "🔊",
+            "permissions": {},
+            "channels": [
+                {"name": "General Lounge", "emoji": "🔊", "type": "voice", "topic": "", "read_only": False, "permissions": {}},
+                {"name": "AFK Quiet Room", "emoji": "💤", "type": "voice", "topic": "", "read_only": False, "permissions": {}}
+            ]
+        })
+
+        blueprint = {
+            "server_name": prompt.title()[:30] + " Community",
+            "roles": roles,
+            "categories": categories
+        }
+
+        return jsonify({"success": True, "blueprint": blueprint}), 200
+
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Failed generating blueprint: {str(e)}"}), 500
+
+
+# --- DISCORD OAUTH2 LOGIN & CALLBACK ---
 @app.route("/login")
 def login():
     if not CLIENT_ID:
@@ -387,6 +409,7 @@ def login():
         f"&scope=identify%20email"
     )
     return redirect(discord_auth_url)
+
 
 @app.route("/callback")
 def callback():
@@ -437,20 +460,22 @@ def callback():
                 session["roblox_user"] = db_record["roblox_data"]
 
             save_user_session_db(user_data["id"], user_obj, session.get("roblox_user"))
-
     except Exception as e:
         print(f"[OAuth Callback Error] {e}")
 
     return redirect("/")
+
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/")
 
+
 @app.route("/health")
 def health():
     return jsonify({"status": "alive"}), 200
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
