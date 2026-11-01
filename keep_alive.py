@@ -339,11 +339,24 @@ def generate_blueprint_endpoint():
                 if ai_result.get("success") and ai_result.get("data"):
                     blueprint_data = ai_result["data"]
 
-                    # Ensure every channel has a non-empty clean name fallback
+                    # Thoroughly resolve and fallback channel names across all possible properties
                     for cat in blueprint_data.get("categories", []):
                         for chan in cat.get("channels", []):
-                            if not chan.get("name"):
-                                chan["name"] = chan.get("formatted_name") or "general-channel"
+                            resolved_name = (
+                                chan.get("name") or 
+                                chan.get("clean_name") or 
+                                chan.get("title") or 
+                                chan.get("formatted_name") or 
+                                "general-channel"
+                            )
+                            # Strip emojis if embedded directly in name
+                            clean_resolved = re.sub(
+                                r'[\u1F600-\u1F64F\u1F300-\u1F5FF\u1F680-\u1F6FF\u2600-\u26FF\u2700-\u27BF]', 
+                                '', 
+                                str(resolved_name)
+                            ).strip()
+
+                            chan["name"] = clean_resolved if clean_resolved else "general-channel"
 
                     return jsonify({"success": True, "blueprint": blueprint_data}), 200
                 elif ai_result.get("error"):
