@@ -41,6 +41,102 @@ LOCAL_PREMIUM_USERS = {}
 LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
 
+# In-memory tracking for points anti-spam system
+# Structure: { user_id: { "last_time": float, "msg_count": int, "last_content": str, "penalty_until": float } }
+USER_MSG_TRACKER = {}
+
+
+def add_user_points(user_id: str, points: int) -> int:
+    """Adds points to MongoDB persistent users or local fallback dictionary."""
+    user_id_str = str(user_id)
+    new_total = points
+    if db_users is not None:
+        try:
+            doc = db_users.find_one_and_update(
+                {"discord_id": user_id_str},
+                {"$inc": {"points": points}},
+                upsert=True,
+                return_document=True
+            )
+            if doc and "points" in doc:
+                new_total = doc["points"]
+        except Exception as e:
+            print(f"[Points DB Inc Error] {e}")
+    else:
+        current = LOCAL_PERSISTENT_USERS.get(user_id_str, {}).get("points", 0)
+        new_total = current + points
+        if user_id_str not in LOCAL_PERSISTENT_USERS:
+            LOCAL_PERSISTENT_USERS[user_id_str] = {}
+        LOCAL_PERSISTENT_USERS[user_id_str]["points"] = new_total
+    return new_total
+
+
+def get_user_points(user_id: str) -> int:
+    """Retrieves current point balance for a user."""
+    user_id_str = str(user_id)
+    if db_users is not None:
+        try:
+            doc = db_users.find_one({"discord_id": user_id_str})
+            if doc and "points" in doc:
+                return int(doc["points"])
+        except Exception as e:
+            print(f"[Points DB Fetch Error] {e}")
+    return LOCAL_PERSISTENT_USERS.get(user_id_str, {}).get("points", 0)
+
+
+def get_top_leaderboard(limit: int = 10) -> list:
+    """Retrieves top point earners from MongoDB or local storage."""
+    top_list = []
+    if db_users is not None:
+        try:
+            cursor = db_users.find({"points": {"$gt": 0}}).sort("points", -1).limit(limit)
+            for doc in cursor:
+                top_list.append({"discord_id": doc.get("discord_id"), "points": doc.get("points", 0)})
+            return top_list
+        except Exception as e:
+            print(f"[Leaderboard DB Fetch Error] {e}")
+
+    # Fallback to local memory storage
+    for uid, udata in LOCAL_PERSISTENT_USERS.items():
+        pts = udata.get("points", 0)
+        if pts > 0:
+            top_list.append({"discord_id": uid, "points": pts})
+    top_list.sort(key=lambda x: x["points"], reverse=True)
+    return top_list[:limit]
+
+
+def get_user_points(user_id: str) -> int:
+    """Fetches user points from MongoDB or local storage."""
+    uid = str(user_id)
+    if db_users is not None:
+        try:
+            doc = db_users.find_one({"discord_id": uid})
+            if doc and "points" in doc:
+                return int(doc["points"])
+        except Exception as e:
+            print(f"[Mongo Get Points Error] {e}")
+    return USER_POINTS_DATA.get(uid, 0)
+
+
+def add_user_points(user_id: str, amount: int) -> int:
+    """Adds or deducts points for a user and returns updated total."""
+    uid = str(user_id)
+    new_total = get_user_points(uid) + amount
+    if new_total < 0:
+        new_total = 0
+
+    if db_users is not None:
+        try:
+            db_users.update_one(
+                {"discord_id": uid},
+                {"$set": {"discord_id": uid, "points": new_total, "updated_at": datetime.now(timezone.utc).isoformat()}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo Add Points Error] {e}")
+    USER_POINTS_DATA[uid] = new_total
+    return new_total
+
 
 def parse_duration_to_timedelta(duration_str: str) -> timedelta:
     """Parses duration strings like 1d, 7d, 30d, 1y, inf into timedelta objects."""
@@ -109,95 +205,185 @@ class BotCog(commands.Cog):
         self.bot = bot
 
     # -------------------------------------------------------------
-    # SLASH COMMAND: SET / REVOKE PREMIUM STATUS
+    # EVENT LISTENER: WELCOME BONUS (20 POINTS)
     # -------------------------------------------------------------
-    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium status for a user.")
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if member.bot:
+            return
+        add_user_points(str(member.id), 20)
+        print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
+
+    # -------------------------------------------------------------
+    # SLASH COMMAND: CHECK USER POINTS
+    # -------------------------------------------------------------
+    @app_commands.command(name="points", description="Check your or another member's current point balance.")
+    @app_commands.describe(user="Optional user to check points for (defaults to yourself).")
+    async def points_cmd(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
+        await interaction.response.defer(ephemeral=False)
+        target_user = user or interaction.user
+        pts = get_user_points(str(target_user.id))
+
+        embed = discord.Embed(
+            title="💰 Point Balance",
+            description=f"{target_user.mention} currently has **{pts:,}** points.",
+            color=0x8B5CF6
+        )
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+        await interaction.followup.send(embed=embed)
+
+    # -------------------------------------------------------------
+    # SLASH COMMAND: LEADERBOARD
+    # -------------------------------------------------------------
+    @app_commands.command(name="leaderboard", description="View the top point earners in the server.")
+    async def leaderboard_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=False)
+        top_users = get_top_leaderboard(10)
+
+        if not top_users:
+            embed = discord.Embed(
+                title="🏆 Point Leaderboard",
+                description="No active point rankings recorded yet!",
+                color=0x8B5CF6
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        description_lines = []
+        medals = ["🥇", "🥈", "🥉"]
+
+        for idx, entry in enumerate(top_users):
+            rank_str = medals[idx] if idx < 3 else f"`#{idx + 1}`"
+            uid = entry["discord_id"]
+            pts = entry["points"]
+            description_lines.append(f"{rank_str} <@{uid}> — **{pts:,}** pts")
+
+        embed = discord.Embed(
+            title="🏆 Point Leaderboard",
+            description="\n".join(description_lines),
+            color=0xF1C40F
+        )
+        embed.set_footer(text="Earn +2 points per message | +20 on join!")
+        await interaction.followup.send(embed=embed)
+
+    # -------------------------------------------------------------
+    # SLASH COMMAND: SET / MODIFY USER POINTS
+    # -------------------------------------------------------------
+    @app_commands.command(name="points-set", description="Add or deduct points for a specified user.")
     @app_commands.describe(
-        user="The user to update premium status for",
-        action="Choose whether to grant ('add') or revoke ('remove') premium",
-        duration="Duration if adding (e.g. 1d, 7d, 30d, 1y, inf). Default is 30d."
+        user="The target user to modify points for.",
+        action="Select whether to add or deduct points.",
+        amount="The amount of points to add or deduct."
     )
     @app_commands.choices(action=[
-        app_commands.Choice(name="Grant Premium", value="add"),
-        app_commands.Choice(name="Revoke Premium", value="remove")
+        app_commands.Choice(name="Add Points", value="add"),
+        app_commands.Choice(name="Deduct Points", value="deduct")
     ])
-    async def premium_set(
+    async def points_set_cmd(
         self,
         interaction: discord.Interaction,
         user: discord.User,
         action: app_commands.Choice[str],
-        duration: str = "30d"
+        amount: int
     ):
-        # Immediately defer to prevent Discord 3-second timeout ("Application did not respond")
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            # Permission check: Only Bot Owner or Users with Manage Server / Administrator permissions
-            is_owner = (interaction.user.id == BOT_OWNER_ID)
-            is_admin = interaction.permissions.administrator or interaction.permissions.manage_guild
+        # Permission check: Owner or Admin
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
 
-            if not (is_owner or is_admin):
-                await interaction.followup.send("❌ You do not have permission to use this command.", ephemeral=True)
-                return
+        if not (is_owner or is_admin):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need Administrator permissions to modify user points.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
-            user_id_str = str(user.id)
+        if amount <= 0:
+            embed = discord.Embed(
+                title="Invalid Amount",
+                description="Please enter a positive point value.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
-            if action.value == "add":
-                parsed_td = parse_duration_to_timedelta(duration)
-                set_user_premium(user_id_str, parsed_td)
+        delta = amount if action.value == "add" else -amount
+        new_total = add_user_points(str(user.id), delta)
 
-                if parsed_td == timedelta(days=36500):
-                    exp_str = "Lifetime (Permanent)"
-                else:
-                    exp_date = datetime.now(timezone.utc) + parsed_td
-                    exp_str = f"<t:{int(exp_date.timestamp())}:R>"
+        action_label = "added to" if action.value == "add" else "deducted from"
+        color = 0x2ECC71 if action.value == "add" else 0xF43F5E
 
-                embed = discord.Embed(
-                    title="⭐ TE Premium Granted",
-                    description=f"Successfully granted **TE Premium** to {user.mention} (`{user.id}`).\n\n**Duration:** `{duration}`\n**Expires:** {exp_str}",
-                    color=0xF1C40F
-                )
-                await interaction.followup.send(embed=embed, ephemeral=True)
-
-            elif action.value == "remove":
-                remove_user_premium(user_id_str)
-                embed = discord.Embed(
-                    title="🗑️ TE Premium Revoked",
-                    description=f"Successfully revoked **TE Premium** from {user.mention} (`{user.id}`).",
-                    color=0xF43F5E
-                )
-                await interaction.followup.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            print(f"[Premium Set Command Error] {e}")
-            await interaction.followup.send(f"❌ An error occurred while executing the command: `{e}`", ephemeral=True)
+        embed = discord.Embed(
+            title="💰 Points Balance Updated",
+            description=f"Successfully {action_label} {user.mention}!\n\n**Amount Changed:** `{'+' if delta > 0 else ''}{delta:,}` pts\n**New Balance:** `{new_total:,}` pts",
+            color=color
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -------------------------------------------------------------
-    # SUB-ROUTINE: NUKE TARGET SERVER BEFORE AUTO-BUILDING
-    # -------------------------------------------------------------
-    async def nuke_guild_structure(self, guild: discord.Guild):
-        """Removes all existing channels, categories, and custom roles."""
-        print(f"[Nuke Engine] Nuking channels and roles for guild: {guild.name} ({guild.id})")
-        for channel in list(guild.channels):
-            try:
-                await channel.delete(reason="Template Engine Auto-Build Server Reset")
-                await asyncio.sleep(0.2)
-            except Exception as e:
-                print(f"[Nuke Warning] Could not delete channel {channel.name}: {e}")
-
-        for role in list(guild.roles):
-            if role.is_default() or role.managed:
-                continue
-            try:
-                await role.delete(reason="Template Engine Auto-Build Server Reset")
-                await asyncio.sleep(0.2)
-            except Exception as e:
-                print(f"[Nuke Warning] Could not delete role {role.name}: {e}")
-
-    # -------------------------------------------------------------
-    # LISTEN FOR PREMIUM AUTO-BUILD LOG MESSAGES
+    # LISTEN FOR MESSAGES & PREMIUM AUTO-BUILD LOG MESSAGES
     # -------------------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+
+        # ---------------------------------------------------------
+        # CHAT POINTING & ANTI-SPAM SYSTEM
+        # ---------------------------------------------------------
+        user_id_str = str(message.author.id)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        content_clean = message.content.strip().lower()
+
+        if user_id_str not in USER_MSG_TRACKER:
+            USER_MSG_TRACKER[user_id_str] = {
+                "last_time": 0.0,
+                "msg_count": 0,
+                "last_content": "",
+                "penalty_until": 0.0
+            }
+
+        user_track = USER_MSG_TRACKER[user_id_str]
+
+        # Check 1: Is user in a 30-minute spam penalty pause?
+        if now_ts < user_track["penalty_until"]:
+            # User is currently penalized; ignore message for points
+            return
+
+        time_passed = now_ts - user_track["last_time"]
+
+        # Check 2: Duplicate message check while 30s cooldown is active
+        if time_passed < 30.0 and content_clean and content_clean == user_track["last_content"]:
+            # Trigger 30-minute points penalty pause
+            user_track["penalty_until"] = now_ts + (30 * 60)
+            user_track["last_time"] = now_ts
+            user_track["msg_count"] = 0
+            print(f"[Points Penalty] User {message.author.name} ({user_id_str}) penalized for 30 mins due to duplicate message.")
+            return
+
+        # Check 3: Cooldown & message count calculation
+        if time_passed >= 30.0:
+            # Cooldown expired: reset timer and message counter
+            user_track["last_time"] = now_ts
+            user_track["msg_count"] = 1
+            user_track["last_content"] = content_clean
+            add_user_points(user_id_str, 2)
+        else:
+            # User sent a message within the 30-second window
+            user_track["msg_count"] += 1
+            if user_track["msg_count"] > 5:
+                # Spam detected (>5 msgs in under 30s): restart the 30s timer without granting points
+                user_track["last_time"] = now_ts
+                user_track["msg_count"] = 0
+            user_track["last_content"] = content_clean
+
+        # ---------------------------------------------------------
+        # AUTO-BUILD LISTENER
+        # ---------------------------------------------------------
         if str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
             return
 
