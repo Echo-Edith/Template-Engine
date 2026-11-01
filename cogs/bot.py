@@ -1,308 +1,159 @@
-import os
-import re
-import io
 import json
-import random
 import asyncio
 import aiohttp
 import discord
-from datetime import datetime, timezone, timedelta
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
-from pymongo import MongoClient
 
-BOT_OWNER_ID = 1219266886143967245
-
-CHANNEL_LOG_WEBSITE_LOGIN = 1563524100276617248
-CHANNEL_LOG_NON_PREMIUM_DESIGNS = 1563524101522464900
 CHANNEL_LOG_PREMIUM_DESIGNS = 1563544108696477802
-CHANNEL_LOG_SUBSCRIPTIONS = 1564262413514182739
 
-MONGO_URI = os.getenv("MONGO_URI")
-ROBLOX_COOKIE = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip()
-ROBLOX_SUBSCRIPTION_ID = (os.getenv("SUBSCRIPTION_ID") or "EXP-4378714879071224384").strip()
-ROBLOX_UNIVERSE_ID = (os.getenv("ROBLOX_UNIVERSE_ID") or "").strip()
-CLIENT_ID = (os.getenv("DISCORD_CLIENT_ID") or "").strip()
-
-def get_formatted_roblox_cookie():
-    if not ROBLOX_COOKIE:
-        return ""
-    clean = ROBLOX_COOKIE.strip('"\'')
-    if clean.startswith(".ROBLOSECURITY="):
-        return clean
-    return f".ROBLOSECURITY={clean}"
-
-db_premium = None
-db_users = None
-db_sub_tracker = None
-
-if MONGO_URI:
-    try:
-        mongo_client = MongoClient(MONGO_URI)
-        try:
-            db = mongo_client.get_default_database()
-        except Exception:
-            db = mongo_client["static_studio_db"]
-        db_premium = db["premium_users"]
-        db_users = db["persistent_users"]
-        db_sub_tracker = db["roblox_subscription_tracker"]
-    except Exception as e:
-        print(f"[Bot Mongo Warning] {e}")
-
-LOCAL_PREMIUM_USERS = {}
-LOCAL_SUB_TRACKER = {}
-
-def is_user_premium(user_id: str) -> bool:
-    uid = str(user_id)
-    if int(uid) == BOT_OWNER_ID:
-        return True
-    now = datetime.now(timezone.utc)
-    if db_premium is not None:
-        doc = db_premium.find_one({"user_id": uid})
-        if doc and "expires_at" in doc:
-            expires_at = doc["expires_at"]
-            if isinstance(expires_at, str):
-                expires_at = datetime.fromisoformat(expires_at)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            return expires_at > now
-        return False
-    else:
-        doc = LOCAL_PREMIUM_USERS.get(uid)
-        if doc:
-            exp = doc.get("expires_at")
-            if isinstance(exp, str): exp = datetime.fromisoformat(exp)
-            if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
-            return exp > now
-        return False
-
-async def build_layout_for_guild(bot: commands.Bot, guild: discord.Guild, layout_data: dict) -> dict:
-    categories_created = 0
-    channels_created = 0
-
-    try:
-        categories_data = layout_data.get("layout", {}).get("categories", [])
-        if not categories_data and "categories" in layout_data:
-            categories_data = layout_data.get("categories", [])
-
-        for cat_data in categories_data:
-            cat_name = cat_data.get("name", "CATEGORY")
-            emoji = cat_data.get("emoji", "")
-            full_cat_name = f"{emoji} {cat_name}".strip() if emoji else cat_name
-            
-            category = await guild.create_category(name=full_cat_name)
-            categories_created += 1
-
-            for ch_data in cat_data.get("channels", []):
-                ch_name = ch_data.get("name", "channel")
-                ch_emoji = ch_data.get("emoji", "")
-                ch_type = ch_data.get("type", "text")
-                ch_topic = ch_data.get("topic", "")
-                
-                clean_ch_name = f"{ch_emoji}-{ch_name}".strip("-") if ch_emoji else ch_name
-
-                if ch_type == "voice":
-                    await guild.create_voice_channel(name=clean_ch_name, category=category)
-                else:
-                    await guild.create_text_channel(name=clean_ch_name, category=category, topic=ch_topic)
-                channels_created += 1
-                await asyncio.sleep(0.4)
-
-        return {
-            "success": True,
-            "categories_created": categories_created,
-            "channels_created": channels_created
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-class RetryBuildView(discord.ui.View):
-    def __init__(self, bot, target_server_id: str, payload: dict):
-        super().__init__(timeout=86400)
-        self.bot = bot
-        self.target_server_id = target_server_id
-        self.payload = payload
-
-        invite_url = f"https://discord.com/api/oauth2/authorize?client_id={CLIENT_ID}&permissions=8&scope=bot%20applications.commands&guild_id={target_server_id}"
+class RetryAutoBuildView(discord.ui.View):
+    def __init__(self, client_id: str, target_guild_id: str, payload: dict):
+        super().__init__(timeout=None)
+        invite_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
         self.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
+        self.payload = payload
+        self.target_guild_id = target_guild_id
 
     @discord.ui.button(label="Retry Auto-Deploy", style=discord.ButtonStyle.primary, custom_id="btn_retry_autobuild")
-    async def retry_build(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def retry_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-
-        guild = self.bot.get_guild(int(self.target_server_id))
+        guild = interaction.client.get_guild(int(self.target_guild_id))
         if not guild:
-            await interaction.followup.send(
-                f"The bot is still not present in server ID `{self.target_server_id}`. Please invite the bot first, then click retry.",
-                ephemeral=True
-            )
+            await interaction.followup.send("Bot is still not present in the target server. Please invite the bot first!", ephemeral=True)
             return
 
-        res = await build_layout_for_guild(self.bot, guild, self.payload)
-        if res.get("success"):
-            await interaction.followup.send(
-                f"Auto-build successful! Created {res.get('categories_created')} categories & {res.get('channels_created')} channels in **{guild.name}**.",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(f"Auto-build error: `{res.get('error')}`", ephemeral=True)
+        await interaction.followup.send("Bot detected in server! Starting layout auto-build...", ephemeral=True)
+        bot_cog = interaction.client.get_cog("BotCog")
+        if bot_cog:
+            await bot_cog.execute_autobuild(guild, self.payload)
+
 
 class BotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.scan_roblox_subscriptions.start()
 
-    def cog_unload(self):
-        self.scan_roblox_subscriptions.cancel()
+    async def execute_autobuild(self, guild: discord.Guild, payload: dict):
+        layout = payload.get("layout", {})
+        roles_data = layout.get("roles", [])
+        categories_data = layout.get("categories", [])
+
+        # 1. Create Roles
+        created_roles = {}
+        for r in roles_data:
+            r_name = r.get("name")
+            if not r_name:
+                continue
+            r_color_hex = r.get("color", "#8b5cf6").lstrip("#")
+            try:
+                color_int = int(r_color_hex, 16)
+            except Exception:
+                color_int = 0x8b5cf6
+
+            existing = discord.utils.get(guild.roles, name=r_name)
+            if not existing:
+                try:
+                    role_obj = await guild.create_role(name=r_name, color=discord.Color(color_int))
+                    created_roles[r_name] = role_obj
+                except Exception as e:
+                    print(f"[Role Creation Error] {e}")
+            else:
+                created_roles[r_name] = existing
+
+        # 2. Create Categories & Channels
+        for cat_data in categories_data:
+            cat_name = cat_data.get("name", "CATEGORY")
+            emoji = cat_data.get("emoji", "")
+            full_cat_name = f"{emoji} {cat_name}".strip() if emoji else cat_name
+
+            try:
+                cat_obj = await guild.create_category(name=full_cat_name)
+            except Exception as e:
+                print(f"[Category Creation Error] {e}")
+                continue
+
+            for ch_data in cat_data.get("channels", []):
+                ch_name = ch_data.get("name", "channel").lower().replace(" ", "-")
+                ch_emoji = ch_data.get("emoji", "")
+                full_ch_name = f"{ch_emoji} {ch_name}".strip() if ch_emoji else ch_name
+                ch_type = ch_data.get("type", "text")
+                topic = ch_data.get("topic", "")
+                is_readonly = ch_data.get("read_only", False)
+
+                overwrites = {}
+                if is_readonly:
+                    overwrites[guild.default_role] = discord.PermissionOverwrite(send_messages=False)
+
+                try:
+                    if ch_type == "voice":
+                        await cat_obj.create_voice_channel(name=full_ch_name, overwrites=overwrites)
+                    else:
+                        await cat_obj.create_text_channel(name=full_ch_name, topic=topic, overwrites=overwrites)
+                except Exception as e:
+                    print(f"[Channel Creation Error] {e}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author == self.bot.user:
+        if message.author.bot:
             return
 
-        if message.channel.id != CHANNEL_LOG_PREMIUM_DESIGNS and message.channel.id != CHANNEL_LOG_NON_PREMIUM_DESIGNS:
-            return
+        # Intercept attached design blueprints in the Premium Log channel
+        if message.channel.id == CHANNEL_LOG_PREMIUM_DESIGNS and message.attachments:
+            for attachment in message.attachments:
+                if attachment.filename == "blueprint.json":
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(attachment.url) as resp:
+                                if resp.status == 200:
+                                    payload_bytes = await resp.read()
+                                    payload = json.loads(payload_bytes.decode("utf-8"))
 
-        # Check for attached blueprint or payload identifier
-        if "PAYLOAD_ATTACHED" in message.content or message.attachments:
-            try:
-                payload = None
-                
-                # Check for attached blueprint.json file
-                for attachment in message.attachments:
-                    if attachment.filename.endswith(".json"):
-                        file_bytes = await attachment.read()
-                        payload = json.loads(file_bytes.decode("utf-8"))
-                        break
+                                    target_guild_id = str(payload.get("target_server_id", ""))
+                                    user_id = str(payload.get("submitting_user_id", ""))
 
-                # Fallback: Parse from inline content if present
-                if not payload and "AUTOBUILD_PAYLOAD_START" in message.content:
-                    raw_match = re.search(r"AUTOBUILD_PAYLOAD_START```json\s*(.*?)\s*```AUTOBUILD_PAYLOAD_END", message.content, re.DOTALL)
-                    if raw_match:
-                        payload = json.loads(raw_match.group(1).strip())
+                                    if not target_guild_id.isdigit():
+                                        return
 
-                if not payload:
-                    return
+                                    guild = self.bot.get_guild(int(target_guild_id))
 
-                target_server_id = payload.get("target_server_id")
-                user_id = payload.get("submitting_user_id")
-                is_premium = payload.get("is_premium", False)
+                                    # Target server found -> Run instant auto-build
+                                    if guild:
+                                        await self.execute_autobuild(guild, payload)
+                                        confirm_embed = discord.Embed(
+                                            title="Auto-Deploy Completed",
+                                            description=f"Successfully built server architecture for **{guild.name}** (`{guild.id}`).",
+                                            color=0x2ecc71
+                                        )
+                                        await message.channel.send(embed=confirm_embed)
+                                    else:
+                                        # Bot is not present in target guild -> DM user & alert log channel
+                                        missing_embed = discord.Embed(
+                                            title="Auto-Deploy Pending (Bot Missing)",
+                                            description=f"The bot is not present in Target Guild ID `{target_guild_id}`. A direct message has been sent to the user with an invite link.",
+                                            color=0xE74C3C
+                                        )
+                                        await message.channel.send(embed=missing_embed)
 
-                # Auto-build functionality is strictly for Premium Users
-                if not is_premium:
-                    return
-
-                guild = self.bot.get_guild(int(target_server_id)) if target_server_id and str(target_server_id).isdigit() else None
-
-                # Bot not in target server -> Notify user via DM and post alert in channel
-                if not guild:
-                    if user_id:
-                        try:
-                            user_obj = await self.bot.fetch_user(int(user_id))
-                            if user_obj:
-                                dm_embed = discord.Embed(
-                                    title="BOT NOT FOUND IN TARGET SERVER",
-                                    description=(
-                                        f"Your auto-build request for Target Guild ID `{target_server_id}` could not start because the bot is not present in that server.\n\n"
-                                        f"Please click **Add Bot to Server** below to invite the bot, then click **Retry Auto-Deploy**."
-                                    ),
-                                    color=0xf43f5e
-                                )
-                                view = RetryBuildView(self.bot, str(target_server_id), payload)
-                                await user_obj.send(embed=dm_embed, view=view)
-                        except Exception as dm_err:
-                            print(f"[DM User Warning Error] {dm_err}")
-
-                    log_warn_embed = discord.Embed(
-                        title="AUTO-BUILD PENDING (BOT NOT IN SERVER)",
-                        description=f"User <@{user_id}> submitted a premium design for Target Guild `{target_server_id}`, but the bot is not in that server. Direct Message notification sent to user.",
-                        color=0xf43f5e,
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                    await message.channel.send(embed=log_warn_embed)
-                    return
-
-                # Execute auto-build for premium users
-                res = await build_layout_for_guild(self.bot, guild, payload)
-                if res.get("success"):
-                    confirm_embed = discord.Embed(
-                        title="AUTO-BUILD EXECUTED SUCCESSFULLY",
-                        description=f"Created `{res.get('categories_created')}` categories and `{res.get('channels_created')}` channels in **{guild.name}** (`{guild.id}`).",
-                        color=0x2ecc71,
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                    await message.channel.send(embed=confirm_embed)
-                else:
-                    err_embed = discord.Embed(
-                        title="AUTO-BUILD FAILED",
-                        description=f"Failed to build channels in **{guild.name}**: `{res.get('error')}`",
-                        color=0xf43f5e
-                    )
-                    await message.channel.send(embed=err_embed)
-
-            except Exception as e:
-                print(f"[Auto-Build Execution Exception] {e}")
-
-    @tasks.loop(hours=6.0)
-    async def scan_roblox_subscriptions(self):
-        cookie = get_formatted_roblox_cookie()
-        if not cookie or not ROBLOX_UNIVERSE_ID or not ROBLOX_SUBSCRIPTION_ID:
-            return
-
-        log_channel = self.bot.get_channel(CHANNEL_LOG_SUBSCRIPTIONS)
-        if not log_channel:
-            return
-
-        now = datetime.now(timezone.utc)
-        url = f"https://apis.roblox.com/universes/v1/{ROBLOX_UNIVERSE_ID}/subscriptions/{ROBLOX_SUBSCRIPTION_ID}/subscribers"
-        headers = {"Cookie": cookie, "User-Agent": "Mozilla/5.0"}
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json()
-
-            subscribers = data.get("subscribers", [])
-            for sub in subscribers:
-                roblox_id = str(sub.get("user", {}).get("id"))
-                state = str(sub.get("state", "")).upper()
-                expiration_raw = sub.get("expirationTime")
-
-                if not roblox_id:
-                    continue
-
-                record = db_sub_tracker.find_one({"roblox_id": roblox_id}) if db_sub_tracker is not None else LOCAL_SUB_TRACKER.get(roblox_id)
-
-                if not record:
-                    new_doc = {
-                        "roblox_id": roblox_id,
-                        "state": state,
-                        "last_seen": now.isoformat(),
-                        "expiration_time": expiration_raw,
-                        "renew_count": 0,
-                        "logged_expired": False
-                    }
-                    if db_sub_tracker is not None:
-                        db_sub_tracker.insert_one(new_doc)
-                    else:
-                        LOCAL_SUB_TRACKER[roblox_id] = new_doc
-
-                    embed = discord.Embed(
-                        title="NEW SUBSCRIPTION DETECTED",
-                        description=f"Roblox User ID: `{roblox_id}`\nState: `{state}`\nExpiration: `{expiration_raw or 'N/A'}`",
-                        color=0x2ecc71,
-                        timestamp=now
-                    )
-                    await log_channel.send(embed=embed)
-
-        except Exception as e:
-            print(f"[Subscription Scanner Exception] {e}")
-
-    @scan_roblox_subscriptions.before_loop
-    async def before_scan_subscriptions(self):
-        await self.bot.wait_until_ready()
+                                        # Direct message user with Add Bot & Retry buttons
+                                        if user_id.isdigit():
+                                            user = await self.bot.fetch_user(int(user_id))
+                                            if user:
+                                                dm_embed = discord.Embed(
+                                                    title="Action Required: Add Bot to Auto-Deploy Layout",
+                                                    description=f"You requested an instant auto-deploy for server ID `{target_guild_id}`, but the bot is not present in that server.\n\nPlease click **Add Bot to Server** below and then click **Retry Auto-Deploy**.",
+                                                    color=0xF1C40F
+                                                )
+                                                view = RetryAutoBuildView(
+                                                    client_id=str(self.bot.user.id),
+                                                    target_guild_id=target_guild_id,
+                                                    payload=payload
+                                                )
+                                                try:
+                                                    await user.send(embed=dm_embed, view=view)
+                                                except Exception as err:
+                                                    print(f"[DM User Error] {err}")
+                    except Exception as ex:
+                        print(f"[Auto-Build Execution Exception] {ex}")
 
 async def setup(bot):
     await bot.add_cog(BotCog(bot))
