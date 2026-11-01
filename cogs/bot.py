@@ -42,6 +42,54 @@ LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
 
 
+def parse_duration_to_timedelta(duration_str: str) -> timedelta:
+    """Parses duration strings like 1d, 7d, 30d, 1y, inf into timedelta objects."""
+    if not duration_str:
+        return timedelta(days=30)
+    dur = duration_str.lower().strip()
+    if dur in ["inf", "infinite", "perma", "permanent", "lifetime"]:
+        return timedelta(days=36500)
+    
+    match = re.match(r'^(\d+)\s*([smhdwy])$', dur)
+    if not match:
+        return timedelta(days=30)
+    
+    val, unit = int(match.group(1)), match.group(2)
+    if unit == 's': return timedelta(seconds=val)
+    if unit == 'm': return timedelta(minutes=val)
+    if unit == 'h': return timedelta(hours=val)
+    if unit == 'd': return timedelta(days=val)
+    if unit == 'w': return timedelta(weeks=val)
+    if unit == 'y': return timedelta(days=val * 365)
+    return timedelta(days=30)
+
+
+def set_user_premium(user_id: str, duration_td: timedelta):
+    """Saves premium status into MongoDB or local fallback storage."""
+    exp_date = datetime.now(timezone.utc) + duration_td
+    iso_exp = exp_date.isoformat()
+    if db_premium is not None:
+        try:
+            db_premium.update_one(
+                {"discord_id": str(user_id)},
+                {"$set": {"discord_id": str(user_id), "expires_at": iso_exp, "updated_at": datetime.now(timezone.utc).isoformat()}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo Set Premium Error] {e}")
+    LOCAL_PREMIUM_USERS[str(user_id)] = iso_exp
+
+
+def remove_user_premium(user_id: str):
+    """Removes premium status from MongoDB or local storage."""
+    if db_premium is not None:
+        try:
+            db_premium.delete_one({"discord_id": str(user_id)})
+        except Exception as e:
+            print(f"[Mongo Remove Premium Error] {e}")
+    LOCAL_PREMIUM_USERS.pop(str(user_id), None)
+
+
 def strip_emojis(text: str) -> str:
     if not text:
         return ""
@@ -83,41 +131,45 @@ class BotCog(commands.Cog):
         # Immediately defer to prevent Discord 3-second timeout ("Application did not respond")
         await interaction.response.defer(ephemeral=True)
 
-        # Permission check: Only Bot Owner or Users with Manage Server / Administrator permissions
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator or interaction.permissions.manage_guild
+        try:
+            # Permission check: Only Bot Owner or Users with Manage Server / Administrator permissions
+            is_owner = (interaction.user.id == BOT_OWNER_ID)
+            is_admin = interaction.permissions.administrator or interaction.permissions.manage_guild
 
-        if not (is_owner or is_admin):
-            await interaction.followup.send("❌ You do not have permission to use this command.", ephemeral=True)
-            return
+            if not (is_owner or is_admin):
+                await interaction.followup.send("❌ You do not have permission to use this command.", ephemeral=True)
+                return
 
-        user_id_str = str(user.id)
+            user_id_str = str(user.id)
 
-        if action.value == "add":
-            parsed_td = parse_duration_to_timedelta(duration)
-            set_user_premium(user_id_str, parsed_td)
+            if action.value == "add":
+                parsed_td = parse_duration_to_timedelta(duration)
+                set_user_premium(user_id_str, parsed_td)
 
-            if parsed_td == timedelta(days=36500):
-                exp_str = "Lifetime (Permanent)"
-            else:
-                exp_date = datetime.now(timezone.utc) + parsed_td
-                exp_str = f"<t:{int(exp_date.timestamp())}:R>"
+                if parsed_td == timedelta(days=36500):
+                    exp_str = "Lifetime (Permanent)"
+                else:
+                    exp_date = datetime.now(timezone.utc) + parsed_td
+                    exp_str = f"<t:{int(exp_date.timestamp())}:R>"
 
-            embed = discord.Embed(
-                title="⭐ TE Premium Granted",
-                description=f"Successfully granted **TE Premium** to {user.mention} (`{user.id}`).\n\n**Duration:** `{duration}`\n**Expires:** {exp_str}",
-                color=0xF1C40F
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+                embed = discord.Embed(
+                    title="⭐ TE Premium Granted",
+                    description=f"Successfully granted **TE Premium** to {user.mention} (`{user.id}`).\n\n**Duration:** `{duration}`\n**Expires:** {exp_str}",
+                    color=0xF1C40F
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
-        elif action.value == "remove":
-            remove_user_premium(user_id_str)
-            embed = discord.Embed(
-                title="🗑️ TE Premium Revoked",
-                description=f"Successfully revoked **TE Premium** from {user.mention} (`{user.id}`).",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            elif action.value == "remove":
+                remove_user_premium(user_id_str)
+                embed = discord.Embed(
+                    title="🗑️ TE Premium Revoked",
+                    description=f"Successfully revoked **TE Premium** from {user.mention} (`{user.id}`).",
+                    color=0xF43F5E
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            print(f"[Premium Set Command Error] {e}")
+            await interaction.followup.send(f"❌ An error occurred while executing the command: `{e}`", ephemeral=True)
 
     # -------------------------------------------------------------
     # SUB-ROUTINE: NUKE TARGET SERVER BEFORE AUTO-BUILDING
