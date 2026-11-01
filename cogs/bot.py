@@ -154,7 +154,22 @@ class BotCog(commands.Cog):
                     # BOT IS IN GUILD & USER IS AUTHORIZED -> EXECUTE AUTOMATIC BUILDING
                     print(f"[Auto-Build] Starting layout deployment for guild {guild.name} ({guild.id})")
                     
-                    # 1. Create Roles
+                    # 1. NUKE EXISTING SERVER CHANNELS & NON-DEFAULT ROLES BEFORE BUILDING
+                    print(f"[Auto-Build Nuke] Wiping existing channels and custom roles in {guild.name}...")
+                    for channel in list(guild.channels):
+                        try:
+                            await channel.delete(reason="Template Engine Auto-Build: Clearing old layout")
+                        except Exception as delete_chan_err:
+                            print(f"[Nuke Warning] Could not delete channel {channel.name}: {delete_chan_err}")
+
+                    for role in list(guild.roles):
+                        if not role.is_default() and not role.managed:
+                            try:
+                                await role.delete(reason="Template Engine Auto-Build: Clearing old roles")
+                            except Exception as delete_role_err:
+                                print(f"[Nuke Warning] Could not delete role {role.name}: {delete_role_err}")
+
+                    # 2. Create Roles
                     role_map = {}
                     for r_data in layout.get("roles", []):
                         r_name = r_data.get("name")
@@ -175,16 +190,31 @@ class BotCog(commands.Cog):
                         else:
                             role_map[r_name] = existing_role
 
-                    # 2. Create Categories & Channels
+                    # 3. Create Categories & Channels
                     for cat_data in layout.get("categories", []):
                         cat_name = cat_data.get("name", "CATEGORY")
+                        cat_emoji = cat_data.get("emoji", "").strip()
+                        
+                        # Avoid duplicating emoji if already in category name
+                        if cat_emoji and not cat_name.startswith(cat_emoji):
+                            full_cat_name = f"{cat_emoji} {cat_name}"
+                        else:
+                            full_cat_name = cat_name
+
                         try:
-                            category = await guild.create_category(name=cat_name)
+                            category = await guild.create_category(name=full_cat_name)
 
                             for chan_data in cat_data.get("channels", []):
-                                ch_name = chan_data.get("name", "channel")
+                                ch_raw_name = chan_data.get("name", "channel").strip()
+                                ch_emoji = chan_data.get("emoji", "").strip()
                                 ch_type = chan_data.get("type", "text")
                                 ch_topic = chan_data.get("topic", "")
+
+                                # Ensure single emoji formatting (prevents doubling)
+                                if ch_emoji and not ch_raw_name.startswith(ch_emoji):
+                                    ch_name = f"{ch_emoji} {ch_raw_name}"
+                                else:
+                                    ch_name = ch_raw_name
 
                                 try:
                                     if ch_type == "voice":
