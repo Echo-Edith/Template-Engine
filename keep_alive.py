@@ -2,28 +2,26 @@ import os
 import json
 import asyncio
 import requests
-from flask import Flask, request, jsonify, render_template, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 from pymongo import MongoClient
 
-# Attempt importing ai_brain if present in directory
-try:
-    import ai_brain
-    AI_BRAIN_AVAILABLE = True
-except ImportError:
-    AI_BRAIN_AVAILABLE = False
+# Import ai_brain module
+import ai_brain
 
-app = Flask(__name__, template_folder="templates")
-app.secret_key = os.environ.get("SESSION_SECRET", "template_engine_secret_key_1337").strip()
+app = Flask(__name__)
+app.secret_key = os.environ.get("SESSION_SECRET", "te_premium_secret_key_1337").strip()
 
-# Database & Environment Setup
-MONGO_URI = os.environ.get("MONGO_URI")
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "").strip()
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
-PREMIUM_DESIGN_CHANNEL_ID = "1563544108696477802"
+DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "").strip()
 
-db_users = None
+PREMIUM_DESIGN_CHANNEL_ID = "1563544108696477802"
+NON_PREMIUM_DESIGN_CHANNEL_ID = "1563524101522464900"
+DISCORD_BOT_TOKEN = (os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("BOT_TOKEN") or "").strip()
+
+MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
+db_users = None
 
 if MONGO_URI:
     try:
@@ -32,173 +30,240 @@ if MONGO_URI:
             db = mongo_client.get_default_database()
         except Exception:
             db = mongo_client.get_database("static_studio_db")
-        db_users = db["persistent_users"]
         db_premium = db["premium_users"]
-        print("[MongoDB Keep-Alive] Connected successfully.")
+        db_users = db["persistent_users"]
     except Exception as e:
-        print(f"[MongoDB Warning] {e}")
+        print(f"[MongoDB Warning in Flask] {e}")
 
 
-def strip_emojis(text: str) -> str:
-    import re
-    if not text:
-        return ""
-    clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27ff\u2300-\u23ff]', '', text)
-    return clean.strip()
+def is_user_premium(discord_id: str) -> bool:
+    if not discord_id or discord_id == "0":
+        return False
+    if db_premium is not None:
+        try:
+            doc = db_premium.find_one({"discord_id": str(discord_id)})
+            if doc:
+                return True
+        except Exception as e:
+            print(f"[Mongo Premium Check Error] {e}")
+    return False
 
 
-@app.route('/')
+@app.route("/")
 def index():
-    user = session.get('user')
-    roblox_user = None
+    user = session.get("user")
+    roblox_user = session.get("roblox_user")
     is_premium = False
 
-    if user and db_users:
-        doc = db_users.find_one({"discord_id": str(user.get("id"))})
-        if doc:
-            roblox_user = doc.get("roblox_data")
-
-    if user and db_premium:
-        p_doc = db_premium.find_one({"user_id": str(user.get("id"))})
-        if p_doc:
-            is_premium = True
+    if user and user.get("id"):
+        is_premium = is_user_premium(user["id"])
+        if db_users is not None and not roblox_user:
+            try:
+                p_doc = db_users.find_one({"discord_id": str(user["id"])})
+                if p_doc and p_doc.get("roblox_data"):
+                    roblox_user = p_doc["roblox_data"]
+                    session["roblox_user"] = roblox_user
+            except Exception as e:
+                print(f"[Mongo Fetch User Error] {e}")
 
     return render_template(
-        'index.html',
+        "index.html",
         user=user,
         roblox_user=roblox_user,
         is_premium=is_premium,
         discord_client_id=DISCORD_CLIENT_ID,
-        roblox_store_url="https://www.roblox.com"
+        roblox_store_url="https://www.roblox.com/games/refer?PlaceId=123456789"
     )
 
 
-@app.route('/generate-blueprint', methods=['POST'])
-def generate_blueprint():
-    data = request.get_json() or {}
-    prompt = data.get('prompt', '').strip()
-    server_id = data.get('server_id', '').strip()
+@app.route("/login")
+def login():
+    if not DISCORD_CLIENT_ID or not DISCORD_REDIRECT_URI:
+        return "Discord Auth configuration missing.", 500
+    scope = "identify guilds"
+    discord_auth_url = (
+        f"https://discord.com/api/oauth2/authorize?client_id={DISCORD_CLIENT_ID}"
+        f"&redirect_uri={requests.utils.quote(DISCORD_REDIRECT_URI)}&response_type=code&scope={scope}"
+    )
+    return redirect(discord_auth_url)
 
-    if not prompt:
-        return jsonify({"success": False, "error": "Prompt description is required."}), 400
 
-    # Run AI generation via ai_brain if available
-    if AI_BRAIN_AVAILABLE:
+@app.route("/callback")
+def callback():
+    code = request.args.get("code")
+    if not code:
+        return redirect(url_for("index"))
+
+    data = {
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": DISCORD_REDIRECT_URI
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    try:
+        token_res = requests.post("https://discord.com/api/oauth2/token", data=data, headers=headers)
+        token_json = token_res.json()
+        access_token = token_json.get("access_token")
+
+        if not access_token:
+            return redirect(url_for("index"))
+
+        user_res = requests.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        user_data = user_res.json()
+
+        avatar_id = user_data.get("avatar")
+        user_id = user_data.get("id")
+        avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_id}.png" if avatar_id else "https://cdn.discordapp.com/embed/avatars/0.png"
+
+        session["user"] = {
+            "id": user_id,
+            "username": user_data.get("username"),
+            "discriminator": user_data.get("discriminator"),
+            "avatar": avatar_url
+        }
+    except Exception as e:
+        print(f"[OAuth Callback Error] {e}")
+
+    return redirect(url_for("index"))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
+
+
+@app.route("/generate-blueprint", methods=["POST"])
+def generate_blueprint_endpoint():
+    try:
+        data = request.get_json() or {}
+        prompt = data.get("prompt", "").strip()
+        server_id = data.get("server_id", "").strip()
+
+        if not prompt:
+            return jsonify({"success": False, "error": "Prompt is required."}), 400
+
+        user = session.get("user") or {"id": "0", "username": "Anonymous"}
+
+        # Call ai_brain.generate_server_layout directly via asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            print(f"Triggering ai_brain generation for prompt: {prompt}")
-            ai_result = asyncio.run(ai_brain.generate_server_layout(
-                prompt=prompt,
-                server_id=server_id,
-                user_info={"id": "web_user", "username": "Web Client"}
-            ))
+            ai_result = loop.run_until_complete(
+                ai_brain.generate_server_layout(
+                    prompt=prompt,
+                    server_id=server_id,
+                    user_info=user
+                )
+            )
+        finally:
+            loop.close()
 
-            if isinstance(ai_result, dict) and ai_result.get("success"):
-                layout_data = ai_result.get("data", {})
+        if not ai_result or not ai_result.get("success"):
+            error_msg = ai_result.get("error") if ai_result else "AI layout generation failed."
+            return jsonify({"success": False, "error": error_msg}), 500
 
-                # Process categories and extract clean channel names directly without default replacements
-                for category in layout_data.get("categories", []):
-                    category["name"] = strip_emojis(category.get("name", ""))
+        blueprint = ai_result.get("data", {})
+        return jsonify({"success": True, "blueprint": blueprint}), 200
 
-                    for channel in category.get("channels", []):
-                        # Extract exact channel name from AI response without forced fallbacks
-                        raw_name = (
-                            channel.get("name") or 
-                            channel.get("clean_name") or 
-                            channel.get("title") or 
-                            channel.get("formatted_name") or 
-                            ""
-                        )
-                        channel["name"] = strip_emojis(str(raw_name)).strip()
-
-                return jsonify({
-                    "success": True,
-                    "blueprint": layout_data
-                }), 200
-            else:
-                err_msg = ai_result.get("error") if isinstance(ai_result, dict) else "AI generation failed."
-                return jsonify({
-                    "success": False,
-                    "error": f"AI layout generation failed: {err_msg}"
-                }), 400
-
-        except Exception as e:
-            print(f"[AI Generation Exception] {e}")
-            return jsonify({
-                "success": False,
-                "error": f"AI layout generation failed: {str(e)}"
-            }), 400
-
-    # Stop and return error if GEMINI API / AI module is unavailable; no premade layouts used
-    return jsonify({
-        "success": False,
-        "error": "AI generation service is currently unavailable. GEMINI_API_KEY environment variable is not configured."
-    }), 500
+    except Exception as e:
+        print(f"[Generate Blueprint Error] {e}")
+        return jsonify({"success": False, "error": f"Generation failed: {str(e)}"}), 500
 
 
-@app.route('/api/submit-design', methods=['POST'])
-def submit_design():
-    data = request.get_json() or {}
-    user = session.get('user', {})
-    user_id = str(user.get('id', '1219266886143967245'))
-    username = str(user.get('username', 'Web User'))
+@app.route("/api/submit-design", methods=["POST"])
+def submit_design_endpoint():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Unauthorized. Please log in with Discord."}), 401
 
-    is_premium = False
-    if db_premium and user_id:
-        p_doc = db_premium.find_one({"user_id": user_id})
-        if p_doc:
-            is_premium = True
+    payload = request.get_json() or {}
+    user_id = user.get("id", "0")
+    is_premium = is_user_premium(user_id)
 
-    target_server_id = data.get('target_server_id', '')
-    server_name = data.get('server_name', 'Custom Server')
-    invite_link = data.get('invite_link', '')
-    prompt = data.get('prompt', '')
-    layout = data.get('layout', {})
+    target_channel_id = PREMIUM_DESIGN_CHANNEL_ID if is_premium else NON_PREMIUM_DESIGN_CHANNEL_ID
 
-    categories_count = data.get('categories_count', 0)
-    channels_count = data.get('channels_count', 0)
-    roles_count = data.get('roles_count', 0)
+    target_server_id = payload.get("target_server_id", "Not Provided")
+    invite_link = payload.get("invite_link", "Not Provided")
+    prompt_text = payload.get("prompt", "No prompt description provided.")
+    server_name = payload.get("server_name", "Custom Server")
 
-    payload = {
+    categories_count = payload.get("categories_count", 0)
+    channels_count = payload.get("channels_count", 0)
+    roles_count = payload.get("roles_count", 0)
+    layout = payload.get("layout", {})
+
+    account_age = ai_brain.calculate_account_age(user_id)
+
+    embed_title = "⭐ Premium Auto-Build Submitted" if is_premium else "📝 Standard Design Submitted"
+    embed_color = 0xF1C40F if is_premium else 0x8B5CF6
+
+    embed_payload = {
+        "title": embed_title,
+        "color": embed_color,
+        "fields": [
+            {
+                "name": "👤 Submitting User",
+                "value": f"**Mention:** <@{user_id}>\n**User ID:** `{user_id}`\n**Account Age:** `{account_age}`",
+                "inline": False
+            },
+            {
+                "name": "🌐 Server Information",
+                "value": f"**Target Guild ID:** `{target_server_id}`\n**Invite Link:** {invite_link}",
+                "inline": False
+            },
+            {
+                "name": "📊 Server Overview",
+                "value": f"**Categories:** `{categories_count}` | **Channels:** `{channels_count}` | **Roles:** `{roles_count}`",
+                "inline": False
+            },
+            {
+                "name": "💬 Prompt Description",
+                "value": f"```{prompt_text[:950]}```",
+                "inline": False
+            }
+        ],
+        "footer": {"text": "Template Engine Infrastructure Log"},
+        "timestamp": ai_brain.datetime.now(ai_brain.timezone.utc).isoformat()
+    }
+
+    attachment_data = {
         "submitting_user_id": user_id,
-        "submitting_username": username,
-        "is_premium": is_premium,
         "target_server_id": target_server_id,
         "server_name": server_name,
         "invite_link": invite_link,
-        "prompt": prompt,
+        "prompt": prompt_text,
+        "is_premium": is_premium,
         "layout": layout
     }
 
-    # Dispatch to Discord Channel Log via Bot HTTP API
+    json_bytes = json.dumps(attachment_data, indent=2).encode("utf-8")
+
     if DISCORD_BOT_TOKEN:
-        headers = {
-            "Authorization": f"Bot {DISCORD_BOT_TOKEN}"
-        }
-
-        embed = {
-            "title": "👑 TE Premium Instant Auto-Build Dispatch" if is_premium else "📋 Standard Design Submitted",
-            "color": 0xF1C40F if is_premium else 0x8B5CF6,
-            "fields": [
-                {"name": "👤 User", "value": f"<@{user_id}> (`{user_id}`)", "inline": True},
-                {"name": "🎯 Target Guild ID", "value": f"`{target_server_id}`", "inline": True},
-                {"name": "🔗 Server Invite", "value": invite_link or "`N/A`", "inline": False},
-                {"name": "📊 Layout Overview", "value": f"**Categories:** {categories_count} | **Channels:** {channels_count} | **Roles:** {roles_count}", "inline": False},
-                {"name": "📝 Prompt Description", "value": prompt or "*No prompt specified*", "inline": False}
-            ],
-            "footer": {"text": "Template Engine Infrastructure Log"}
-        }
-
-        files = {
-            "payload_json": ("payload.json", json.dumps(embed), "application/json"),
-            "file": ("blueprint.json", json.dumps(payload, indent=2), "application/json")
-        }
-
         try:
-            url = f"https://discord.com/api/v10/channels/{PREMIUM_DESIGN_CHANNEL_ID}/messages"
-            resp = requests.post(url, headers=headers, files=files)
-            print(f"[Discord Log Post] Status Code: {resp.status_code}")
+            url = f"https://discord.com/api/v10/channels/{target_channel_id}/messages"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+            
+            payload_json = {
+                "embeds": [embed_payload]
+            }
+
+            files = {
+                "payload_json": (None, json.dumps(payload_json), "application/json"),
+                "files[0]": ("blueprint.json", json_bytes, "application/json")
+            }
+
+            res = requests.post(url, headers=headers, files=files)
+            if res.status_code not in (200, 201):
+                print(f"[Discord API Log Drop] Status {res.status_code}: {res.text}")
         except Exception as e:
-            print(f"[Discord Log Post Error] {e}")
+            print(f"[Discord Log Exception] {e}")
 
     return jsonify({
         "success": True,
@@ -207,10 +272,5 @@ def submit_design():
     }), 200
 
 
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-
-if __name__ == '__main__':
-    run()
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
