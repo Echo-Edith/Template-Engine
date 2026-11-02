@@ -59,6 +59,7 @@ USER_LAST_MESSAGE_TIME = {}
 USER_SPAM_COUNTS = {}
 USER_PENALTY_UNTIL = {}
 
+
 # --- HELPER FUNCTIONS FOR POINTS & PREMIUM ---
 def get_user_points(discord_id: str) -> int:
     if db_points is not None:
@@ -90,6 +91,58 @@ def add_user_points(discord_id: str, amount: int) -> int:
     new_total = max(0, current + amount)
     set_user_points(discord_id, new_total)
     return new_total
+
+
+def parse_duration_to_timedelta(duration_str: str) -> timedelta:
+    """Parses duration strings like 1d, 7d, 30d, 1y, inf into timedelta objects."""
+    if not duration_str:
+        return timedelta(days=30)
+    dur = duration_str.lower().strip()
+    if dur in ["inf", "infinite", "perma", "permanent", "lifetime"]:
+        return timedelta(days=36500)
+    
+    match = re.match(r'^(\d+)\s*([smhdwy])$', dur)
+    if not match:
+        return timedelta(days=30)
+    
+    val, unit = int(match.group(1)), match.group(2)
+    if unit == 's': return timedelta(seconds=val)
+    if unit == 'm': return timedelta(minutes=val)
+    if unit == 'h': return timedelta(hours=val)
+    if unit == 'd': return timedelta(days=val)
+    if unit == 'w': return timedelta(weeks=val)
+    if unit == 'y': return timedelta(days=val * 365)
+    return timedelta(days=30)
+
+
+def set_user_premium(user_id: str, duration_td: timedelta):
+    """Saves premium status into MongoDB or local fallback storage."""
+    exp_date = datetime.now(timezone.utc) + duration_td
+    iso_exp = exp_date.isoformat()
+    if db_premium is not None:
+        try:
+            db_premium.update_one(
+                {"discord_id": str(user_id)},
+                {"$set": {
+                    "discord_id": str(user_id),
+                    "expires_at": iso_exp,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo Set Premium Error] {e}")
+    LOCAL_PREMIUM_USERS[str(user_id)] = iso_exp
+
+
+def remove_user_premium(user_id: str):
+    """Removes premium status from MongoDB or local storage."""
+    if db_premium is not None:
+        try:
+            db_premium.delete_one({"discord_id": str(user_id)})
+        except Exception as e:
+            print(f"[Mongo Remove Premium Error] {e}")
+    LOCAL_PREMIUM_USERS.pop(str(user_id), None)
 
 
 def is_user_premium(discord_id: str) -> bool:
@@ -747,6 +800,72 @@ class BotCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed)
 
+    # -------------------------------------------------------------
+    # SLASH COMMAND: SET / REMOVE PREMIUM STATUS
+    # -------------------------------------------------------------
+    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium subscription status for a user.")
+    @app_commands.describe(
+        user="Target user to modify premium status for.",
+        action="Select whether to grant or revoke premium.",
+        duration="Duration format e.g. 1d, 7d, 30d, 1y, inf (Defaults to 30d)."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Grant Premium", value="add"),
+        app_commands.Choice(name="Revoke Premium", value="remove")
+    ])
+    async def premium_set_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        action: app_commands.Choice[str],
+        duration: Optional[str] = "30d"
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need Administrator permissions to manage TE Premium memberships.",
+                color=0xEF4444
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        try:
+            if action.value == "add":
+                duration_td = parse_duration_to_timedelta(duration or "30d")
+                set_user_premium(str(user.id), duration_td)
+                exp_date = datetime.now(timezone.utc) + duration_td
+                exp_ts = int(exp_date.timestamp())
+
+                embed = discord.Embed(
+                    title="TE Premium Granted",
+                    description=f"Successfully granted TE Premium to {user.mention}!\n\n**Duration:** {duration}\n**Expires:** <t:{exp_ts}:F> (<t:{exp_ts}:R>)",
+                    color=0xF1C40F
+                )
+            else:
+                remove_user_premium(str(user.id))
+                embed = discord.Embed(
+                    title="TE Premium Revoked",
+                    description=f"Successfully revoked TE Premium access from {user.mention}.",
+                    color=0xEF4444
+                )
+
+            embed.set_thumbnail(url=user.display_avatar.url)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            print(f"[Premium Set Error] {e}")
+            embed = discord.Embed(
+                title="Error Modifying Premium Status",
+                description=f"An error occurred: {str(e)}",
+                color=0xEF4444
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
     @app_commands.command(name="set", description="Deploy interactive UI panels (Verification or Un-sync).")
     @app_commands.choices(action=[
         app_commands.Choice(name="verification", value="verification"),
@@ -789,3 +908,8 @@ async def setup(bot: commands.Bot):
 
     await bot.add_cog(BotCog(bot))
     print("[Setup] BotCog loaded with persistent verification & un-sync views registered.")
+```
+
+### Key Highlights
+- **`/premium-set`**: Restored with choices `add` and `remove`, supporting custom durations (`1d`, `7d`, `30d`, `1y`, `inf`). Saves records directly to MongoDB (`premium_users` collection) and local fallback dictionary.
+- **`is_user_premium` & `set_user_premium`**: Correctly checks expiration timestamps and syncs with web layouts and Flask routes in `keep_alive.py`.
