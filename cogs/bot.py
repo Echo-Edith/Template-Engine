@@ -1434,11 +1434,11 @@ class BotCog(commands.Cog):
                 guild = None
 
         if not guild:
-            await self.notify_missing_bot(submitting_user_id, target_guild_id, layout)
+            await self.notify_missing_bot(submitting_user_id, target_guild_id, layout, message.channel)
             return
 
         if not is_premium_submission and str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
-            print(f"[Frontend Direct DM] Initiating direct DM with 5 retries to submitter {submitting_user_id}...")
+            print(f"[Frontend Direct Dispatch] Attempting DM/Channel dispatch to submitter {submitting_user_id}...")
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
         else:
             print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
@@ -1489,7 +1489,7 @@ class BotCog(commands.Cog):
                     dm_sent = True
                     break
                 except discord.Forbidden:
-                    print(f"[DM Blocked] Direct Messages are disabled for user {user_id}.")
+                    print(f"[DM Blocked] Direct Messages are disabled for user {user_id}. Falling back to channel post.")
                     break
                 except Exception as attempt_err:
                     print(f"[DM Retry {attempt}/5] DM delivery failed: {attempt_err}")
@@ -1498,6 +1498,14 @@ class BotCog(commands.Cog):
 
         if dm_sent:
             return
+
+        if fallback_channel:
+            try:
+                await fallback_channel.send(content=f"<@{user_id}> (DM delivery unavailable, options sent here):", embed=embed, view=view)
+                print(f"[Fallback Success] Posted deployment embed in submission channel #{fallback_channel.name}")
+                return
+            except Exception as chan_err:
+                print(f"[Fallback Channel Send Error] Could not post to submission channel: {chan_err}")
 
         target_gid = int(target_guild_id) if target_guild_id and target_guild_id != "0" else 0
         target_guild = self.bot.get_guild(target_gid) if target_gid else None
@@ -1519,30 +1527,31 @@ class BotCog(commands.Cog):
                 try:
                     await target_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
                     print(f"[Fallback Success] Posted deployment embed in target server channel #{target_channel.name}")
-                    return
                 except Exception as t_err:
                     print(f"[Target Server Send Error] Could not post in target server {target_guild.name}: {t_err}")
 
-        if fallback_channel:
-            try:
-                await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
-                print(f"[Fallback Success] Posted deployment embed in submission channel #{fallback_channel.name}")
-            except Exception as chan_err:
-                print(f"[Fallback Channel Send Error] Could not post to submission channel: {chan_err}")
-
-    async def notify_missing_bot(self, user_id: str, target_guild_id: str, layout: dict = None):
+    async def notify_missing_bot(self, user_id: str, target_guild_id: str, layout: dict = None, fallback_channel: Optional[discord.TextChannel] = None):
+        embed = discord.Embed(
+            title="Bot Missing in Target Server",
+            description=f"<@{user_id}> Auto-deployment paused. The bot is not present in target server ID `{target_guild_id}`.\n\nPlease add the bot using the link below, then click **Build**.",
+            color=0xF43F5E
+        )
+        view = PremiumMissingBotView(bot=self.bot, submitting_user_id=user_id, target_guild_id=target_guild_id, layout=layout)
+        
+        dm_sent = False
         try:
             user = await self.bot.fetch_user(int(user_id))
             if user:
-                embed = discord.Embed(
-                    title="Bot Missing in Target Server",
-                    description=f"Auto-deployment paused. The bot is not present in target server ID `{target_guild_id}`.\n\nPlease add the bot using the link below, then click **Build**.",
-                    color=0xF43F5E
-                )
-                view = PremiumMissingBotView(bot=self.bot, submitting_user_id=user_id, target_guild_id=target_guild_id, layout=layout)
                 await user.send(embed=embed, view=view)
+                dm_sent = True
         except Exception as e:
             print(f"[DM Warning] Failed sending DM to {user_id}: {e}")
+
+        if not dm_sent and fallback_channel:
+            try:
+                await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
+            except Exception as e:
+                print(f"[Channel Fallback Warning] Failed sending channel message: {e}")
 
     async def nuke_guild_structure(self, guild: discord.Guild):
         """Deletes existing channels, categories, and custom roles prior to auto-building."""
