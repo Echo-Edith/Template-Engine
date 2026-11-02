@@ -361,7 +361,7 @@ class PremiumMissingBotView(discord.ui.View):
         self.layout = layout or {}
 
         invite_url = f"https://discord.com/api/oauth2/authorize?client_id={bot.user.id if bot and bot.user else ''}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
-        self.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
+        self.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link, custom_id="btn_premium_invite_link"))
 
     @discord.ui.button(label="Build", style=discord.ButtonStyle.success, custom_id="btn_premium_build_retry")
     async def build_retry_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -407,7 +407,7 @@ class NonPremiumDeploymentView(discord.ui.View):
         self.layout = layout or {}
 
         store_url = dev_product_url or "https://www.roblox.com/games/6094950399/Template-Engine#!/store"
-        self.add_item(discord.ui.Button(label="Buy Roblox Dev Product", url=store_url, style=discord.ButtonStyle.link))
+        self.add_item(discord.ui.Button(label="Buy Roblox Dev Product", url=store_url, style=discord.ButtonStyle.link, custom_id="btn_buy_roblox_dev_prod"))
 
     @discord.ui.button(label="Verify Purchase", style=discord.ButtonStyle.success, custom_id="btn_verify_dev_product")
     async def verify_purchase_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -764,27 +764,43 @@ class BotCog(commands.Cog):
                     except Exception:
                         pass
 
-                # Parse groups & giveaway heuristics
+                # Parse groups & check membership in Template Engine Roblox Group
                 groups_list = g_data.get("data", [])
                 formatted_groups = []
                 giveaway_indicators = []
 
+                te_group_id = str(os.getenv("ROBLOX_GROUP_ID", "")).strip()
+                in_te_group = False
+                te_role_name = None
+
                 gw_keywords = ["robux", "giveaway", "rbx", "free", "rewards", "payout", "claim"]
 
-                for item in groups_list[:5]:
+                for item in groups_list:
                     grp = item.get("group", {})
                     g_name = grp.get("name", "Group")
-                    g_id = grp.get("id")
+                    g_id = str(grp.get("id", ""))
                     role = item.get("role", {}).get("name", "Member")
                     g_desc = grp.get("description", "").lower()
                     g_shout = (grp.get("shout") or {}).get("body", "").lower() if isinstance(grp.get("shout"), dict) else ""
 
-                    formatted_groups.append(f"• **[{g_name}](https://www.roblox.com/groups/{g_id})**\n   └─ Role: `{role}`")
+                    # Check if this group matches the Template Engine Group ID
+                    if te_group_id and g_id == te_group_id:
+                        in_te_group = True
+                        te_role_name = role
 
                     # Check for giveaway indicators
                     matches = [kw for kw in gw_keywords if kw in g_name.lower() or kw in g_desc or kw in g_shout]
                     if matches:
                         giveaway_indicators.append(f"• **{g_name}** — Keyword detected: `{', '.join(set(matches))}`")
+
+                # Format Template Engine Group field
+                if te_group_id:
+                    if in_te_group:
+                        formatted_groups.append(f"• **[Template Engine Group](https://www.roblox.com/groups/{te_group_id})**\n   └─ Status: `Member` ✅\n   └─ Role: `{te_role_name}`")
+                    else:
+                        formatted_groups.append(f"• **[Template Engine Group](https://www.roblox.com/groups/{te_group_id})**\n   └─ Status: `Not a Member` ❌")
+                else:
+                    formatted_groups.append("• *ROBLOX_GROUP_ID not configured in environment.*")
 
                 # Parse experiences
                 exp_list = games_data.get("data", [])
@@ -874,13 +890,10 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
+        if interaction.user.id != BOT_OWNER_ID:
             embed = discord.Embed(
                 title="Permission Denied",
-                description="You need Administrator permissions to manage giveaways.",
+                description="This command is strictly restricted to the bot owner.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1051,13 +1064,10 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
+        if interaction.user.id != BOT_OWNER_ID:
             embed = discord.Embed(
                 title="Permission Denied",
-                description="You need Administrator permissions to deploy system panels.",
+                description="This command is strictly restricted to the bot owner.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1154,13 +1164,10 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
+        if interaction.user.id != BOT_OWNER_ID:
             embed = discord.Embed(
                 title="Permission Denied",
-                description="You need Administrator permissions to configure server settings.",
+                description="This command is strictly restricted to the bot owner.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1264,13 +1271,10 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
+        if interaction.user.id != BOT_OWNER_ID:
             embed = discord.Embed(
                 title="Permission Denied",
-                description="You need Administrator permissions to modify user points.",
+                description="This command is strictly restricted to the bot owner.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1321,13 +1325,10 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
+        if interaction.user.id != BOT_OWNER_ID:
             embed = discord.Embed(
                 title="Permission Denied",
-                description="You need Administrator permissions to manage TE Premium memberships.",
+                description="This command is strictly restricted to the bot owner.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1655,8 +1656,10 @@ class BotCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    # Register persistent views for static panels
+    # Register persistent views for static panels across redeployments
     bot.add_view(RobloxVerificationView())
     bot.add_view(RobloxUnsyncView())
     bot.add_view(GiveawayPanelView())
+    bot.add_view(NonPremiumDeploymentView(bot=bot))
+    bot.add_view(PremiumMissingBotView(bot=bot))
     await bot.add_cog(BotCog(bot))
