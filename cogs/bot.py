@@ -12,7 +12,9 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
-# -------------------------------------------------------------
+# List of known Roblox giveaway/influencer group indicators for heuristic detection
+GIVEAWAY_KEYWORDS = ["giveaway", "robux", "rbx", "free robux", "rewards", "payout", "claim", "spin", "win"]
+
 # GLOBAL CONSTANTS & LOGGING CHANNELS
 # -------------------------------------------------------------
 BOT_OWNER_ID = 1219266886143967245
@@ -850,6 +852,163 @@ class BotCog(commands.Cog):
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # -------------------------------------------------------------
+    # SLASH COMMAND: ROBLOX USER INTELLIGENCE SEARCH
+    # -------------------------------------------------------------
+    @app_commands.command(name="search", description="Lookup detailed Roblox profile info, groups, giveaway risk, games, badges, and history.")
+    @app_commands.describe(username_or_id="Exact Roblox username or numeric Roblox User ID to search.")
+    async def search_cmd(self, interaction: discord.Interaction, username_or_id: str):
+        await interaction.response.defer(ephemeral=False)
+        query = username_or_id.strip()
+
+        roblox_id = None
+        username = ""
+        display_name = ""
+        created_at_str = "Unknown"
+        account_age_str = "Unknown"
+
+        async with aiohttp.ClientSession() as session:
+            # 1. Resolve Username or User ID
+            if query.isdigit():
+                roblox_id = query
+            else:
+                async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [query], "excludeBannedUsers": False}) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        user_list = data.get("data", [])
+                        if user_list:
+                            roblox_id = str(user_list[0].get("id"))
+                            username = user_list[0].get("name")
+                            display_name = user_list[0].get("displayName", username)
+
+            if not roblox_id:
+                embed = discord.Embed(
+                    title="User Not Found",
+                    description=f"Could not locate Roblox account for `{query}`.",
+                    color=0xF43F5E
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            # 2. Fetch Detailed User Details
+            async with session.get(f"https://users.roblox.com/v1/users/{roblox_id}") as resp:
+                if resp.status == 200:
+                    u_data = await resp.json()
+                    username = u_data.get("name", username)
+                    display_name = u_data.get("displayName", username)
+                    created_raw = u_data.get("created", "")
+                    if created_raw:
+                        try:
+                            dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                            created_at_str = dt.strftime("%B %d, %Y")
+                            days_old = (datetime.now(timezone.utc) - dt).days
+                            years = days_old // 365
+                            rem_days = days_old % 365
+                            account_age_str = f"{years} yr{'s' if years != 1 else ''}, {rem_days} day{'s' if rem_days != 1 else ''} ({days_old} days)"
+                        except Exception:
+                            pass
+
+            # 3. Fetch Avatar Headshot Thumbnail
+            avatar_url = ""
+            async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={roblox_id}&size=420x420&format=Png&isCircular=false") as resp:
+                if resp.status == 200:
+                    thumb_data = await resp.json()
+                    if thumb_data.get("data"):
+                        avatar_url = thumb_data["data"][0].get("imageUrl", "")
+
+            # 4. Fetch User Groups & Giveaway Risk Analysis
+            groups_lines = []
+            giveaway_indicators = []
+            async with session.get(f"https://groups.roblox.com/v2/users/{roblox_id}/groups/roles") as resp:
+                if resp.status == 200:
+                    g_data = await resp.json()
+                    g_list = g_data.get("data", [])[:10]
+                    for idx, g in enumerate(g_list, start=1):
+                        group_info = g.get("group", {})
+                        g_id = group_info.get("id")
+                        g_name = group_info.get("name", "Group")
+                        role_name = g.get("role", {}).get("name", "Member")
+                        g_desc = group_info.get("description", "").lower()
+                        g_shout = (group_info.get("shout") or {}).get("body", "").lower()
+                        owner_info = group_info.get("owner", {})
+                        owner_name = owner_info.get("username", "Unknown") if owner_info else "No Owner"
+
+                        # Hyperlink group name to Roblox Group URL
+                        g_link = f"[{g_name}](https://www.roblox.com/groups/{g_id})"
+                        groups_lines.append(f"**{idx}. {g_link}**\n└─ **Role:** {role_name}\n└─ **Owner:** {owner_name}")
+
+                        # Giveaway Keyword Detection Heuristics
+                        matched_kw = [kw for kw in GIVEAWAY_KEYWORDS if kw in g_name.lower() or kw in g_desc or kw in g_shout]
+                        if matched_kw:
+                            giveaway_indicators.append(f"- **{g_name}** — Giveaway keywords detected ({', '.join(matched_kw[:3])})")
+
+            # 5. Fetch User Experiences / Games Created
+            experiences_lines = []
+            async with session.get(f"https://games.roblox.com/v2/users/{roblox_id}/games?accessFilter=Public&limit=5") as resp:
+                if resp.status == 200:
+                    game_data = await resp.json()
+                    games = game_data.get("data", [])
+                    for game in games[:3]:
+                        g_title = game.get("name", "Experience")
+                        visits = game.get("placeVisits", 0)
+                        creator_name = game.get("creator", {}).get("name", username)
+                        experiences_lines.append(f"- **{g_title}**\n  └─ **Visits:** {visits:,}\n  └─ **Creator:** {creator_name}")
+
+            # 6. Fetch Badges
+            badges_lines = []
+            async with session.get(f"https://badges.roblox.com/v1/users/{roblox_id}/badges?limit=5&sortOrder=Desc") as resp:
+                if resp.status == 200:
+                    badge_data = await resp.json()
+                    b_list = badge_data.get("data", [])
+                    for b in b_list[:3]:
+                        b_name = b.get("name", "Badge")
+                        badges_lines.append(f"- {b_name}")
+
+            # 7. Fetch Username History
+            history_lines = []
+            async with session.get(f"https://users.roblox.com/v1/users/{roblox_id}/username-history?limit=10&sortOrder=Desc") as resp:
+                if resp.status == 200:
+                    h_data = await resp.json()
+                    h_list = h_data.get("data", [])
+                    for h in h_list:
+                        history_lines.append(f"- {h.get('name')}")
+
+        # Construct Structured Response
+        embed = discord.Embed(
+            title="🔎 Roblox Lookup",
+            description="━━━━━━━━━━━━━━━━",
+            color=0x8B5CF6
+        )
+
+        user_block = (
+            f"**Username:** {username}\n"
+            f"**Display Name:** {display_name}\n"
+            f"**User ID:** `{roblox_id}`\n"
+            f"**Account Created:** {created_at_str}\n"
+            f"**Account Age:** {account_age_str}"
+        )
+        embed.add_field(name="👤 USER", value=user_block, inline=False)
+
+        if avatar_url:
+            embed.set_thumbnail(url=avatar_url)
+
+        groups_block = "\n\n".join(groups_lines) if groups_lines else "No public groups found."
+        embed.add_field(name="👥 GROUPS", value=groups_block[:1024], inline=False)
+
+        giveaway_block = "\n".join(giveaway_indicators) if giveaway_indicators else "None detected."
+        embed.add_field(name="💰 GIVEAWAY INDICATORS", value=giveaway_block[:1024], inline=False)
+
+        exp_block = "\n".join(experiences_lines) if experiences_lines else "No public experiences created."
+        embed.add_field(name="🎮 EXPERIENCES", value=exp_block[:1024], inline=False)
+
+        badges_block = "\n".join(badges_lines) if badges_lines else "No recent badges."
+        embed.add_field(name="🏆 BADGES", value=badges_block[:1024], inline=False)
+
+        history_block = "\n".join(history_lines) if history_lines else "No previous usernames recorded."
+        embed.add_field(name="📜 HISTORY\nPrevious usernames:", value=history_block[:1024], inline=False)
+
+        await interaction.followup.send(embed=embed)
 
     # -------------------------------------------------------------
     # LISTEN FOR MESSAGES & PREMIUM AUTO-BUILD LOG MESSAGES
