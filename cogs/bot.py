@@ -857,12 +857,14 @@ class BotCog(commands.Cog):
             await self.notify_user_permission_failed(submitting_user_id, target_guild_id, "User lacks Administrator or Server Owner permissions in target server.")
             return
 
-        if is_premium_submission or (str(message.channel.id) == str(PREMIUM_DESIGN_CHANNEL_ID)):
+        # Handle non-premium vs premium flows directly from frontend payload BEFORE channel logging
+        if not is_premium_submission and str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
+            print(f"[Frontend Direct DM] Initiating direct DM to submitter {submitting_user_id} before logging...")
+            # Step 1: Send DM directly to the submitter using frontend payload data
+            await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
+        else:
             print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
             await self.execute_auto_build(guild, layout)
-        else:
-            print(f"[Non-Premium] Triggering deployment DM for user {submitting_user_id}...")
-            await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
 
     async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None):
         dev_product_url = os.getenv("ROBLOX_DEV_PRODUCT_URL", "https://www.roblox.com/games/refer?PlaceId=123456789")
