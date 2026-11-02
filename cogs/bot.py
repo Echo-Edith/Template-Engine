@@ -315,7 +315,6 @@ class GiveawayPanelView(discord.ui.View):
             except Exception as e:
                 print(f"[Mongo Giveaway Update Error] {e}")
 
-        # Update message footer count
         try:
             embed = interaction.message.embeds[0]
             embed.set_footer(text=f"Entries: {len(entries)} | Hosted by Template Engine")
@@ -710,7 +709,6 @@ class BotCog(commands.Cog):
                 r_id = None
                 username = None
 
-                # Resolve query to Roblox User ID
                 if q.isdigit():
                     r_id = q
                     async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
@@ -730,7 +728,6 @@ class BotCog(commands.Cog):
                     await interaction.followup.send(f"Could not find Roblox user matching `{q}`.")
                     return
 
-                # Concurrent API queries
                 async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
                     p_data = await resp.json() if resp.status == 200 else {}
 
@@ -749,7 +746,6 @@ class BotCog(commands.Cog):
                 async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar?userIds={r_id}&size=720x720&format=Png&isCircular=false") as resp:
                     thumb_data = await resp.json() if resp.status == 200 else {}
 
-                # Parse user profile details
                 display_name = p_data.get("displayName", username)
                 created_raw = p_data.get("created", "")
                 created_str = "Unknown"
@@ -764,7 +760,6 @@ class BotCog(commands.Cog):
                     except Exception:
                         pass
 
-                # Parse groups & check membership in Template Engine Roblox Group
                 groups_list = g_data.get("data", [])
                 formatted_groups = []
                 giveaway_indicators = []
@@ -783,17 +778,14 @@ class BotCog(commands.Cog):
                     g_desc = grp.get("description", "").lower()
                     g_shout = (grp.get("shout") or {}).get("body", "").lower() if isinstance(grp.get("shout"), dict) else ""
 
-                    # Check if this group matches the Template Engine Group ID
                     if te_group_id and g_id == te_group_id:
                         in_te_group = True
                         te_role_name = role
 
-                    # Check for giveaway indicators
                     matches = [kw for kw in gw_keywords if kw in g_name.lower() or kw in g_desc or kw in g_shout]
                     if matches:
                         giveaway_indicators.append(f"• **{g_name}** — Keyword detected: `{', '.join(set(matches))}`")
 
-                # Format Template Engine Group field
                 if te_group_id:
                     if in_te_group:
                         formatted_groups.append(f"• **[Template Engine Group](https://www.roblox.com/groups/{te_group_id})**\n   └─ Status: `Member` ✅\n   └─ Role: `{te_role_name}`")
@@ -802,7 +794,6 @@ class BotCog(commands.Cog):
                 else:
                     formatted_groups.append("• *ROBLOX_GROUP_ID not configured in environment.*")
 
-                # Parse experiences
                 exp_list = games_data.get("data", [])
                 formatted_exp = []
                 for game in exp_list[:3]:
@@ -810,15 +801,12 @@ class BotCog(commands.Cog):
                     visits = game.get("placeVisits", 0)
                     formatted_exp.append(f"• **{g_title}**\n   └─ Visits: `{visits:,}`")
 
-                # Parse badges
                 badge_list = badges_data.get("data", [])
                 formatted_badges = [f"• {b.get('name')}" for b in badge_list[:3]]
 
-                # Parse username history
                 names_hist = hist_data.get("data", [])
                 formatted_hist = [f"• {n.get('name')}" for n in names_hist[:5]]
 
-                # Build final output embed
                 avatar_url = ""
                 if thumb_data.get("data"):
                     avatar_url = thumb_data["data"][0].get("imageUrl", "")
@@ -935,7 +923,6 @@ class BotCog(commands.Cog):
                 except Exception as e:
                     print(f"[Mongo Save Giveaway Error] {e}")
 
-            # Post Roblox group shout announcement
             roblox_group_id = os.getenv("ROBLOX_GROUP_ID", "").strip()
             if roblox_group_id:
                 shout_msg = f"🎉 NEW GIVEAWAY: {prize}! Join our community server to enter!"
@@ -1115,7 +1102,6 @@ class BotCog(commands.Cog):
         add_user_points(str(member.id), 20)
         print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
 
-        # Check for configured welcome channel
         guild_id_str = str(member.guild.id)
         settings = LOCAL_GUILD_SETTINGS.get(guild_id_str)
 
@@ -1376,7 +1362,6 @@ class BotCog(commands.Cog):
         if message.author.bot and not (is_design_channel and message.attachments):
             return
 
-        # CHAT POINTING & ANTI-SPAM SYSTEM
         if not message.author.bot:
             user_id_str = str(message.author.id)
             now_ts = datetime.now(timezone.utc).timestamp()
@@ -1412,7 +1397,6 @@ class BotCog(commands.Cog):
                             user_track["msg_count"] = 0
                         user_track["last_content"] = content_clean
 
-        # AUTO-BUILD / NON-PREMIUM DM LISTENER
         if not is_design_channel:
             return
 
@@ -1515,7 +1499,6 @@ class BotCog(commands.Cog):
         if dm_sent:
             return
 
-        # Fallback 1: Target Guild
         target_gid = int(target_guild_id) if target_guild_id and target_guild_id != "0" else 0
         target_guild = self.bot.get_guild(target_gid) if target_gid else None
 
@@ -1540,7 +1523,6 @@ class BotCog(commands.Cog):
                 except Exception as t_err:
                     print(f"[Target Server Send Error] Could not post in target server {target_guild.name}: {t_err}")
 
-        # Fallback 2: Submission Channel
         if fallback_channel:
             try:
                 await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
@@ -1656,7 +1638,6 @@ class BotCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    # Register persistent views for static panels across redeployments
     bot.add_view(RobloxVerificationView())
     bot.add_view(RobloxUnsyncView())
     bot.add_view(GiveawayPanelView())
