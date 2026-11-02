@@ -816,7 +816,138 @@ class BotCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -------------------------------------------------------------
+    # SLASH COMMAND: DEPLOY INTERACTIVE PANELS
+    # -------------------------------------------------------------
+    @app_commands.command(name="set", description="Deploy verification or un-sync interactive embed panels into a channel.")
+    @app_commands.describe(
+        action="Select whether to deploy the verification or un-sync panel.",
+        channel="The target channel to send the embed panel into.",
+        description="Custom description text for the panel."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Verification Panel", value="verification"),
+        app_commands.Choice(name="Un-Sync Panel", value="un-sync")
+    ])
+    async def set_panel_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        channel: discord.TextChannel,
+        description: str
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need Administrator permissions to deploy system panels.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        try:
+            if action.value == "verification":
+                embed = discord.Embed(
+                    title="Roblox Account Verification",
+                    description=description,
+                    color=0x8B5CF6
+                )
+                embed.set_footer(text="Template Engine Roblox Synchronization System")
+                view = RobloxVerificationView()
+            else:
+                embed = discord.Embed(
+                    title="Un-Sync Roblox Account",
+                    description=description,
+                    color=0xF43F5E
+                )
+                embed.set_footer(text="Template Engine Account Management")
+                view = RobloxUnsyncView()
+
+            await channel.send(embed=embed, view=view)
+
+            confirm_embed = discord.Embed(
+                title="Panel Successfully Deployed",
+                description=f"Deployed **{action.name}** into {channel.mention}.",
+                color=0x2ECC71
+            )
+            await interaction.followup.send(embed=confirm_embed, ephemeral=True)
+
+        except Exception as e:
+            print(f"[Set Command Error] {e}")
+            await interaction.followup.send(f"Failed to deploy panel: `{str(e)}`", ephemeral=True)
+
+    # -------------------------------------------------------------
     # SLASH COMMAND: SET / REMOVE PREMIUM STATUS
+    # -------------------------------------------------------------
+    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium subscription status for a user.")
+    @app_commands.describe(
+        user="Target user to modify premium status for.",
+        action="Select whether to grant or revoke premium.",
+        duration="Duration format e.g. 1d, 7d, 30d, 1y, inf (Defaults to 30d)."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Grant Premium", value="add"),
+        app_commands.Choice(name="Revoke Premium", value="remove")
+    ])
+    async def premium_set_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        action: app_commands.Choice[str],
+        duration: Optional[str] = "30d"
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need Administrator permissions to manage TE Premium memberships.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        try:
+            if action.value == "add":
+                duration_td = parse_duration_to_timedelta(duration or "30d")
+                set_user_premium(str(user.id), duration_td)
+                exp_date = datetime.now(timezone.utc) + duration_td
+                exp_ts = int(exp_date.timestamp())
+
+                embed = discord.Embed(
+                    title="TE Premium Granted",
+                    description=f"Successfully granted TE Premium to {user.mention}!\n\nDuration: {duration}\nExpires: <t:{exp_ts}:F> (<t:{exp_ts}:R>)",
+                    color=0xF1C40F
+                )
+            else:
+                remove_user_premium(str(user.id))
+                embed = discord.Embed(
+                    title="TE Premium Revoked",
+                    description=f"Successfully revoked TE Premium access from {user.mention}.",
+                    color=0xF43F5E
+                )
+
+            embed.set_thumbnail(url=user.display_avatar.url)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            print(f"[Premium Set Error] {e}")
+            embed = discord.Embed(
+                title="Error Modifying Premium Status",
+                description=f"An error occurred: {str(e)}",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # -------------------------------------------------------------
+    # EVENT LISTENER: WELCOME BONUS (20 POINTS)
     # -------------------------------------------------------------
     @app_commands.command(name="premium-set", description="Grant or revoke TE Premium subscription status for a user.")
     @app_commands.describe(
