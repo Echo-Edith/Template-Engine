@@ -56,7 +56,7 @@ LOCAL_GUILD_SETTINGS = {}
 USER_POINTS_DATA = {}
 ACTIVE_GIVEAWAYS = {}
 
-# In-memory tracking for generated verification codes { user_id: { "code": "TE-12345", "expires_at": float } }
+# In-memory tracking for generated verification codes
 PENDING_VERIFICATION_CODES = {}
 
 # In-memory tracking for used Dev Product receipt IDs to ensure ONE-TIME use
