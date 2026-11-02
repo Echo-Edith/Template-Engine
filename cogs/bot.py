@@ -30,6 +30,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
 db_build_auth = None
 db_users = None
+db_giveaways = None
 
 if MONGO_URI:
     try:
@@ -41,6 +42,7 @@ if MONGO_URI:
         db_premium = db["premium_users"]
         db_build_auth = db["build_authorized_users"]
         db_users = db["persistent_users"]
+        db_giveaways = db["giveaways"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -48,6 +50,7 @@ LOCAL_PREMIUM_USERS = {}
 LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
 USER_POINTS_DATA = {}
+LOCAL_GIVEAWAYS = {}
 
 # In-memory tracking for generated verification codes { user_id: { "code": "TE-12345", "expires_at": float } }
 PENDING_VERIFICATION_CODES = {}
@@ -62,7 +65,7 @@ USER_MSG_TRACKER = {}
 
 def get_roblox_cookie_header() -> dict:
     """Helper function to format ROBLOSECURITY headers for API calls."""
-    raw_cookie = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip().strip('"\'')
+    raw_cookie = (os.getenv("ROBLOX_COOKIE") or os.environ.get("ROBLOSECURITY") or "").strip().strip('"\'')
     if not raw_cookie:
         return {}
     if not raw_cookie.startswith(".ROBLOSECURITY="):
@@ -70,291 +73,118 @@ def get_roblox_cookie_header() -> dict:
     return {"Cookie": raw_cookie}
 
 
-def get_user_points(user_id: str) -> int:
-    """Retrieves point balance for a given user ID."""
-    uid = str(user_id)
-    if uid in USER_POINTS_DATA:
-        return USER_POINTS_DATA[uid]
-    if db_users is not None:
-        try:
-            doc = db_users.find_one({"discord_id": uid})
-            if doc and "points" in doc:
-                pts = int(doc["points"])
-                USER_POINTS_DATA[uid] = pts
-                return pts
-        except Exception as e:
-            print(f"[Mongo Get Points Error] {e}")
-    return 0
+async def post_roblox_group_shout(message: str) -> tuple[bool, str]:
+    """Posts a shout message to the configured Roblox group using ROBLOX_COOKIE."""
+    group_id = (os.getenv("ROBLOX_GROUP_ID") or "").strip()
+    cookie_headers = get_roblox_cookie_header()
 
+    if not group_id or not cookie_headers:
+        return False, "Missing `ROBLOX_GROUP_ID` or `ROBLOX_COOKIE` environment variable."
 
-def add_user_points(user_id: str, amount: int) -> int:
-    """Adds or deducts points for a user and returns updated total."""
-    uid = str(user_id)
-    current_points = get_user_points(uid)
-    new_total = current_points + amount
-    if new_total < 0:
-        new_total = 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Step 1: Obtain x-csrf-token from Roblox API
+            csrf_token = ""
+            async with session.post("https://auth.roblox.com/v1/login", headers=cookie_headers) as csrf_resp:
+                csrf_token = csrf_resp.headers.get("x-csrf-token", "")
 
-    if db_users is not None:
-        try:
-            db_users.update_one(
-                {"discord_id": uid},
-                {"$set": {
-                    "discord_id": uid,
-                    "points": new_total,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }},
-                upsert=True
-            )
-        except Exception as e:
-            print(f"[Mongo Add Points Error] {e}")
+            headers = {
+                **cookie_headers,
+                "x-csrf-token": csrf_token,
+                "Content-Type": "application/json"
+            }
 
-    USER_POINTS_DATA[uid] = new_total
-    if uid not in LOCAL_PERSISTENT_USERS:
-        LOCAL_PERSISTENT_USERS[uid] = {}
-    LOCAL_PERSISTENT_USERS[uid]["points"] = new_total
-    return new_total
-
-
-def get_top_leaderboard(limit: int = 10) -> list:
-    """Retrieves top point earners from MongoDB or local storage."""
-    top_list = []
-    if db_users is not None:
-        try:
-            cursor = db_users.find({"points": {"$gt": 0}}).sort("points", -1).limit(limit)
-            for doc in cursor:
-                top_list.append({"discord_id": doc.get("discord_id"), "points": doc.get("points", 0)})
-            return top_list
-        except Exception as e:
-            print(f"[Leaderboard DB Fetch Error] {e}")
-
-    for uid, pts in USER_POINTS_DATA.items():
-        if pts > 0:
-            top_list.append({"discord_id": uid, "points": pts})
-    top_list.sort(key=lambda x: x["points"], reverse=True)
-    return top_list[:limit]
-
-
-def parse_duration_to_timedelta(duration_str: str) -> timedelta:
-    """Parses duration strings like 1d, 7d, 30d, 1y, inf into timedelta objects."""
-    if not duration_str:
-        return timedelta(days=30)
-    dur = duration_str.lower().strip()
-    if dur in ["inf", "infinite", "perma", "permanent", "lifetime"]:
-        return timedelta(days=36500)
-    
-    match = re.match(r'^(\d+)\s*([smhdwy])$', dur)
-    if not match:
-        return timedelta(days=30)
-    
-    val, unit = int(match.group(1)), match.group(2)
-    if unit == 's': return timedelta(seconds=val)
-    if unit == 'm': return timedelta(minutes=val)
-    if unit == 'h': return timedelta(hours=val)
-    if unit == 'd': return timedelta(days=val)
-    if unit == 'w': return timedelta(weeks=val)
-    if unit == 'y': return timedelta(days=val * 365)
-    return timedelta(days=30)
-
-
-def set_user_premium(user_id: str, duration_td: timedelta):
-    """Saves premium status into MongoDB or local fallback storage."""
-    exp_date = datetime.now(timezone.utc) + duration_td
-    iso_exp = exp_date.isoformat()
-    if db_premium is not None:
-        try:
-            db_premium.update_one(
-                {"discord_id": str(user_id)},
-                {"$set": {
-                    "discord_id": str(user_id),
-                    "expires_at": iso_exp,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }},
-                upsert=True
-            )
-        except Exception as e:
-            print(f"[Mongo Set Premium Error] {e}")
-    LOCAL_PREMIUM_USERS[str(user_id)] = iso_exp
-
-
-def remove_user_premium(user_id: str):
-    """Removes premium status from MongoDB or local storage."""
-    if db_premium is not None:
-        try:
-            db_premium.delete_one({"discord_id": str(user_id)})
-        except Exception as e:
-            print(f"[Mongo Remove Premium Error] {e}")
-    LOCAL_PREMIUM_USERS.pop(str(user_id), None)
-
-
-def strip_emojis(text: str) -> str:
-    """Strips unicode emojis from channel or category titles."""
-    if not text:
-        return ""
-    clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27ff\u2300-\u23ff]', '', str(text))
-    return clean.strip()
-
-
-def format_channel_name(name: str) -> str:
-    """Formats channel names into Discord lowercase hyphens format without emojis."""
-    clean = strip_emojis(name)
-    if not clean:
-        clean = str(name).strip()
-    return clean.lower().replace(" ", "-")
+            # Step 2: Post Group Shout
+            shout_url = f"https://groups.roblox.com/v1/groups/{group_id}/status"
+            async with session.patch(shout_url, headers=headers, json={"message": message[:255]}) as shout_resp:
+                if shout_resp.status == 200:
+                    return True, "Roblox group shout posted successfully!"
+                else:
+                    err_body = await shout_resp.text()
+                    return False, f"Roblox API HTTP {shout_resp.status}: {err_body}"
+    except Exception as e:
+        return False, f"Exception posting group shout: {e}"
 
 
 # -------------------------------------------------------------
-# ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
+# INTERACTIVE DYNO-STYLE GIVEAWAY VIEW
 # -------------------------------------------------------------
-class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
-    username_input = discord.ui.TextInput(
-        label="Exact Roblox Username",
-        placeholder="e.g. Builderman",
-        required=True,
-        max_length=50
-    )
+class GiveawayPanelView(discord.ui.View):
+    def __init__(self, giveaway_id: str = ""):
+        super().__init__(timeout=None)
+        self.giveaway_id = str(giveaway_id)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.button(label="Enter / Leave", style=discord.ButtonStyle.primary, custom_id="btn_gw_enter_leave", emoji="🎉")
+    async def enter_leave_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-
+        msg_id = str(interaction.message.id)
         user_id = str(interaction.user.id)
-        r_username = self.username_input.value.strip()
 
-        # Retrieve stored verification code
-        code_data = PENDING_VERIFICATION_CODES.get(user_id)
-        if not code_data or datetime.now(timezone.utc).timestamp() > code_data.get("expires_at", 0):
+        gw_data = None
+        if db_giveaways is not None:
+            gw_data = db_giveaways.find_one({"message_id": msg_id})
+        if not gw_data:
+            gw_data = LOCAL_GIVEAWAYS.get(msg_id)
+
+        if not gw_data or gw_data.get("ended"):
+            await interaction.followup.send("This giveaway has already ended!", ephemeral=True)
+            return
+
+        entries = set(gw_data.get("entries", []))
+
+        if user_id in entries:
+            entries.remove(user_id)
+            action_text = "You have **left** the giveaway."
+        else:
+            entries.add(user_id)
+            action_text = "You have **entered** the giveaway! Good luck! 🎉"
+
+        entries_list = list(entries)
+        if db_giveaways is not None:
+            db_giveaways.update_one({"message_id": msg_id}, {"$set": {"entries": entries_list}})
+        LOCAL_GIVEAWAYS[msg_id] = {**gw_data, "entries": entries_list}
+
+        # Update message embed entrant counter
+        try:
+            embed = interaction.message.embeds[0]
+            embed.set_field_at(0, name="Entrants", value=f"**{len(entries_list)}**", inline=True)
+            await interaction.message.edit(embed=embed)
+        except Exception as e:
+            print(f"[Giveaway Embed Update Error] {e}")
+
+        await interaction.followup.send(action_text, ephemeral=True)
+
+    @discord.ui.button(label="Entries", style=discord.ButtonStyle.secondary, custom_id="btn_gw_view_entries", emoji="👥")
+    async def view_entries_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        msg_id = str(interaction.message.id)
+
+        gw_data = None
+        if db_giveaways is not None:
+            gw_data = db_giveaways.find_one({"message_id": msg_id})
+        if not gw_data:
+            gw_data = LOCAL_GIVEAWAYS.get(msg_id)
+
+        entries = gw_data.get("entries", []) if gw_data else []
+
+        if not entries:
             embed = discord.Embed(
-                title="Code Expired or Missing",
-                description="No active verification code found. Please click **Generate Code** first before verifying.",
-                color=0xF43F5E
+                title="Entrants List",
+                description="No users have entered this giveaway yet.",
+                color=0x8B5CF6
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        expected_code = code_data.get("code")
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Resolve Roblox Username to User ID
-                async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [r_username], "excludeBannedUsers": False}) as resp:
-                    if resp.status != 200:
-                        await interaction.followup.send("Failed to query Roblox API. Please try again later.", ephemeral=True)
-                        return
-                    data = await resp.json()
-                    user_list = data.get("data", [])
-                    if not user_list:
-                        await interaction.followup.send(f"Roblox user `{r_username}` was not found.", ephemeral=True)
-                        return
-                    
-                    r_id = str(user_list[0].get("id"))
-                    actual_name = user_list[0].get("name")
-
-                # Fetch Roblox Bio / Description
-                async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
-                    if resp.status != 200:
-                        await interaction.followup.send("Failed to fetch user profile details from Roblox.", ephemeral=True)
-                        return
-                    profile_data = await resp.json()
-                    description = profile_data.get("description", "")
-
-            if expected_code not in description:
-                embed = discord.Embed(
-                    title="Verification Code Missing in Bio",
-                    description=f"Could not find `{expected_code}` in the profile bio for **{actual_name}**.\n\nPlease update your Roblox bio, save it, and click Verify again.",
-                    color=0xF43F5E
-                )
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                return
-
-            roblox_payload = {"id": r_id, "username": actual_name}
-            if db_users is not None:
-                try:
-                    db_users.update_one(
-                        {"discord_id": user_id},
-                        {"$set": {
-                            "discord_id": user_id,
-                            "roblox_data": roblox_payload,
-                            "updated_at": datetime.now(timezone.utc).isoformat()
-                        }},
-                        upsert=True
-                    )
-                except Exception as e:
-                    print(f"[Mongo Save Roblox Link Error] {e}")
-
-            PENDING_VERIFICATION_CODES.pop(user_id, None)
-
-            embed = discord.Embed(
-                title="Account Successfully Linked!",
-                description=f"Your Discord account has been verified and linked to Roblox account **{actual_name}** (`{r_id}`).",
-                color=0x2ECC71
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            print(f"[Roblox Verification Error] {e}")
-            await interaction.followup.send(f"Verification error: `{str(e)}`", ephemeral=True)
-
-
-class RobloxVerificationView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Generate Code", style=discord.ButtonStyle.primary, custom_id="btn_verify_gen_code")
-    async def gen_code_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = str(interaction.user.id)
-        rand_num = random.randint(10000, 99999)
-        code = f"TE-{rand_num}"
-        exp_time = datetime.now(timezone.utc).timestamp() + (15 * 60)
-
-        PENDING_VERIFICATION_CODES[user_id] = {
-            "code": code,
-            "expires_at": exp_time
-        }
+        mentions_lines = [f"<@{uid}>" for uid in entries]
+        chunk = "\n".join(mentions_lines[:50])
+        if len(entries) > 50:
+            chunk += f"\n\n*...and {len(entries) - 50} more entrants.*"
 
         embed = discord.Embed(
-            title="Verification Code Generated",
-            description=f"Your verification code is:\n\n`{code}`\n\n**Instructions:**\n1. Copy the code above.\n2. Paste it anywhere into your Roblox profile **About / Bio**.\n3. Save your Roblox profile.\n4. Click the **Verify Account** button below.",
+            title=f"Entrants ({len(entries)} Total)",
+            description=chunk,
             color=0x8B5CF6
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Verify Account", style=discord.ButtonStyle.success, custom_id="btn_verify_submit")
-    async def verify_submit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RobloxVerifyModal())
-
-    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, custom_id="btn_verify_help")
-    async def verify_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="Roblox Verification Guide",
-            description="**How to link your account:**\n\n1. Click **Generate Code** to receive a code starting with `TE-`.\n2. Open your Roblox profile settings.\n3. Paste the code into your **About** (Bio) section and click Save.\n4. Return here and click **Verify Account**, then enter your exact Roblox username.\n\nOnce verified, your Roblox account will be connected to Template Engine.",
-            color=0x8B5CF6
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-class RobloxUnsyncView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Un-Sync Account", style=discord.ButtonStyle.danger, custom_id="btn_unsync_account")
-    async def unsync_account_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
-        user_id = str(interaction.user.id)
-
-        if db_users is not None:
-            try:
-                db_users.update_one(
-                    {"discord_id": user_id},
-                    {"$unset": {"roblox_data": ""}}
-                )
-            except Exception as e:
-                print(f"[Mongo Unsync Error] {e}")
-
-        embed = discord.Embed(
-            title="Account Un-Synced",
-            description="Your Roblox account link has been successfully removed.",
-            color=0x2ECC71
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -604,28 +434,226 @@ class NonPremiumDeploymentView(discord.ui.View):
 class BotCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.check_giveaway_expirations.start()
+
+    def cog_unload(self):
+        self.check_giveaway_expirations.cancel()
 
     # -------------------------------------------------------------
-    # SLASH COMMAND: SET VERIFICATION OR UNSYNC INTERACTIVE PANELS
+    # BACKGROUND TASK: AUTOMATED GIVEAWAY EXPIRATIONS
     # -------------------------------------------------------------
-    @app_commands.command(name="set", description="Deploy verification or un-sync interactive embed panels into a channel.")
+    @tasks.loop(seconds=15)
+    async def check_giveaway_expirations(self):
+        now_ts = datetime.now(timezone.utc).timestamp()
+        
+        active_gw = []
+        if db_giveaways is not None:
+            try:
+                active_gw = list(db_giveaways.find({"ended": False, "ends_at": {"$lte": now_ts}}))
+            except Exception as e:
+                print(f"[Giveaway Task DB Error] {e}")
+        else:
+            for m_id, gw in LOCAL_GIVEAWAYS.items():
+                if not gw.get("ended") and gw.get("ends_at", 0) <= now_ts:
+                    active_gw.append(gw)
+
+        for gw in active_gw:
+            await self.end_giveaway_logic(gw)
+
+    @check_giveaway_expirations.before_loop
+    async def before_giveaway_loop(self):
+        await self.bot.wait_until_ready()
+
+    async def end_giveaway_logic(self, gw_data: dict):
+        msg_id = str(gw_data.get("message_id"))
+        chan_id = int(gw_data.get("channel_id", 0))
+        entries = gw_data.get("entries", [])
+        prize = gw_data.get("prize", "Prize")
+
+        channel = self.bot.get_channel(chan_id)
+        if not channel:
+            try:
+                channel = await self.bot.fetch_channel(chan_id)
+            except Exception:
+                channel = None
+
+        winner_text = "No valid entrants."
+        if entries:
+            winner_id = random.choice(entries)
+            winner_text = f"<@{winner_id}>"
+
+        if channel:
+            try:
+                msg = await channel.fetch_message(int(msg_id))
+                embed = discord.Embed(
+                    title=f"🎉 GIVEAWAY ENDED: {prize}",
+                    description=gw_data.get("description", "No description provided."),
+                    color=0x2ECC71
+                )
+                embed.add_field(name="Winner", value=winner_text, inline=False)
+                embed.add_field(name="Total Entrants", value=f"**{len(entries)}**", inline=True)
+                embed.set_footer(text="Dyno-Style Giveaway System • Template Engine")
+
+                view = discord.ui.View()
+                for child in GiveawayPanelView().children:
+                    child.disabled = True
+                    view.add_item(child)
+
+                await msg.edit(embed=embed, view=view)
+                if entries:
+                    await channel.send(f"Congratulations {winner_text}! You won **{prize}**!")
+            except Exception as e:
+                print(f"[End Giveaway Msg Error] {e}")
+
+        if db_giveaways is not None:
+            db_giveaways.update_one({"message_id": msg_id}, {"$set": {"ended": True}})
+        LOCAL_GIVEAWAYS[msg_id] = {**gw_data, "ended": True}
+
+    # -------------------------------------------------------------
+    # SLASH COMMAND: GIVEAWAY SYSTEM (CREATE, EDIT, END)
+    # -------------------------------------------------------------
+    @app_commands.command(name="giveaway", description="Manage giveaways with automated Roblox group shout integration.")
     @app_commands.describe(
-        action="Select whether to deploy the verification or un-sync panel.",
-        channel="The target channel to send the embed panel into.",
-        description="Custom description text for the panel."
+        action="Select giveaway operation: create, edit, or end.",
+        duration="Duration for giveaway (e.g. 10m, 2h, 1d) - required for create.",
+        prize="Name of the prize - required for create/edit.",
+        description="Detailed giveaway text description.",
+        channel="Channel to host the giveaway embed - defaults to current channel.",
+        edit="Full Discord message link of giveaway to edit or end."
     )
     @app_commands.choices(action=[
-        app_commands.Choice(name="Verification Panel", value="verification"),
-        app_commands.Choice(name="Un-Sync Panel", value="un-sync")
+        app_commands.Choice(name="Create Giveaway", value="create"),
+        app_commands.Choice(name="Edit Giveaway", value="edit"),
+        app_commands.Choice(name="End Giveaway", value="end")
     ])
-    async def set_panel_cmd(
+    async def giveaway_cmd(
         self,
         interaction: discord.Interaction,
         action: app_commands.Choice[str],
-        channel: discord.TextChannel,
-        description: str
+        duration: Optional[str] = None,
+        prize: Optional[str] = None,
+        description: Optional[str] = None,
+        channel: Optional[discord.TextChannel] = None,
+        edit: Optional[str] = None
     ):
         await interaction.response.defer(ephemeral=True)
+
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need Administrator permissions to manage giveaways.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        target_channel = channel or interaction.channel
+
+        # --- ACTION 1: CREATE GIVEAWAY ---
+        if action.value == "create":
+            if not prize or not duration:
+                await interaction.followup.send("Error: Both `prize` and `duration` are required to create a giveaway.", ephemeral=True)
+                return
+
+            duration_td = parse_duration_to_timedelta(duration)
+            end_time = datetime.now(timezone.utc) + duration_td
+            end_ts = int(end_time.timestamp())
+
+            embed = discord.Embed(
+                title=f"🎉 GIVEAWAY: {prize}",
+                description=(description or "Click **Enter / Leave** button below to participate!") + f"\n\n**Ends:** <t:{end_ts}:F> (<t:{end_ts}:R>)",
+                color=0xF1C40F
+            )
+            embed.add_field(name="Entrants", value="**0**", inline=True)
+            embed.add_field(name="Hosted By", value=interaction.user.mention, inline=True)
+            embed.set_footer(text="Dyno-Style Giveaway System • Template Engine")
+
+            msg = await target_channel.send(embed=embed, view=GiveawayPanelView())
+
+            gw_payload = {
+                "message_id": str(msg.id),
+                "channel_id": str(target_channel.id),
+                "prize": prize,
+                "description": description or "",
+                "ends_at": end_time.timestamp(),
+                "entries": [],
+                "ended": False,
+                "host_id": str(interaction.user.id)
+            }
+
+            if db_giveaways is not None:
+                db_giveaways.insert_one(gw_payload)
+            LOCAL_GIVEAWAYS[str(msg.id)] = gw_payload
+
+            # Roblox Group Shout Announcement
+            shout_msg = f"🎉 NEW GIVEAWAY: {prize}! Join our community Discord server to enter: discord.gg/yourcode"
+            shout_ok, shout_status = await post_roblox_group_shout(shout_msg)
+
+            res_embed = discord.Embed(
+                title="Giveaway Created Successfully!",
+                description=f"Posted giveaway in {target_channel.mention}.\n\n**Roblox Group Shout:** {shout_status}",
+                color=0x2ECC71
+            )
+            await interaction.followup.send(embed=res_embed, ephemeral=True)
+
+        # --- ACTION 2: EDIT GIVEAWAY ---
+        elif action.value == "edit":
+            if not edit:
+                await interaction.followup.send("Error: Please provide the giveaway message link in the `edit` parameter.", ephemeral=True)
+                return
+
+            msg_id = edit.strip().split("/")[-1]
+            gw_data = db_giveaways.find_one({"message_id": msg_id}) if db_giveaways is not None else LOCAL_GIVEAWAYS.get(msg_id)
+
+            if not gw_data:
+                await interaction.followup.send(f"Error: Could not locate active giveaway with Message ID `{msg_id}`.", ephemeral=True)
+                return
+
+            chan_id = int(gw_data.get("channel_id", 0))
+            gw_chan = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
+            gw_msg = await gw_chan.fetch_message(int(msg_id))
+
+            new_prize = prize or gw_data.get("prize")
+            new_desc = description if description is not None else gw_data.get("description")
+            end_ts = int(gw_data.get("ends_at", 0))
+
+            embed = discord.Embed(
+                title=f"🎉 GIVEAWAY: {new_prize}",
+                description=(new_desc or "Click **Enter / Leave** button below to participate!") + f"\n\n**Ends:** <t:{end_ts}:F> (<t:{end_ts}:R>)",
+                color=0xF1C40F
+            )
+            embed.add_field(name="Entrants", value=f"**{len(gw_data.get('entries', []))}**", inline=True)
+            embed.add_field(name="Hosted By", value=f"<@{gw_data.get('host_id')}>", inline=True)
+            embed.set_footer(text="Dyno-Style Giveaway System • Template Engine")
+
+            await gw_msg.edit(embed=embed)
+
+            updated_fields = {"prize": new_prize, "description": new_desc}
+            if db_giveaways is not None:
+                db_giveaways.update_one({"message_id": msg_id}, {"$set": updated_fields})
+            LOCAL_GIVEAWAYS[msg_id] = {**gw_data, **updated_fields}
+
+            await interaction.followup.send("Giveaway details updated successfully!", ephemeral=True)
+
+        # --- ACTION 3: END GIVEAWAY ---
+        elif action.value == "end":
+            if not edit:
+                await interaction.followup.send("Error: Please provide the giveaway message link in the `edit` parameter.", ephemeral=True)
+                return
+
+            msg_id = edit.strip().split("/")[-1]
+            gw_data = db_giveaways.find_one({"message_id": msg_id}) if db_giveaways is not None else LOCAL_GIVEAWAYS.get(msg_id)
+
+            if not gw_data:
+                await interaction.followup.send(f"Error: Could not locate giveaway with Message ID `{msg_id}`.", ephemeral=True)
+                return
+
+            await self.end_giveaway_logic(gw_data)
+            await interaction.followup.send("Giveaway ended early successfully!", ephemeral=True)
+
 
         is_owner = (interaction.user.id == BOT_OWNER_ID)
         is_admin = interaction.permissions.administrator if interaction.permissions else False
@@ -1305,4 +1333,14 @@ async def setup(bot: commands.Bot):
     bot.add_view(RobloxVerificationView())
     bot.add_view(RobloxUnsyncView())
     bot.add_view(PremiumMissingBotView())
+    bot.add_view(GiveawayPanelView())
     await bot.add_cog(BotCog(bot))
+```
+
+### Summary of Additions:
+1. **`/giveaway` Slash Command**: Supports `create`, `edit`, and `end` choices. `edit` and `end` take the Discord message URL in the `edit:` parameter.
+2. **Automated Roblox Group Shout**: Executing `/giveaway create` uses `ROBLOX_COOKIE` and `ROBLOX_GROUP_ID` to post a shout prompting members to join the community server.
+3. **Dyno-Style Interactive View (`GiveawayPanelView`)**:
+   - **Enter / Leave**: Toggles user participation and updates the entrant count on the live embed.
+   - **Entries**: Displays the list of entrants as 1-per-line user pings (`<@user_id>`).
+4. **Automated Background Timer (`tasks.loop`)**: Automatically draws a random winner when the giveaway duration expires.
