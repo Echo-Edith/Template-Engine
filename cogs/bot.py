@@ -5,11 +5,16 @@ import random
 import asyncio
 import aiohttp
 from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Dict, Any
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from pymongo import MongoClient
 
+# -------------------------------------------------------------
+# GLOBAL CONSTANTS & LOGGING CHANNELS
+# -------------------------------------------------------------
 BOT_OWNER_ID = 1219266886143967245
 MAIN_GUILD_ID = 1284513257574629458
 
@@ -40,48 +45,56 @@ if MONGO_URI:
 LOCAL_PREMIUM_USERS = {}
 LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
+USER_POINTS_DATA = {}
 
 # In-memory tracking for points anti-spam system
 # Structure: { user_id: { "last_time": float, "msg_count": int, "last_content": str, "penalty_until": float } }
 USER_MSG_TRACKER = {}
 
 
-def add_user_points(user_id: str, points: int) -> int:
-    """Adds points to MongoDB persistent users or local fallback dictionary."""
-    user_id_str = str(user_id)
-    new_total = points
-    if db_users is not None:
-        try:
-            doc = db_users.find_one_and_update(
-                {"discord_id": user_id_str},
-                {"$inc": {"points": points}},
-                upsert=True,
-                return_document=True
-            )
-            if doc and "points" in doc:
-                new_total = doc["points"]
-        except Exception as e:
-            print(f"[Points DB Inc Error] {e}")
-    else:
-        current = LOCAL_PERSISTENT_USERS.get(user_id_str, {}).get("points", 0)
-        new_total = current + points
-        if user_id_str not in LOCAL_PERSISTENT_USERS:
-            LOCAL_PERSISTENT_USERS[user_id_str] = {}
-        LOCAL_PERSISTENT_USERS[user_id_str]["points"] = new_total
-    return new_total
-
-
+# -------------------------------------------------------------
+# DATABASE & HELPER FUNCTIONS
+# -------------------------------------------------------------
 def get_user_points(user_id: str) -> int:
-    """Retrieves current point balance for a user."""
-    user_id_str = str(user_id)
+    """Fetches user points from MongoDB persistent database or local fallback."""
+    uid = str(user_id)
     if db_users is not None:
         try:
-            doc = db_users.find_one({"discord_id": user_id_str})
+            doc = db_users.find_one({"discord_id": uid})
             if doc and "points" in doc:
                 return int(doc["points"])
         except Exception as e:
-            print(f"[Points DB Fetch Error] {e}")
-    return LOCAL_PERSISTENT_USERS.get(user_id_str, {}).get("points", 0)
+            print(f"[Mongo Get Points Error] {e}")
+    return USER_POINTS_DATA.get(uid, LOCAL_PERSISTENT_USERS.get(uid, {}).get("points", 0))
+
+
+def add_user_points(user_id: str, amount: int) -> int:
+    """Adds or deducts points for a user and returns updated total."""
+    uid = str(user_id)
+    current_points = get_user_points(uid)
+    new_total = current_points + amount
+    if new_total < 0:
+        new_total = 0
+
+    if db_users is not None:
+        try:
+            db_users.update_one(
+                {"discord_id": uid},
+                {"$set": {
+                    "discord_id": uid,
+                    "points": new_total,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo Add Points Error] {e}")
+
+    USER_POINTS_DATA[uid] = new_total
+    if uid not in LOCAL_PERSISTENT_USERS:
+        LOCAL_PERSISTENT_USERS[uid] = {}
+    LOCAL_PERSISTENT_USERS[uid]["points"] = new_total
+    return new_total
 
 
 def get_top_leaderboard(limit: int = 10) -> list:
@@ -97,45 +110,11 @@ def get_top_leaderboard(limit: int = 10) -> list:
             print(f"[Leaderboard DB Fetch Error] {e}")
 
     # Fallback to local memory storage
-    for uid, udata in LOCAL_PERSISTENT_USERS.items():
-        pts = udata.get("points", 0)
+    for uid, pts in USER_POINTS_DATA.items():
         if pts > 0:
             top_list.append({"discord_id": uid, "points": pts})
     top_list.sort(key=lambda x: x["points"], reverse=True)
     return top_list[:limit]
-
-
-def get_user_points(user_id: str) -> int:
-    """Fetches user points from MongoDB or local storage."""
-    uid = str(user_id)
-    if db_users is not None:
-        try:
-            doc = db_users.find_one({"discord_id": uid})
-            if doc and "points" in doc:
-                return int(doc["points"])
-        except Exception as e:
-            print(f"[Mongo Get Points Error] {e}")
-    return USER_POINTS_DATA.get(uid, 0)
-
-
-def add_user_points(user_id: str, amount: int) -> int:
-    """Adds or deducts points for a user and returns updated total."""
-    uid = str(user_id)
-    new_total = get_user_points(uid) + amount
-    if new_total < 0:
-        new_total = 0
-
-    if db_users is not None:
-        try:
-            db_users.update_one(
-                {"discord_id": uid},
-                {"$set": {"discord_id": uid, "points": new_total, "updated_at": datetime.now(timezone.utc).isoformat()}},
-                upsert=True
-            )
-        except Exception as e:
-            print(f"[Mongo Add Points Error] {e}")
-    USER_POINTS_DATA[uid] = new_total
-    return new_total
 
 
 def parse_duration_to_timedelta(duration_str: str) -> timedelta:
@@ -168,7 +147,11 @@ def set_user_premium(user_id: str, duration_td: timedelta):
         try:
             db_premium.update_one(
                 {"discord_id": str(user_id)},
-                {"$set": {"discord_id": str(user_id), "expires_at": iso_exp, "updated_at": datetime.now(timezone.utc).isoformat()}},
+                {"$set": {
+                    "discord_id": str(user_id),
+                    "expires_at": iso_exp,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }},
                 upsert=True
             )
         except Exception as e:
@@ -187,6 +170,7 @@ def remove_user_premium(user_id: str):
 
 
 def strip_emojis(text: str) -> str:
+    """Strips high-surrogate range emojis from channel or category titles."""
     if not text:
         return ""
     clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27ff\u2300-\u23ff]', '', str(text))
@@ -194,12 +178,16 @@ def strip_emojis(text: str) -> str:
 
 
 def format_channel_name(name: str) -> str:
+    """Formats channel names into Discord lowercase hyphens format."""
     clean = strip_emojis(name)
     if not clean:
         clean = str(name).strip()
     return clean.lower().replace(" ", "-")
 
 
+# -------------------------------------------------------------
+# DISCORD BOT COG IMPLEMENTATION
+# -------------------------------------------------------------
 class BotCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -325,6 +313,72 @@ class BotCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -------------------------------------------------------------
+    # SLASH COMMAND: SET / REMOVE PREMIUM STATUS
+    # -------------------------------------------------------------
+    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium subscription status for a user.")
+    @app_commands.describe(
+        user="Target user to modify premium status for.",
+        action="Select whether to grant or revoke premium.",
+        duration="Duration format e.g. 1d, 7d, 30d, 1y, inf (Defaults to 30d)."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Grant Premium", value="add"),
+        app_commands.Choice(name="Revoke Premium", value="remove")
+    ])
+    async def premium_set_cmd(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        action: app_commands.Choice[str],
+        duration: Optional[str] = "30d"
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need Administrator permissions to manage TE Premium memberships.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        try:
+            if action.value == "add":
+                duration_td = parse_duration_to_timedelta(duration or "30d")
+                set_user_premium(str(user.id), duration_td)
+                exp_date = datetime.now(timezone.utc) + duration_td
+                exp_ts = int(exp_date.timestamp())
+
+                embed = discord.Embed(
+                    title="⭐ TE Premium Granted",
+                    description=f"Successfully granted **TE Premium** to {user.mention}!\n\n**Duration:** `{duration}`\n**Expires:** <t:{exp_ts}:F> (<t:{exp_ts}:R>)",
+                    color=0xF1C40F
+                )
+            else:
+                remove_user_premium(str(user.id))
+                embed = discord.Embed(
+                    title="TE Premium Revoked",
+                    description=f"Successfully revoked **TE Premium** access from {user.mention}.",
+                    color=0xF43F5E
+                )
+
+            embed.set_thumbnail(url=user.display_avatar.url)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            print(f"[Premium Set Error] {e}")
+            embed = discord.Embed(
+                title="Error Modifying Premium Status",
+                description=f"An error occurred: `{str(e)}`",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # -------------------------------------------------------------
     # LISTEN FOR MESSAGES & PREMIUM AUTO-BUILD LOG MESSAGES
     # -------------------------------------------------------------
     @commands.Cog.listener()
@@ -351,7 +405,6 @@ class BotCog(commands.Cog):
 
         # Check 1: Is user in a 30-minute spam penalty pause?
         if now_ts < user_track["penalty_until"]:
-            # User is currently penalized; ignore message for points
             return
 
         time_passed = now_ts - user_track["last_time"]
@@ -454,7 +507,6 @@ class BotCog(commands.Cog):
                     description=f"Auto-deployment paused. The bot is not present in target server ID `{target_guild_id}`.\n\nPlease add the bot using the link below.",
                     color=0xF43F5E
                 )
-                # Ensure scope=bot%20applications.commands is included to maintain APP badge status
                 invite_url = f"https://discord.com/api/oauth2/authorize?client_id={self.bot.user.id}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
                 view = discord.ui.View()
                 view.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
@@ -474,6 +526,25 @@ class BotCog(commands.Cog):
                 await user.send(embed=embed)
         except Exception as e:
             print(f"[DM Warning] Failed sending DM to {user_id}: {e}")
+
+    async def nuke_guild_structure(self, guild: discord.Guild):
+        """Deletes existing channels, categories, and custom roles prior to auto-building."""
+        # Delete existing text, voice channels, and categories
+        for channel in guild.channels:
+            try:
+                await channel.delete(reason="Template Engine Nuke Before Auto-Build")
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                print(f"[Nuke Channel Warning] Failed to delete {channel.name}: {e}")
+
+        # Delete non-default custom roles
+        for role in guild.roles:
+            if not role.is_default() and not role.managed and role.position < guild.me.top_role.position:
+                try:
+                    await role.delete(reason="Template Engine Nuke Before Auto-Build")
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    print(f"[Nuke Role Warning] Failed to delete role {role.name}: {e}")
 
     async def execute_auto_build(self, guild: discord.Guild, layout: dict):
         try:
