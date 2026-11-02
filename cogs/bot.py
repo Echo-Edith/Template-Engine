@@ -892,22 +892,71 @@ class BotCog(commands.Cog):
             dev_product_url=dev_product_url
         )
 
+        # ---------------------------------------------------------
+        # RETRY DM ATTEMPTS (UP TO 5 TIMES)
+        # ---------------------------------------------------------
+        dm_sent = False
+        user = None
+
         try:
             user = await self.bot.fetch_user(int(user_id))
-            if user:
-                await user.send(embed=embed, view=view)
-                print(f"[DM Success] Successfully sent deployment DM to {user.name} ({user_id})")
-                return
-        except discord.Forbidden:
-            print(f"[DM Blocked] User {user_id} has DMs disabled. Falling back to public channel.")
         except Exception as e:
-            print(f"[DM Exception] Unexpected error sending DM to {user_id}: {e}. Falling back to public channel.")
+            print(f"[DM Error] Failed to fetch user {user_id}: {e}")
 
+        if user:
+            for attempt in range(1, 6):
+                try:
+                    await user.send(embed=embed, view=view)
+                    print(f"[DM Success] DM delivered on attempt {attempt}/5 to {user.name} ({user_id})")
+                    dm_sent = True
+                    break
+                except discord.Forbidden:
+                    print(f"[DM Blocked] Direct Messages are blocked for user {user_id}. Stopping retries.")
+                    break
+                except Exception as attempt_err:
+                    print(f"[DM Retry {attempt}/5] Failed to send DM to {user_id}: {attempt_err}")
+                    if attempt < 5:
+                        await asyncio.sleep(1.5)
+
+        if dm_sent:
+            return
+
+        # ---------------------------------------------------------
+        # FALLBACK 1: SEND TO TARGET GUILD (IF BOT IS PRESENT)
+        # ---------------------------------------------------------
+        target_gid = int(target_guild_id) if target_guild_id and target_guild_id != "0" else 0
+        target_guild = self.bot.get_guild(target_gid) if target_gid else None
+
+        if not target_guild and target_gid:
+            try:
+                target_guild = await self.bot.fetch_guild(target_gid)
+            except Exception:
+                target_guild = None
+
+        if target_guild:
+            target_channel = None
+            for ch in target_guild.text_channels:
+                if ch.permissions_for(target_guild.me).send_messages:
+                    target_channel = ch
+                    break
+
+            if target_channel:
+                try:
+                    await target_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
+                    print(f"[Fallback Success] Posted deployment embed in target server channel #{target_channel.name} ({target_guild.name})")
+                    return
+                except Exception as t_err:
+                    print(f"[Target Server Send Error] Failed to post in target server {target_guild.name}: {t_err}")
+
+        # ---------------------------------------------------------
+        # FALLBACK 2: SUBMISSION CHANNEL IN MAIN SERVER
+        # ---------------------------------------------------------
         if fallback_channel:
             try:
                 await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
+                print(f"[Fallback Success] Posted deployment embed in fallback submission channel #{fallback_channel.name}")
             except Exception as chan_err:
-                print(f"[Channel Send Error] Could not post fallback message to channel: {chan_err}")
+                print(f"[Fallback Channel Send Error] Could not post to submission channel: {chan_err}")
 
     async def notify_missing_bot(self, user_id: str, target_guild_id: str):
         try:
