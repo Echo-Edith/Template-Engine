@@ -30,6 +30,7 @@ db_premium = None
 db_build_auth = None
 db_users = None
 db_giveaways = None
+db_guild_settings = None
 
 if MONGO_URI:
     try:
@@ -42,12 +43,14 @@ if MONGO_URI:
         db_build_auth = db["build_authorized_users"]
         db_users = db["persistent_users"]
         db_giveaways = db["giveaways"]
+        db_guild_settings = db["guild_settings"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
 LOCAL_PREMIUM_USERS = {}
 LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
+LOCAL_GUILD_SETTINGS = {}
 USER_POINTS_DATA = {}
 ACTIVE_GIVEAWAYS = {}
 
@@ -663,260 +666,62 @@ class BotCog(commands.Cog):
         self.bot = bot
 
     # -------------------------------------------------------------
-    # SLASH COMMAND: ROBLOX LOOKUP SEARCH
+    # EVENT LISTENER: WELCOME BONUS (20 POINTS) & WELCOME MESSAGE
     # -------------------------------------------------------------
-    @app_commands.command(name="search", description="Search and inspect detailed Roblox profile data and giveaway indicators.")
-    @app_commands.describe(query="Roblox Username or User ID to inspect.")
-    async def search_cmd(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer(ephemeral=False)
-        target_query = query.strip()
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if member.bot:
+            return
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                # 1. Resolve User ID & Basic Info
-                r_id = None
-                r_username = None
-                r_display = None
+        add_user_points(str(member.id), 20)
+        print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
 
-                if target_query.isdigit():
-                    async with session.get(f"https://users.roblox.com/v1/users/{target_query}") as resp:
-                        if resp.status == 200:
-                            u_data = await resp.json()
-                            r_id = str(u_data.get("id"))
-                            r_username = u_data.get("name")
-                            r_display = u_data.get("displayName")
-                else:
-                    async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [target_query], "excludeBannedUsers": False}) as resp:
-                        if resp.status == 200:
-                            u_data = await resp.json()
-                            u_list = u_data.get("data", [])
-                            if u_list:
-                                r_id = str(u_list[0].get("id"))
-                                r_username = u_list[0].get("name")
-                                r_display = u_list[0].get("displayName")
+        # Check for configured welcome channel
+        guild_id_str = str(member.guild.id)
+        settings = LOCAL_GUILD_SETTINGS.get(guild_id_str)
 
-                if not r_id:
-                    await interaction.followup.send(f"Could not find Roblox user matching query `{target_query}`.")
-                    return
+        if not settings and db_guild_settings is not None:
+            try:
+                settings = db_guild_settings.find_one({"guild_id": guild_id_str})
+                if settings:
+                    LOCAL_GUILD_SETTINGS[guild_id_str] = settings
+            except Exception as e:
+                print(f"[Mongo Fetch Welcome Error] {e}")
 
-                # Fetch detailed profile data
-                created_str = "Unknown"
-                age_str = "Unknown"
-                async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
-                    if resp.status == 200:
-                        p_data = await resp.json()
-                        created_raw = p_data.get("created", "")
-                        if created_raw:
-                            try:
-                                dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                                created_str = dt.strftime("%Y-%m-%d")
-                                days_old = (datetime.now(timezone.utc) - dt).days
-                                age_str = f"{days_old:,} days"
-                            except Exception:
-                                pass
+        if settings and settings.get("welcome_channel_id"):
+            channel_id = int(settings["welcome_channel_id"])
+            channel = member.guild.get_channel(channel_id)
 
-                # Avatar Thumbnail
-                avatar_url = "https://cdn.discordapp.com/embed/avatars/0.png"
-                async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar?userIds={r_id}&size=420x420&format=Png&isCircular=false") as resp:
-                    if resp.status == 200:
-                        t_data = await resp.json()
-                        t_list = t_data.get("data", [])
-                        if t_list:
-                            avatar_url = t_list[0].get("imageUrl", avatar_url)
+            if channel:
+                raw_msg = settings.get("welcome_message", "Welcome {user} to **{server}**!")
+                formatted_msg = raw_msg.replace("{user}", member.mention).replace("{username}", member.name).replace("{server}", member.guild.name)
 
-                # Groups & Giveaway Analysis
-                groups_list = []
-                giveaway_indicators = []
-                keywords = ["robux", "giveaway", "rbx", "free", "rewards", "payout", "claim"]
-
-                async with session.get(f"https://groups.roblox.com/v2/users/{r_id}/groups/roles") as resp:
-                    if resp.status == 200:
-                        g_data = await resp.json()
-                        g_roles = g_data.get("data", [])
-                        for item in g_roles[:10]:
-                            g_info = item.get("group", {})
-                            r_info = item.get("role", {})
-                            g_name = g_info.get("name", "Group")
-                            g_id = g_info.get("id")
-                            role_title = r_info.get("name", "Member")
-
-                            g_link = f"https://www.roblox.com/groups/{g_id}"
-                            groups_list.append(f"• [{g_name}]({g_link})\n   └─ Role: {role_title}")
-
-                            if any(kw in g_name.lower() for kw in keywords):
-                                giveaway_indicators.append(f"- **{g_name}** — Giveaway keywords detected")
-
-                # Experiences
-                experiences_list = []
-                async with session.get(f"https://games.roblox.com/v2/users/{r_id}/games?sortOrder=Desc&limit=5") as resp:
-                    if resp.status == 200:
-                        exp_data = await resp.json()
-                        games = exp_data.get("data", [])
-                        for g in games[:3]:
-                            g_name = g.get("name", "Game")
-                            visits = g.get("placeVisits", 0)
-                            experiences_list.append(f"- **{g_name}**\n  └─ Visits: {visits:,}")
-
-                # Username History
-                history_list = []
-                async with session.get(f"https://users.roblox.com/v1/users/{r_id}/username-history?limit=10&sortOrder=Desc") as resp:
-                    if resp.status == 200:
-                        h_data = await resp.json()
-                        h_names = h_data.get("data", [])
-                        history_list = [h.get("name") for h in h_names if h.get("name")]
-
-                # Construct requested output layout
                 embed = discord.Embed(
-                    title="🔎 Roblox Lookup",
-                    description="━━━━━━━━━━━━━━━━",
+                    title=f"Welcome to {member.guild.name}!",
+                    description=formatted_msg,
                     color=0x8B5CF6
                 )
-                embed.add_field(
-                    name="👤 USER",
-                    value=f"**Username:** {r_username}\n**Display Name:** {r_display}\n**User ID:** `{r_id}`\n**Account Created:** {created_str}\n**Account Age:** {age_str}",
-                    inline=False
-                )
-                embed.set_thumbnail(url=avatar_url)
+                embed.set_thumbnail(url=member.display_avatar.url)
+                embed.set_footer(text=f"Member #{member.guild.member_count}")
 
-                if groups_list:
-                    embed.add_field(name="👥 GROUPS", value="\n".join(groups_list[:5]), inline=False)
-                else:
-                    embed.add_field(name="👥 GROUPS", value="None recorded", inline=False)
-
-                if giveaway_indicators:
-                    embed.add_field(name="💰 GIVEAWAY INDICATORS", value="\n".join(giveaway_indicators), inline=False)
-
-                if experiences_list:
-                    embed.add_field(name="🎮 EXPERIENCES", value="\n".join(experiences_list), inline=False)
-
-                if history_list:
-                    embed.add_field(name="📜 HISTORY", value="Previous usernames:\n" + "\n".join([f"- {h}" for h in history_list]), inline=False)
-
-                await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            print(f"[Search Command Error] {e}")
-            await interaction.followup.send(f"An error occurred while fetching Roblox data: `{str(e)}`")
+                try:
+                    await channel.send(embed=embed)
+                except Exception as send_err:
+                    print(f"[Welcome Send Error] {send_err}")
 
     # -------------------------------------------------------------
-    # SLASH COMMAND: GIVEAWAY SYSTEM
+    # SLASH COMMAND: SET WELCOME CHANNEL AND MESSAGE
     # -------------------------------------------------------------
-    @app_commands.command(name="giveaway", description="Create, edit, or end server giveaways.")
+    @app_commands.command(name="welcome-set", description="Configure the automated welcome greeting channel and custom message.")
     @app_commands.describe(
-        action="Action to perform: create, edit, or end.",
-        duration="Duration for new giveaway (e.g. 1h, 1d, 7d).",
-        prize="Prize description.",
-        description="Optional additional details.",
-        message_link="Message link or ID for editing/ending."
+        channel="The channel where welcome greetings will be posted.",
+        message="Custom message template. Variables: {user}, {username}, {server}."
     )
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Create Giveaway", value="create"),
-        app_commands.Choice(name="Edit Giveaway", value="edit"),
-        app_commands.Choice(name="End Giveaway", value="end")
-    ])
-    async def giveaway_cmd(
+    async def welcome_set_cmd(
         self,
         interaction: discord.Interaction,
-        action: app_commands.Choice[str],
-        duration: Optional[str] = "24h",
-        prize: Optional[str] = "TE Robux Prize",
-        description: Optional[str] = None,
-        message_link: Optional[str] = None
-    ):
-        await interaction.response.defer(ephemeral=True)
-
-        if action.value == "create":
-            dur_td = parse_duration_to_timedelta(duration or "24h")
-            end_ts = int((datetime.now(timezone.utc) + dur_td).timestamp())
-
-            embed = discord.Embed(
-                title=f"🎉 GIVEAWAY: {prize}",
-                description=f"{description or 'Click the button below to enter or leave!'}\n\n**Ends:** <t:{end_ts}:R> (<t:{end_ts}:F>)\n**Hosted By:** {interaction.user.mention}",
-                color=0x8B5CF6
-            )
-            embed.set_footer(text="Entries: 0 | Hosted by Template Engine")
-
-            msg = await interaction.channel.send(embed=embed, view=GiveawayPanelView())
-
-            gw_payload = {
-                "message_id": str(msg.id),
-                "channel_id": str(interaction.channel.id),
-                "prize": prize,
-                "end_timestamp": end_ts,
-                "entries": []
-            }
-            ACTIVE_GIVEAWAYS[str(msg.id)] = gw_payload
-
-            if db_giveaways is not None:
-                try:
-                    db_giveaways.insert_one(gw_payload)
-                except Exception as e:
-                    print(f"[Mongo Save Giveaway Error] {e}")
-
-            # Announce via Roblox Group Shout if cookie available
-            cookie_header = get_formatted_roblox_cookie()
-            roblox_group_id = os.getenv("ROBLOX_GROUP_ID", "").strip()
-            if cookie_header and roblox_group_id:
-                try:
-                    shout_msg = f"🎉 New Giveaway: {prize}! Join our Discord server to enter!"
-                    async with aiohttp.ClientSession() as session:
-                        url = f"https://groups.roblox.com/v1/groups/{roblox_group_id}/status"
-                        headers = {"Cookie": cookie_header, "User-Agent": "Mozilla/5.0"}
-                        await session.patch(url, json={"message": shout_msg}, headers=headers)
-                except Exception as shout_err:
-                    print(f"[Roblox Group Shout Error] {shout_err}")
-
-            await interaction.followup.send(f"Giveaway created successfully! [Jump to Message]({msg.jump_url})", ephemeral=True)
-
-        elif action.value == "end":
-            if not message_link:
-                await interaction.followup.send("Please provide the message link or ID of the giveaway to end.", ephemeral=True)
-                return
-
-            msg_id = message_link.split("/")[-1].strip()
-            gw_data = ACTIVE_GIVEAWAYS.get(msg_id)
-            if not gw_data and db_giveaways is not None:
-                gw_data = db_giveaways.find_one({"message_id": msg_id})
-
-            if not gw_data:
-                await interaction.followup.send("Giveaway not found.", ephemeral=True)
-                return
-
-            entries = gw_data.get("entries", [])
-            winner_mention = random.choice([f"<@{uid}>" for uid in entries]) if entries else "No entries recorded."
-
-            try:
-                chan = self.bot.get_channel(int(gw_data["channel_id"]))
-                msg = await chan.fetch_message(int(msg_id))
-                embed = msg.embeds[0]
-                embed.title = f"🎉 GIVEAWAY ENDED: {gw_data.get('prize')}"
-                embed.description = f"**Winner:** {winner_mention}"
-                await msg.edit(embed=embed, view=None)
-                await chan.send(f"🎉 Congratulations {winner_mention}! You won **{gw_data.get('prize')}**!")
-            except Exception as end_err:
-                print(f"[End Giveaway Error] {end_err}")
-
-            await interaction.followup.send("Giveaway ended early successfully!", ephemeral=True)
-
-    # -------------------------------------------------------------
-    # SLASH COMMAND: SET VERIFICATION OR UNSYNC INTERACTIVE PANELS
-    # -------------------------------------------------------------
-    @app_commands.command(name="set", description="Deploy verification or un-sync interactive embed panels into a channel.")
-    @app_commands.describe(
-        action="Select whether to deploy the verification or un-sync panel.",
-        channel="The target channel to send the embed panel into.",
-        description="Custom description text for the panel."
-    )
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Verification Panel", value="verification"),
-        app_commands.Choice(name="Un-Sync Panel", value="un-sync")
-    ])
-    async def set_panel_cmd(
-        self,
-        interaction: discord.Interaction,
-        action: app_commands.Choice[str],
         channel: discord.TextChannel,
-        description: str
+        message: Optional[str] = "Welcome {user} to **{server}**! Enjoy your stay!"
     ):
         await interaction.response.defer(ephemeral=True)
 
@@ -926,52 +731,37 @@ class BotCog(commands.Cog):
         if not (is_owner or is_admin):
             embed = discord.Embed(
                 title="Permission Denied",
-                description="You need Administrator permissions to deploy system panels.",
+                description="You need Administrator permissions to configure server settings.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        try:
-            if action.value == "verification":
-                embed = discord.Embed(
-                    title="Roblox Account Verification",
-                    description=description,
-                    color=0x8B5CF6
+        guild_id_str = str(interaction.guild_id)
+        settings_payload = {
+            "guild_id": guild_id_str,
+            "welcome_channel_id": str(channel.id),
+            "welcome_message": message
+        }
+
+        LOCAL_GUILD_SETTINGS[guild_id_str] = settings_payload
+
+        if db_guild_settings is not None:
+            try:
+                db_guild_settings.update_one(
+                    {"guild_id": guild_id_str},
+                    {"$set": settings_payload},
+                    upsert=True
                 )
-                embed.set_footer(text="Template Engine Roblox Synchronization System")
-                view = RobloxVerificationView()
-            else:
-                embed = discord.Embed(
-                    title="Un-Sync Roblox Account",
-                    description=description,
-                    color=0xF43F5E
-                )
-                embed.set_footer(text="Template Engine Account Management")
-                view = RobloxUnsyncView()
+            except Exception as e:
+                print(f"[Mongo Save Welcome Error] {e}")
 
-            await channel.send(embed=embed, view=view)
-
-            confirm_embed = discord.Embed(
-                title="Panel Successfully Deployed",
-                description=f"Deployed **{action.name}** into {channel.mention}.",
-                color=0x2ECC71
-            )
-            await interaction.followup.send(embed=confirm_embed, ephemeral=True)
-
-        except Exception as e:
-            print(f"[Set Command Error] {e}")
-            await interaction.followup.send(f"Failed to deploy panel: `{str(e)}`", ephemeral=True)
-
-    # -------------------------------------------------------------
-    # EVENT LISTENER: WELCOME BONUS (20 POINTS)
-    # -------------------------------------------------------------
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member):
-        if member.bot:
-            return
-        add_user_points(str(member.id), 20)
-        print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
+        embed = discord.Embed(
+            title="Welcome Greeting Configured",
+            description=f"Automated welcome greetings will now be sent to {channel.mention}.\n\n**Template:**\n```{message}```\n**Supported Tags:** `{user}` (mention), `{username}` (name), `{server}` (server name)",
+            color=0x2ECC71
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -------------------------------------------------------------
     # SLASH COMMAND: CHECK USER POINTS
