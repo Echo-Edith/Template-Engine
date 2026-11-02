@@ -654,6 +654,27 @@ class BotCog(commands.Cog):
             await self.end_giveaway_logic(gw_data)
             await interaction.followup.send("Giveaway ended early successfully!", ephemeral=True)
 
+    # -------------------------------------------------------------
+    # SLASH COMMAND: DEPLOY INTERACTIVE PANELS
+    # -------------------------------------------------------------
+    @app_commands.command(name="set", description="Deploy verification or un-sync interactive embed panels into a channel.")
+    @app_commands.describe(
+        action="Select whether to deploy the verification or un-sync panel.",
+        channel="The target channel to send the embed panel into.",
+        description="Custom description text for the panel."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Verification Panel", value="verification"),
+        app_commands.Choice(name="Un-Sync Panel", value="un-sync")
+    ])
+    async def set_panel_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        channel: discord.TextChannel,
+        description: str
+    ):
+        await interaction.response.defer(ephemeral=True)
 
         is_owner = (interaction.user.id == BOT_OWNER_ID)
         is_admin = interaction.permissions.administrator if interaction.permissions else False
@@ -697,16 +718,6 @@ class BotCog(commands.Cog):
         except Exception as e:
             print(f"[Set Command Error] {e}")
             await interaction.followup.send(f"Failed to deploy panel: `{str(e)}`", ephemeral=True)
-
-    # -------------------------------------------------------------
-    # EVENT LISTENER: WELCOME BONUS (20 POINTS)
-    # -------------------------------------------------------------
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member):
-        if member.bot:
-            return
-        add_user_points(str(member.id), 20)
-        print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
 
     # -------------------------------------------------------------
     # SLASH COMMAND: CHECK USER POINTS
@@ -1410,3 +1421,4 @@ async def setup(bot: commands.Bot):
     bot.add_view(PremiumMissingBotView())
     bot.add_view(GiveawayPanelView())
     await bot.add_cog(BotCog(bot))
+.
