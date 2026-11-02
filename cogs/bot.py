@@ -47,6 +47,9 @@ LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
 USER_POINTS_DATA = {}
 
+# In-memory tracking for generated verification codes { user_id: { "code": "TE-12345", "expires_at": float } }
+PENDING_VERIFICATION_CODES = {}
+
 # In-memory tracking for used Dev Product receipt IDs to ensure ONE-TIME use
 USED_DEV_PRODUCT_RECEIPTS = set()
 
@@ -113,7 +116,6 @@ def get_top_leaderboard(limit: int = 10) -> list:
         except Exception as e:
             print(f"[Leaderboard DB Fetch Error] {e}")
 
-    # Fallback to local memory storage
     for uid, pts in USER_POINTS_DATA.items():
         if pts > 0:
             top_list.append({"discord_id": uid, "points": pts})
@@ -190,6 +192,165 @@ def format_channel_name(name: str) -> str:
 
 
 # -------------------------------------------------------------
+# ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
+# -------------------------------------------------------------
+class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
+    username_input = discord.ui.TextInput(
+        label="Exact Roblox Username",
+        placeholder="e.g. Builderman",
+        required=True,
+        max_length=50
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        user_id = str(interaction.user.id)
+        r_username = self.username_input.value.strip()
+
+        # Retrieve stored verification code
+        code_data = PENDING_VERIFICATION_CODES.get(user_id)
+        if not code_data or datetime.now(timezone.utc).timestamp() > code_data.get("expires_at", 0):
+            embed = discord.Embed(
+                title="Code Expired or Missing",
+                description="No active verification code found. Please click **Generate Code** first before verifying.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        expected_code = code_data.get("code")
+
+        # Query Roblox API to resolve Username to User ID & Bio
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Get Roblox ID
+                async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [r_username], "excludeBannedUsers": False}) as resp:
+                    if resp.status != 200:
+                        await interaction.followup.send("Failed to query Roblox API. Please try again later.", ephemeral=True)
+                        return
+                    data = await resp.json()
+                    user_list = data.get("data", [])
+                    if not user_list:
+                        await interaction.followup.send(f"Roblox user `{r_username}` was not found.", ephemeral=True)
+                        return
+                    
+                    r_id = str(user_list[0].get("id"))
+                    actual_name = user_list[0].get("name")
+
+                # Get Roblox Profile Description (Bio)
+                async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
+                    if resp.status != 200:
+                        await interaction.followup.send("Failed to fetch user profile details from Roblox.", ephemeral=True)
+                        return
+                    profile_data = await resp.json()
+                    description = profile_data.get("description", "")
+
+            # Verify that the expected code is in the bio
+            if expected_code not in description:
+                embed = discord.Embed(
+                    title="Verification Code Missing in Bio",
+                    description=f"Could not find `{expected_code}` in the profile bio for **{actual_name}**.\n\nPlease update your Roblox bio, save it, and click Verify again.",
+                    color=0xF43F5E
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
+            # Save link to MongoDB
+            roblox_payload = {"id": r_id, "username": actual_name}
+            if db_users is not None:
+                try:
+                    db_users.update_one(
+                        {"discord_id": user_id},
+                        {"$set": {
+                            "discord_id": user_id,
+                            "roblox_data": roblox_payload,
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }},
+                        upsert=True
+                    )
+                except Exception as e:
+                    print(f"[Mongo Save Roblox Link Error] {e}")
+
+            PENDING_VERIFICATION_CODES.pop(user_id, None)
+
+            embed = discord.Embed(
+                title="Account Successfully Linked!",
+                description=f"Your Discord account has been verified and linked to Roblox account **{actual_name}** (`{r_id}`).",
+                color=0x2ECC71
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            print(f"[Roblox Verification Error] {e}")
+            await interaction.followup.send(f"Verification error: `{str(e)}`", ephemeral=True)
+
+
+class RobloxVerificationView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Generate Code", style=discord.ButtonStyle.primary, custom_id="btn_verify_gen_code")
+    async def gen_code_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        rand_num = random.randint(10000, 99999)
+        code = f"TE-{rand_num}"
+        exp_time = datetime.now(timezone.utc).timestamp() + (15 * 60) # 15 min expiry
+
+        PENDING_VERIFICATION_CODES[user_id] = {
+            "code": code,
+            "expires_at": exp_time
+        }
+
+        embed = discord.Embed(
+            title="Verification Code Generated",
+            description=f"Your verification code is:\n\n`{code}`\n\n**Instructions:**\n1. Copy the code above.\n2. Paste it anywhere into your Roblox profile **About / Bio**.\n3. Save your Roblox profile.\n4. Click the **Verify Account** button below.",
+            color=0x8B5CF6
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Verify Account", style=discord.ButtonStyle.success, custom_id="btn_verify_submit")
+    async def verify_submit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RobloxVerifyModal())
+
+    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, custom_id="btn_verify_help")
+    async def verify_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Roblox Verification Guide",
+            description="**How to link your account:**\n\n1. Click **Generate Code** to receive a code starting with `TE-`.\n2. Open your Roblox profile settings.\n3. Paste the code into your **About** (Bio) section and click Save.\n4. Return here and click **Verify Account**, then enter your exact Roblox username.\n\nOnce verified, your Roblox account will be connected to Template Engine.",
+            color=0x8B5CF6
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class RobloxUnsyncView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Un-Sync Account", style=discord.ButtonStyle.danger, custom_id="btn_unsync_account")
+    async def unsync_account_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        user_id = str(interaction.user.id)
+
+        if db_users is not None:
+            try:
+                db_users.update_one(
+                    {"discord_id": user_id},
+                    {"$unset": {"roblox_data": ""}}
+                )
+            except Exception as e:
+                print(f"[Mongo Unsync Error] {e}")
+
+        embed = discord.Embed(
+            title="Account Un-Synced",
+            description="Your Roblox account link has been successfully removed.",
+            color=0x2ECC71
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# -------------------------------------------------------------
 # INTERACTIVE UI FOR NON-PREMIUM VERIFICATION & POINTS PURCHASE
 # Persistent across bot redeployments (timeout=None + explicit custom_ids)
 # -------------------------------------------------------------
@@ -201,7 +362,6 @@ class NonPremiumDeploymentView(discord.ui.View):
         self.target_guild_id = str(target_guild_id)
         self.layout = layout or {}
 
-        # Add link button to Dev Product if URL is provided
         if dev_product_url:
             self.add_item(discord.ui.Button(label="Buy Roblox Dev Product", url=dev_product_url, style=discord.ButtonStyle.link))
 
@@ -211,7 +371,6 @@ class NonPremiumDeploymentView(discord.ui.View):
 
         user_id = str(interaction.user.id)
 
-        # 1. Fetch user Roblox link data
         roblox_id = None
         if db_users is not None:
             doc = db_users.find_one({"discord_id": user_id})
@@ -227,7 +386,6 @@ class NonPremiumDeploymentView(discord.ui.View):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        # 2. Query Roblox Developer Product Purchase History API
         dev_product_id = os.getenv("ROBLOX_DEV_PRODUCT_ID", "").strip()
         open_cloud_key = os.getenv("ROBLOX_OPEN_CLOUD_KEY", "").strip()
         
@@ -261,7 +419,6 @@ class NonPremiumDeploymentView(discord.ui.View):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        # Mark receipt as used so it cannot be used again
         if receipt_token:
             USED_DEV_PRODUCT_RECEIPTS.add(receipt_token)
 
@@ -286,7 +443,6 @@ class NonPremiumDeploymentView(discord.ui.View):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # Execute Auto-Build
         cog = bot_inst.get_cog("BotCog")
         if cog:
             await cog.execute_auto_build(guild, self.layout)
@@ -307,7 +463,6 @@ class NonPremiumDeploymentView(discord.ui.View):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        # Deduct 100 points and retrieve updated balance
         new_total = add_user_points(user_id, -100)
 
         bot_inst = self.bot or interaction.client
@@ -331,7 +486,6 @@ class NonPremiumDeploymentView(discord.ui.View):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # Disable view buttons after use
         for child in self.children:
             child.disabled = True
         try:
@@ -339,7 +493,6 @@ class NonPremiumDeploymentView(discord.ui.View):
         except Exception:
             pass
 
-        # Execute Auto-Build
         cog = bot_inst.get_cog("BotCog")
         if cog:
             await cog.execute_auto_build(guild, self.layout)
@@ -351,6 +504,71 @@ class NonPremiumDeploymentView(discord.ui.View):
 class BotCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    # -------------------------------------------------------------
+    # SLASH COMMAND: SET VERIFICATION OR UNSYNC INTERACTIVE PANELS
+    # -------------------------------------------------------------
+    @app_commands.command(name="set", description="Deploy verification or un-sync interactive embed panels into a channel.")
+    @app_commands.describe(
+        action="Select whether to deploy the verification or un-sync panel.",
+        channel="The target channel to send the embed panel into.",
+        description="Custom description text for the panel."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Verification Panel", value="verification"),
+        app_commands.Choice(name="Un-Sync Panel", value="un-sync")
+    ])
+    async def set_panel_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        channel: discord.TextChannel,
+        description: str
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You need Administrator permissions to deploy system panels.",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        try:
+            if action.value == "verification":
+                embed = discord.Embed(
+                    title="Roblox Account Verification",
+                    description=description,
+                    color=0x8B5CF6
+                )
+                embed.set_footer(text="Template Engine Roblox Synchronization System")
+                view = RobloxVerificationView()
+            else:
+                embed = discord.Embed(
+                    title="Un-Sync Roblox Account",
+                    description=description,
+                    color=0xF43F5E
+                )
+                embed.set_footer(text="Template Engine Account Management")
+                view = RobloxUnsyncView()
+
+            await channel.send(embed=embed, view=view)
+
+            confirm_embed = discord.Embed(
+                title="Panel Successfully Deployed",
+                description=f"Deployed **{action.name}** into {channel.mention}.",
+                color=0x2ECC71
+            )
+            await interaction.followup.send(embed=confirm_embed, ephemeral=True)
+
+        except Exception as e:
+            print(f"[Set Command Error] {e}")
+            await interaction.followup.send(f"Failed to deploy panel: `{str(e)}`", ephemeral=True)
 
     # -------------------------------------------------------------
     # EVENT LISTENER: WELCOME BONUS (20 POINTS)
@@ -398,7 +616,6 @@ class BotCog(commands.Cog):
             return
 
         description_lines = []
-
         for idx, entry in enumerate(top_users):
             rank_str = f"#{idx + 1}"
             uid = entry["discord_id"]
@@ -435,7 +652,6 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        # Permission check: Owner or Admin
         is_owner = (interaction.user.id == BOT_OWNER_ID)
         is_admin = interaction.permissions.administrator if interaction.permissions else False
 
@@ -545,9 +761,7 @@ class BotCog(commands.Cog):
         if message.author.bot:
             return
 
-        # ---------------------------------------------------------
         # CHAT POINTING & ANTI-SPAM SYSTEM
-        # ---------------------------------------------------------
         user_id_str = str(message.author.id)
         now_ts = datetime.now(timezone.utc).timestamp()
         content_clean = message.content.strip().lower()
@@ -562,40 +776,31 @@ class BotCog(commands.Cog):
 
         user_track = USER_MSG_TRACKER[user_id_str]
 
-        # Check 1: Is user in a 30-minute spam penalty pause?
         if now_ts < user_track["penalty_until"]:
             return
 
         time_passed = now_ts - user_track["last_time"]
 
-        # Check 2: Duplicate message check while 30s cooldown is active
         if time_passed < 30.0 and content_clean and content_clean == user_track["last_content"]:
-            # Trigger 30-minute points penalty pause
             user_track["penalty_until"] = now_ts + (30 * 60)
             user_track["last_time"] = now_ts
             user_track["msg_count"] = 0
             print(f"[Points Penalty] User {message.author.name} ({user_id_str}) penalized for 30 mins due to duplicate message.")
             return
 
-        # Check 3: Cooldown & message count calculation
         if time_passed >= 30.0:
-            # Cooldown expired: reset timer and message counter
             user_track["last_time"] = now_ts
             user_track["msg_count"] = 1
             user_track["last_content"] = content_clean
             add_user_points(user_id_str, 2)
         else:
-            # User sent a message within the 30-second window
             user_track["msg_count"] += 1
             if user_track["msg_count"] > 5:
-                # Spam detected (>5 msgs in under 30s): restart the 30s timer without granting points
                 user_track["last_time"] = now_ts
                 user_track["msg_count"] = 0
             user_track["last_content"] = content_clean
 
-        # ---------------------------------------------------------
         # AUTO-BUILD LISTENER
-        # ---------------------------------------------------------
         if str(message.channel.id) not in [str(PREMIUM_DESIGN_CHANNEL_ID), str(NON_PREMIUM_DESIGN_CHANNEL_ID)]:
             return
 
@@ -624,7 +829,6 @@ class BotCog(commands.Cog):
             print("[Auto-Build Error] Target server ID is missing or 0.")
             return
 
-        # 1. Fetch Target Guild via Cache or Discord API
         guild = self.bot.get_guild(int(target_guild_id))
         if not guild:
             try:
@@ -637,7 +841,6 @@ class BotCog(commands.Cog):
             await self.notify_missing_bot(submitting_user_id, target_guild_id)
             return
 
-        # 2. Verify User Admin / Owner Rights in Target Guild
         try:
             member = await guild.fetch_member(int(submitting_user_id))
         except Exception:
@@ -654,7 +857,6 @@ class BotCog(commands.Cog):
             await self.notify_user_permission_failed(submitting_user_id, target_guild_id, "User lacks Administrator or Server Owner permissions in target server.")
             return
 
-        # 3. IF PREMIUM: Auto-Build Directly. IF NON-PREMIUM: Send DM with Purchase & Points Options
         if is_premium_submission or (str(message.channel.id) == str(PREMIUM_DESIGN_CHANNEL_ID)):
             print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
             await self.execute_auto_build(guild, layout)
@@ -701,7 +903,6 @@ class BotCog(commands.Cog):
         except Exception as e:
             print(f"[DM Exception] Unexpected error sending DM to {user_id}: {e}. Falling back to public channel.")
 
-        # Fallback: Send directly to the submission channel if DM fails or is blocked
         if fallback_channel:
             try:
                 await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
@@ -739,7 +940,6 @@ class BotCog(commands.Cog):
 
     async def nuke_guild_structure(self, guild: discord.Guild):
         """Deletes existing channels, categories, and custom roles prior to auto-building."""
-        # Delete existing text, voice channels, and categories
         for channel in guild.channels:
             try:
                 await channel.delete(reason="Template Engine Nuke Before Auto-Build")
@@ -747,7 +947,6 @@ class BotCog(commands.Cog):
             except Exception as e:
                 print(f"[Nuke Channel Warning] Failed to delete {channel.name}: {e}")
 
-        # Delete non-default custom roles
         for role in guild.roles:
             if not role.is_default() and not role.managed and role.position < guild.me.top_role.position:
                 try:
@@ -758,13 +957,11 @@ class BotCog(commands.Cog):
 
     async def execute_auto_build(self, guild: discord.Guild, layout: dict):
         try:
-            # Step 1: Nuke target server
             await self.nuke_guild_structure(guild)
 
             created_roles = {}
             roles_data = layout.get("roles", [])
 
-            # Step 2: Create Roles
             for r_info in roles_data:
                 role_name = strip_emojis(r_info.get("name", "Role"))
                 if not role_name:
@@ -786,7 +983,6 @@ class BotCog(commands.Cog):
                 except Exception as e:
                     print(f"[Auto-Build Role Error] {role_name}: {e}")
 
-            # Step 3: Create Categories & Channels
             categories = layout.get("categories", [])
             for cat_data in categories:
                 cat_raw_name = cat_data.get("name", "CATEGORY")
@@ -824,6 +1020,8 @@ class BotCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    # Register persistent interactive UI view so button interactions survive bot restarts/redeployments
+    # Register all persistent views so interactive buttons survive restarts & redeployments
+    bot.add_view(RobloxVerificationView())
+    bot.add_view(RobloxUnsyncView())
     bot.add_view(NonPremiumDeploymentView(bot=bot))
     await bot.add_cog(BotCog(bot))
