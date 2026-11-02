@@ -543,6 +543,16 @@ class BotCog(commands.Cog):
 
                     if ch_type == "voice":
                         await guild.create_voice_channel(name=ch_clean_name, category=dis_cat, reason="Auto-Build Deployment")
+                    elif ch_type == "forum":
+                        try:
+                            await guild.create_forum_channel(name=ch_clean_name, category=dis_cat, topic=ch_topic, reason="Auto-Build Deployment")
+                        except Exception:
+                            await guild.create_text_channel(name=ch_clean_name, category=dis_cat, topic=ch_topic, reason="Auto-Build Deployment")
+                    elif ch_type == "stage":
+                        try:
+                            await guild.create_stage_channel(name=ch_clean_name, category=dis_cat, topic=ch_topic, reason="Auto-Build Deployment")
+                        except Exception:
+                            await guild.create_voice_channel(name=ch_clean_name, category=dis_cat, reason="Auto-Build Deployment")
                     else:
                         await guild.create_text_channel(name=ch_clean_name, category=dis_cat, topic=ch_topic, reason="Auto-Build Deployment")
                     await asyncio.sleep(0.2)
@@ -908,8 +918,3 @@ async def setup(bot: commands.Bot):
 
     await bot.add_cog(BotCog(bot))
     print("[Setup] BotCog loaded with persistent verification & un-sync views registered.")
-```
-
-### Key Highlights
-- **`/premium-set`**: Restored with choices `add` and `remove`, supporting custom durations (`1d`, `7d`, `30d`, `1y`, `inf`). Saves records directly to MongoDB (`premium_users` collection) and local fallback dictionary.
-- **`is_user_premium` & `set_user_premium`**: Correctly checks expiration timestamps and syncs with web layouts and Flask routes in `keep_alive.py`.
