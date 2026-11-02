@@ -663,50 +663,50 @@ class BotCog(commands.Cog):
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
 
     async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None):
+        dev_product_url = os.getenv("ROBLOX_DEV_PRODUCT_URL", "https://www.roblox.com/games/refer?PlaceId=123456789")
+        user_pts = get_user_points(user_id)
+
+        embed = discord.Embed(
+            title="Server Deployment Options",
+            description=f"<@{user_id}> Your blueprint for **{guild_name}** has been submitted!\n\nTo build this layout, select one of the deployment options below:",
+            color=0x8B5CF6
+        )
+        embed.add_field(
+            name="Option 1: Buy Dev Product",
+            value="Purchase the single-use Roblox Developer Product, then click **Verify Purchase**.",
+            inline=False
+        )
+        embed.add_field(
+            name="Option 2: Redeem Points",
+            value=f"Use **100 server points** to deploy immediately.\nYour Points: {user_pts:,} pts",
+            inline=False
+        )
+
+        view = NonPremiumDeploymentView(
+            bot=self.bot,
+            submitting_user_id=user_id,
+            target_guild_id=target_guild_id,
+            layout=layout,
+            dev_product_url=dev_product_url
+        )
+
         try:
             user = await self.bot.fetch_user(int(user_id))
-            if not user:
-                print(f"[DM Error] Could not find user with ID {user_id}")
+            if user:
+                await user.send(embed=embed, view=view)
+                print(f"[DM Success] Successfully sent deployment DM to {user.name} ({user_id})")
                 return
-
-            dev_product_url = os.getenv("ROBLOX_DEV_PRODUCT_URL", "https://www.roblox.com/games/refer?PlaceId=123456789")
-            user_pts = get_user_points(user_id)
-
-            embed = discord.Embed(
-                title="Server Deployment Options",
-                description=f"Your blueprint for **{guild_name}** has been submitted!\n\nTo build this layout, select one of the deployment options below:",
-                color=0x8B5CF6
-            )
-            embed.add_field(
-                name="Option 1: Buy Dev Product",
-                value="Purchase the single-use Roblox Developer Product, then click **Verify Purchase**.",
-                inline=False
-            )
-            embed.add_field(
-                name="Option 2: Redeem Points",
-                value=f"Use **100 server points** to deploy immediately.\nYour Points: {user_pts:,} pts",
-                inline=False
-            )
-
-            view = NonPremiumDeploymentView(
-                bot=self.bot,
-                submitting_user_id=user_id,
-                target_guild_id=target_guild_id,
-                layout=layout,
-                dev_product_url=dev_product_url
-            )
-
-            await user.send(embed=embed, view=view)
-            print(f"[DM Success] Successfully sent deployment DM to {user.name} ({user_id})")
         except discord.Forbidden:
-            print(f"[DM Blocked] User {user_id} has DMs disabled or blocked the bot.")
-            if fallback_channel:
-                await fallback_channel.send(
-                    f"Warning: <@{user_id}>, I tried to send you the deployment options DM for **{guild_name}**, but your Direct Messages are disabled! Please enable DMs from server members and re-submit.",
-                    delete_after=15
-                )
+            print(f"[DM Blocked] User {user_id} has DMs disabled. Falling back to public channel.")
         except Exception as e:
-            print(f"[DM Exception] Unexpected error sending DM to {user_id}: {e}")
+            print(f"[DM Exception] Unexpected error sending DM to {user_id}: {e}. Falling back to public channel.")
+
+        # Fallback: Send directly to the submission channel if DM fails or is blocked
+        if fallback_channel:
+            try:
+                await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
+            except Exception as chan_err:
+                print(f"[Channel Send Error] Could not post fallback message to channel: {chan_err}")
 
     async def notify_missing_bot(self, user_id: str, target_guild_id: str):
         try:
