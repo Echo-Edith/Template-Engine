@@ -758,50 +758,51 @@ class BotCog(commands.Cog):
     # -------------------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
+        # Ignore normal messages from bots, UNLESS it's an automated layout JSON submission in design channels
+        is_design_channel = str(message.channel.id) in [str(PREMIUM_DESIGN_CHANNEL_ID), str(NON_PREMIUM_DESIGN_CHANNEL_ID)]
+        
+        if message.author.bot and not (is_design_channel and message.attachments):
             return
 
-        # CHAT POINTING & ANTI-SPAM SYSTEM
-        user_id_str = str(message.author.id)
-        now_ts = datetime.now(timezone.utc).timestamp()
-        content_clean = message.content.strip().lower()
+        # CHAT POINTING & ANTI-SPAM SYSTEM (Only process for real users)
+        if not message.author.bot:
+            user_id_str = str(message.author.id)
+            now_ts = datetime.now(timezone.utc).timestamp()
+            content_clean = message.content.strip().lower()
 
-        if user_id_str not in USER_MSG_TRACKER:
-            USER_MSG_TRACKER[user_id_str] = {
-                "last_time": 0.0,
-                "msg_count": 0,
-                "last_content": "",
-                "penalty_until": 0.0
-            }
+            if user_id_str not in USER_MSG_TRACKER:
+                USER_MSG_TRACKER[user_id_str] = {
+                    "last_time": 0.0,
+                    "msg_count": 0,
+                    "last_content": "",
+                    "penalty_until": 0.0
+                }
 
-        user_track = USER_MSG_TRACKER[user_id_str]
+            user_track = USER_MSG_TRACKER[user_id_str]
 
-        if now_ts < user_track["penalty_until"]:
-            return
+            if now_ts >= user_track["penalty_until"]:
+                time_passed = now_ts - user_track["last_time"]
 
-        time_passed = now_ts - user_track["last_time"]
+                if time_passed < 30.0 and content_clean and content_clean == user_track["last_content"]:
+                    user_track["penalty_until"] = now_ts + (30 * 60)
+                    user_track["last_time"] = now_ts
+                    user_track["msg_count"] = 0
+                    print(f"[Points Penalty] User {message.author.name} ({user_id_str}) penalized for 30 mins due to duplicate message.")
+                else:
+                    if time_passed >= 30.0:
+                        user_track["last_time"] = now_ts
+                        user_track["msg_count"] = 1
+                        user_track["last_content"] = content_clean
+                        add_user_points(user_id_str, 2)
+                    else:
+                        user_track["msg_count"] += 1
+                        if user_track["msg_count"] > 5:
+                            user_track["last_time"] = now_ts
+                            user_track["msg_count"] = 0
+                        user_track["last_content"] = content_clean
 
-        if time_passed < 30.0 and content_clean and content_clean == user_track["last_content"]:
-            user_track["penalty_until"] = now_ts + (30 * 60)
-            user_track["last_time"] = now_ts
-            user_track["msg_count"] = 0
-            print(f"[Points Penalty] User {message.author.name} ({user_id_str}) penalized for 30 mins due to duplicate message.")
-            return
-
-        if time_passed >= 30.0:
-            user_track["last_time"] = now_ts
-            user_track["msg_count"] = 1
-            user_track["last_content"] = content_clean
-            add_user_points(user_id_str, 2)
-        else:
-            user_track["msg_count"] += 1
-            if user_track["msg_count"] > 5:
-                user_track["last_time"] = now_ts
-                user_track["msg_count"] = 0
-            user_track["last_content"] = content_clean
-
-        # AUTO-BUILD LISTENER
-        if str(message.channel.id) not in [str(PREMIUM_DESIGN_CHANNEL_ID), str(NON_PREMIUM_DESIGN_CHANNEL_ID)]:
+        # AUTO-BUILD / NON-PREMIUM DM LISTENER
+        if not is_design_channel:
             return
 
         json_attachment = None
@@ -829,6 +830,7 @@ class BotCog(commands.Cog):
             print("[Auto-Build Error] Target server ID is missing or 0.")
             return
 
+        # Fetch target guild
         guild = self.bot.get_guild(int(target_guild_id))
         if not guild:
             try:
@@ -841,25 +843,9 @@ class BotCog(commands.Cog):
             await self.notify_missing_bot(submitting_user_id, target_guild_id)
             return
 
-        try:
-            member = await guild.fetch_member(int(submitting_user_id))
-        except Exception:
-            member = None
-
-        if not member:
-            await self.notify_user_permission_failed(submitting_user_id, target_guild_id, "User is not a member of the target server.")
-            return
-
-        is_owner = (guild.owner_id == member.id)
-        is_admin = member.guild_permissions.administrator
-
-        if not (is_owner or is_admin):
-            await self.notify_user_permission_failed(submitting_user_id, target_guild_id, "User lacks Administrator or Server Owner permissions in target server.")
-            return
-
-        # Handle non-premium vs premium flows directly from frontend payload BEFORE channel logging
+        # DM Submiting User BEFORE checking secondary server permissions or executing layout
         if not is_premium_submission and str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
-            print(f"[Frontend Direct DM] Initiating direct DM to submitter {submitting_user_id} before logging...")
+            print(f"[Frontend Direct DM] Initiating direct DM with 5 retries to submitter {submitting_user_id} before logging...")
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
         else:
             print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
@@ -894,7 +880,7 @@ class BotCog(commands.Cog):
         )
 
         # ---------------------------------------------------------
-        # EXPLICIT DIRECT MESSAGE CREATION & RETRY LOOP
+        # EXPLICIT DIRECT MESSAGE CREATION & 5-ATTEMPT RETRY LOOP
         # ---------------------------------------------------------
         dm_sent = False
         user = None
@@ -910,16 +896,16 @@ class BotCog(commands.Cog):
                     # Force creation of explicit DM channel before sending
                     dm_channel = user.dm_channel or await user.create_dm()
                     await dm_channel.send(embed=embed, view=view)
-                    print(f"[DM Success] DM successfully delivered on attempt {attempt}/5 to {user.name} ({user_id})")
+                    print(f"[DM Success] Direct message successfully delivered on attempt {attempt}/5 to {user.name} ({user_id})")
                     dm_sent = True
                     break
                 except discord.Forbidden:
-                    print(f"[DM Blocked] Direct Messages are blocked for user {user_id}.")
+                    print(f"[DM Blocked] Direct Messages are disabled for user {user_id}.")
                     break
                 except Exception as attempt_err:
-                    print(f"[DM Retry {attempt}/5] Direct Message failed: {attempt_err}")
+                    print(f"[DM Retry {attempt}/5] DM delivery failed: {attempt_err}")
                     if attempt < 5:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(1.5)
 
         if dm_sent:
             return
