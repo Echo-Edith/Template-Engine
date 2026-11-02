@@ -603,7 +603,7 @@ class BotCog(commands.Cog):
                         in_te_group = True
                         te_role = item.get("role", {}).get("name")
 
-                embed = discord.Embed(title="🔎 Roblox Lookup\n━━━━━━━━━━━━━━━━", color=0x8B5CF6)
+                embed = discord.Embed(title="🔎 Roblox Profile Lookup", color=0x8B5CF6)
                 if thumb_data.get("data"):
                     embed.set_thumbnail(url=thumb_data["data"][0].get("imageUrl", ""))
 
@@ -664,7 +664,7 @@ class BotCog(commands.Cog):
                 description=f"{description}\n\n**Ends:** <t:{end_ts}:R>\n**Hosted By:** {interaction.user.mention}",
                 color=0x8B5CF6
             )
-            embed.set_image(url="https://res.cloudinary.com/dtz0urit6/image/upload/f_png,q_auto/cloudinary-tools-uploads/doob9hmutuwfzw6aloj5.png")
+            embed.set_image(url=GIVEAWAY_BANNER_URL)
             embed.set_footer(text="Entries: 0 | Hosted by Template Engine")
 
             view = GiveawayPanelView()
@@ -679,6 +679,8 @@ class BotCog(commands.Cog):
                 "entries": []
             }
             ACTIVE_GIVEAWAYS[str(gw_msg.id)] = gw_data
+            if db_giveaways is not None:
+                db_giveaways.insert_one(gw_data)
 
             await interaction.followup.send(f"Giveaway posted in {target_channel.mention}!", ephemeral=True)
 
@@ -754,6 +756,8 @@ class BotCog(commands.Cog):
         }
 
         LOCAL_GUILD_SETTINGS[guild_id_str] = settings_payload
+        if db_guild_settings is not None:
+            db_guild_settings.update_one({"guild_id": guild_id_str}, {"$set": settings_payload}, upsert=True)
 
         embed = discord.Embed(
             title="Welcome Settings Saved",
@@ -855,184 +859,6 @@ class BotCog(commands.Cog):
         else:
             remove_user_premium(str(user.id))
             await interaction.followup.send(f"Revoked TE Premium access from {user.mention}.", ephemeral=True)
-
-    @app_commands.describe(query="Roblox Username or User ID")
-    async def search(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer(ephemeral=False)
-        q = query.strip()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                r_id, username = None, None
-                if q.isdigit():
-                    r_id = q
-                    async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
-                        if resp.status == 200:
-                            username = (await resp.json()).get("name")
-                else:
-                    async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [q], "excludeBannedUsers": False}) as resp:
-                        if resp.status == 200:
-                            user_list = (await resp.json()).get("data", [])
-                            if user_list:
-                                r_id = str(user_list[0].get("id"))
-                                username = user_list[0].get("name")
-
-                if not r_id or not username:
-                    await interaction.followup.send(f"Could not find Roblox user matching `{q}`.")
-                    return
-
-                async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
-                    p_data = await resp.json() if resp.status == 200 else {}
-                async with session.get(f"https://groups.roblox.com/v2/users/{r_id}/groups/roles") as resp:
-                    g_data = await resp.json() if resp.status == 200 else {}
-                async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar?userIds={r_id}&size=720x720&format=Png") as resp:
-                    thumb_data = await resp.json() if resp.status == 200 else {}
-
-                display_name = p_data.get("displayName", username)
-                groups_list = g_data.get("data", [])
-                te_group_id = str(os.getenv("ROBLOX_GROUP_ID", "")).strip()
-
-                in_te_group = False
-                te_role = None
-                for item in groups_list:
-                    grp = item.get("group", {})
-                    if te_group_id and str(grp.get("id")) == te_group_id:
-                        in_te_group = True
-                        te_role = item.get("role", {}).get("name")
-
-                embed = discord.Embed(title="🔎 Roblox Profile Lookup", color=0x8B5CF6)
-                if thumb_data.get("data"):
-                    embed.set_thumbnail(url=thumb_data["data"][0].get("imageUrl", ""))
-
-                embed.add_field(name="👤 USER", value=f"**Username:** {username}\n**Display Name:** {display_name}\n**User ID:** `{r_id}`", inline=False)
-                if te_group_id:
-                    status = f"Member (`{te_role}`)" if in_te_group else "Not a Member"
-                    embed.add_field(name="👥 GROUPS", value=f"• **Template Engine Group:** {status}", inline=False)
-
-                await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            await interaction.followup.send(f"Search error: `{str(e)}`")
-
-    @app_commands.command(name="giveaway", description="Manage giveaways.")
-    @app_commands.describe(action="create, edit, or end", channel="Target channel", duration="1h, 1d, 7d", prize="Prize details", description="Giveaway details", message_link="Message ID or link")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Create Giveaway", value="create"),
-        app_commands.Choice(name="Edit Giveaway", value="edit"),
-        app_commands.Choice(name="End Giveaway", value="end")
-    ])
-    async def giveaway_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str], channel: Optional[discord.TextChannel] = None, duration: Optional[str] = "1d", prize: Optional[str] = "100 Points", description: Optional[str] = "Click below to enter!", message_link: Optional[str] = None):
-        await interaction.response.defer(ephemeral=True)
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.followup.send("Restricted to bot owner.", ephemeral=True)
-            return
-
-        target_channel = channel or interaction.channel
-        if action.value == "create":
-            dur_td = parse_duration_to_timedelta(duration or "1d")
-            end_ts = int((datetime.now(timezone.utc) + dur_td).timestamp())
-
-            embed = discord.Embed(title=f"🎉 GIVEAWAY: {prize}", description=f"{description}\n\n**Ends:** <t:{end_ts}:R>\n**Hosted By:** {interaction.user.mention}", color=0x8B5CF6)
-            embed.set_image(url=GIVEAWAY_BANNER_URL)
-            embed.set_footer(text="Entries: 0 | Hosted by Template Engine")
-
-            view = GiveawayPanelView()
-            gw_msg = await target_channel.send(embed=embed, view=view)
-
-            gw_data = {"message_id": str(gw_msg.id), "channel_id": str(target_channel.id), "guild_id": str(interaction.guild_id), "prize": prize, "end_timestamp": end_ts, "entries": []}
-            ACTIVE_GIVEAWAYS[str(gw_msg.id)] = gw_data
-            if db_giveaways is not None:
-                db_giveaways.insert_one(gw_data)
-
-            await interaction.followup.send(f"Giveaway posted in {target_channel.mention}!", ephemeral=True)
-
-    @app_commands.command(name="set", description="Deploy verification or un-sync panels.")
-    @app_commands.describe(action="Panel type", channel="Target channel", description="Custom text")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Verification Panel", value="verification"),
-        app_commands.Choice(name="Un-Sync Panel", value="un-sync")
-    ])
-    async def set_panel_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str], channel: discord.TextChannel, description: str):
-        await interaction.response.defer(ephemeral=True)
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.followup.send("Restricted to bot owner.", ephemeral=True)
-            return
-
-        if action.value == "verification":
-            embed = discord.Embed(title="Roblox Account Verification", description=description, color=0x8B5CF6)
-            view = RobloxVerificationView()
-        else:
-            embed = discord.Embed(title="Un-Sync Roblox Account", description=description, color=0xF43F5E)
-            view = RobloxUnsyncView()
-
-        await channel.send(embed=embed, view=view)
-        await interaction.followup.send(f"Deployed {action.name} to {channel.mention}.", ephemeral=True)
-
-    @app_commands.command(name="welcome-set", description="Set welcome greeting channel and message.")
-    @app_commands.describe(channel="Greeting channel", message="Variables: {user}, {username}, {server}")
-    async def welcome_set_cmd(self, interaction: discord.Interaction, channel: discord.TextChannel, message: Optional[str] = "Welcome {user} to **{server}**!"):
-        await interaction.response.defer(ephemeral=True)
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.followup.send("Restricted to bot owner.", ephemeral=True)
-            return
-
-        guild_id_str = str(interaction.guild_id)
-        settings_payload = {"guild_id": guild_id_str, "welcome_channel_id": str(channel.id), "welcome_message": message}
-
-        LOCAL_GUILD_SETTINGS[guild_id_str] = settings_payload
-        if db_guild_settings is not None:
-            db_guild_settings.update_one({"guild_id": guild_id_str}, {"$set": settings_payload}, upsert=True)
-
-        await interaction.followup.send(f"Welcome channel set to {channel.mention}.", ephemeral=True)
-
-    @app_commands.command(name="points", description="Check member points.")
-    async def points_cmd(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
-        await interaction.response.defer(ephemeral=False)
-        target = user or interaction.user
-        pts = get_user_points(str(target.id))
-        embed = discord.Embed(title="Point Balance", description=f"{target.mention} has **{pts:,}** points.", color=0x8B5CF6)
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="leaderboard", description="View points leaderboard.")
-    async def leaderboard_cmd(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=False)
-        top = get_top_leaderboard(10)
-        lines = [f"#{i+1} <@{e['discord_id']}> - {e['points']:,} pts" for i, e in enumerate(top)]
-        embed = discord.Embed(title="Point Leaderboard", description="\n".join(lines) if lines else "No entries yet.", color=0xF1C40F)
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="points-set", description="Modify user points.")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Add Points", value="add"),
-        app_commands.Choice(name="Deduct Points", value="deduct")
-    ])
-    async def points_set_cmd(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], amount: int):
-        await interaction.response.defer(ephemeral=True)
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.followup.send("Restricted to bot owner.", ephemeral=True)
-            return
-
-        delta = amount if action.value == "add" else -amount
-        new_total = add_user_points(str(user.id), delta)
-        await interaction.followup.send(f"Updated points for {user.mention}. New total: {new_total:,} pts", ephemeral=True)
-
-    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium.")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Grant Premium", value="add"),
-        app_commands.Choice(name="Revoke Premium", value="remove")
-    ])
-    async def premium_set_cmd(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], duration: Optional[str] = "30d"):
-        await interaction.response.defer(ephemeral=True)
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.followup.send("Restricted to bot owner.", ephemeral=True)
-            return
-
-        if action.value == "add":
-            set_user_premium(str(user.id), parse_duration_to_timedelta(duration or "30d"))
-            await interaction.followup.send(f"Granted TE Premium to {user.mention}.", ephemeral=True)
-        else:
-            remove_user_premium(str(user.id))
-            await interaction.followup.send(f"Revoked TE Premium from {user.mention}.", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
