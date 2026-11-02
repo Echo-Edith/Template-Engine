@@ -949,68 +949,12 @@ class BotCog(commands.Cog):
     # -------------------------------------------------------------
     # EVENT LISTENER: WELCOME BONUS (20 POINTS)
     # -------------------------------------------------------------
-    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium subscription status for a user.")
-    @app_commands.describe(
-        user="Target user to modify premium status for.",
-        action="Select whether to grant or revoke premium.",
-        duration="Duration format e.g. 1d, 7d, 30d, 1y, inf (Defaults to 30d)."
-    )
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Grant Premium", value="add"),
-        app_commands.Choice(name="Revoke Premium", value="remove")
-    ])
-    async def premium_set_cmd(
-        self,
-        interaction: discord.Interaction,
-        user: discord.User,
-        action: app_commands.Choice[str],
-        duration: Optional[str] = "30d"
-    ):
-        await interaction.response.defer(ephemeral=True)
-
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
-            embed = discord.Embed(
-                title="Permission Denied",
-                description="You need Administrator permissions to manage TE Premium memberships.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if member.bot:
             return
-
-        try:
-            if action.value == "add":
-                duration_td = parse_duration_to_timedelta(duration or "30d")
-                set_user_premium(str(user.id), duration_td)
-                exp_date = datetime.now(timezone.utc) + duration_td
-                exp_ts = int(exp_date.timestamp())
-
-                embed = discord.Embed(
-                    title="TE Premium Granted",
-                    description=f"Successfully granted TE Premium to {user.mention}!\n\nDuration: {duration}\nExpires: <t:{exp_ts}:F> (<t:{exp_ts}:R>)",
-                    color=0xF1C40F
-                )
-            else:
-                remove_user_premium(str(user.id))
-                embed = discord.Embed(
-                    title="TE Premium Revoked",
-                    description=f"Successfully revoked TE Premium access from {user.mention}.",
-                    color=0xF43F5E
-                )
-
-            embed.set_thumbnail(url=user.display_avatar.url)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            print(f"[Premium Set Error] {e}")
-            embed = discord.Embed(
-                title="Error Modifying Premium Status",
-                description=f"An error occurred: {str(e)}",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        add_user_points(str(member.id), 20)
+        print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
 
     # -------------------------------------------------------------
     # SLASH COMMAND: ROBLOX USER INTELLIGENCE SEARCH
@@ -1466,12 +1410,3 @@ async def setup(bot: commands.Bot):
     bot.add_view(PremiumMissingBotView())
     bot.add_view(GiveawayPanelView())
     await bot.add_cog(BotCog(bot))
-```
-
-### Summary of Additions:
-1. **`/giveaway` Slash Command**: Supports `create`, `edit`, and `end` choices. `edit` and `end` take the Discord message URL in the `edit:` parameter.
-2. **Automated Roblox Group Shout**: Executing `/giveaway create` uses `ROBLOX_COOKIE` and `ROBLOX_GROUP_ID` to post a shout prompting members to join the community server.
-3. **Dyno-Style Interactive View (`GiveawayPanelView`)**:
-   - **Enter / Leave**: Toggles user participation and updates the entrant count on the live embed.
-   - **Entries**: Displays the list of entrants as 1-per-line user pings (`<@user_id>`).
-4. **Automated Background Timer (`tasks.loop`)**: Automatically draws a random winner when the giveaway duration expires.
