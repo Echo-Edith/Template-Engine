@@ -860,7 +860,6 @@ class BotCog(commands.Cog):
         # Handle non-premium vs premium flows directly from frontend payload BEFORE channel logging
         if not is_premium_submission and str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
             print(f"[Frontend Direct DM] Initiating direct DM to submitter {submitting_user_id} before logging...")
-            # Step 1: Send DM directly to the submitter using frontend payload data
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
         else:
             print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
@@ -895,7 +894,7 @@ class BotCog(commands.Cog):
         )
 
         # ---------------------------------------------------------
-        # RETRY DM ATTEMPTS (UP TO 5 TIMES)
+        # EXPLICIT DIRECT MESSAGE CREATION & RETRY LOOP
         # ---------------------------------------------------------
         dm_sent = False
         user = None
@@ -903,28 +902,30 @@ class BotCog(commands.Cog):
         try:
             user = await self.bot.fetch_user(int(user_id))
         except Exception as e:
-            print(f"[DM Error] Failed to fetch user {user_id}: {e}")
+            print(f"[DM Error] Could not fetch user {user_id}: {e}")
 
         if user:
             for attempt in range(1, 6):
                 try:
-                    await user.send(embed=embed, view=view)
-                    print(f"[DM Success] DM delivered on attempt {attempt}/5 to {user.name} ({user_id})")
+                    # Force creation of explicit DM channel before sending
+                    dm_channel = user.dm_channel or await user.create_dm()
+                    await dm_channel.send(embed=embed, view=view)
+                    print(f"[DM Success] DM successfully delivered on attempt {attempt}/5 to {user.name} ({user_id})")
                     dm_sent = True
                     break
                 except discord.Forbidden:
-                    print(f"[DM Blocked] Direct Messages are blocked for user {user_id}. Stopping retries.")
+                    print(f"[DM Blocked] Direct Messages are blocked for user {user_id}.")
                     break
                 except Exception as attempt_err:
-                    print(f"[DM Retry {attempt}/5] Failed to send DM to {user_id}: {attempt_err}")
+                    print(f"[DM Retry {attempt}/5] Direct Message failed: {attempt_err}")
                     if attempt < 5:
-                        await asyncio.sleep(1.5)
+                        await asyncio.sleep(1.0)
 
         if dm_sent:
             return
 
         # ---------------------------------------------------------
-        # FALLBACK 1: SEND TO TARGET GUILD (IF BOT IS PRESENT)
+        # FALLBACK 1: TARGET GUILD TEXT CHANNEL
         # ---------------------------------------------------------
         target_gid = int(target_guild_id) if target_guild_id and target_guild_id != "0" else 0
         target_guild = self.bot.get_guild(target_gid) if target_gid else None
@@ -945,18 +946,18 @@ class BotCog(commands.Cog):
             if target_channel:
                 try:
                     await target_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
-                    print(f"[Fallback Success] Posted deployment embed in target server channel #{target_channel.name} ({target_guild.name})")
+                    print(f"[Fallback Success] Posted deployment embed in target server channel #{target_channel.name}")
                     return
                 except Exception as t_err:
-                    print(f"[Target Server Send Error] Failed to post in target server {target_guild.name}: {t_err}")
+                    print(f"[Target Server Send Error] Could not post in target server {target_guild.name}: {t_err}")
 
         # ---------------------------------------------------------
-        # FALLBACK 2: SUBMISSION CHANNEL IN MAIN SERVER
+        # FALLBACK 2: MAIN SUBMISSION CHANNEL
         # ---------------------------------------------------------
         if fallback_channel:
             try:
                 await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
-                print(f"[Fallback Success] Posted deployment embed in fallback submission channel #{fallback_channel.name}")
+                print(f"[Fallback Success] Posted deployment embed in submission channel #{fallback_channel.name}")
             except Exception as chan_err:
                 print(f"[Fallback Channel Send Error] Could not post to submission channel: {chan_err}")
 
@@ -1071,8 +1072,7 @@ class BotCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    # Register all persistent views so interactive buttons survive restarts & redeployments
+    # Register persistent views for static panels
     bot.add_view(RobloxVerificationView())
     bot.add_view(RobloxUnsyncView())
-    bot.add_view(NonPremiumDeploymentView(bot=bot))
     await bot.add_cog(BotCog(bot))
