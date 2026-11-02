@@ -4,7 +4,6 @@ import json
 import random
 import asyncio
 import aiohttp
-import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 
@@ -24,15 +23,11 @@ NON_PREMIUM_DESIGN_CHANNEL_ID = int(os.getenv("NON_PREMIUM_DESIGN_CHANNEL_ID", "
 WEBSITE_LOGIN_CHANNEL_ID = int(os.getenv("WEBSITE_LOGIN_CHANNEL_ID", "1563524100276617248"))
 SUBSCRIPTION_LOG_CHANNEL_ID = int(os.getenv("SUBSCRIPTION_LOG_CHANNEL_ID", "1564262413514182739"))
 
-GIVEAWAY_BANNER_URL = "https://res.cloudinary.com/dtz0urit6/image/upload/f_png,q_auto/cloudinary-tools-uploads/doob9hmutuwfzw6aloj5.png"
-
 MONGO_URI = os.getenv("MONGO_URI")
 
 db_premium = None
 db_build_auth = None
 db_users = None
-db_giveaways = None
-db_guild_settings = None
 
 if MONGO_URI:
     try:
@@ -44,36 +39,33 @@ if MONGO_URI:
         db_premium = db["premium_users"]
         db_build_auth = db["build_authorized_users"]
         db_users = db["persistent_users"]
-        db_giveaways = db["giveaways"]
-        db_guild_settings = db["guild_settings"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
 LOCAL_PREMIUM_USERS = {}
 LOCAL_AUTHORIZED_BUILDERS = set()
 LOCAL_PERSISTENT_USERS = {}
-LOCAL_GUILD_SETTINGS = {}
 USER_POINTS_DATA = {}
-ACTIVE_GIVEAWAYS = {}
 
-# In-memory tracking for generated verification codes
+# In-memory tracking for generated verification codes { user_id: { "code": "TE-12345", "expires_at": float } }
 PENDING_VERIFICATION_CODES = {}
 
-# In-memory tracking for used Dev Product receipt IDs to ensure ONE-TIME use
+# In-memory tracking for used Dev Product receipt/transaction IDs to ensure ONE-TIME use
 USED_DEV_PRODUCT_RECEIPTS = set()
 
 # In-memory tracking for points anti-spam system
+# Structure: { user_id: { "last_time": float, "msg_count": int, "last_content": str, "penalty_until": float } }
 USER_MSG_TRACKER = {}
 
 
-def get_formatted_roblox_cookie() -> str:
-    cookie = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip()
-    if not cookie:
-        return ""
-    clean = cookie.strip('"\'')
-    if clean.startswith(".ROBLOSECURITY="):
-        return clean
-    return f".ROBLOSECURITY={clean}"
+def get_roblox_cookie_header() -> dict:
+    """Helper function to format ROBLOSECURITY headers for API calls."""
+    raw_cookie = (os.getenv("ROBLOX_COOKIE") or os.getenv("ROBLOSECURITY") or "").strip().strip('"\'')
+    if not raw_cookie:
+        return {}
+    if not raw_cookie.startswith(".ROBLOSECURITY="):
+        raw_cookie = f".ROBLOSECURITY={raw_cookie}"
+    return {"Cookie": raw_cookie}
 
 
 def get_user_points(user_id: str) -> int:
@@ -209,342 +201,6 @@ def format_channel_name(name: str) -> str:
     return clean.lower().replace(" ", "-")
 
 
-async def post_roblox_group_shout(group_id: str, message: str) -> bool:
-    """Posts a group shout announcement on Roblox using ROBLOX_COOKIE."""
-    cookie = get_formatted_roblox_cookie()
-    if not cookie or not group_id or group_id == "0":
-        return False
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"Cookie": cookie, "User-Agent": "Mozilla/5.0"}
-            
-            # Get X-CSRF-TOKEN
-            async with session.post("https://auth.roblox.com/v2/login", headers=headers) as csrf_resp:
-                csrf_token = csrf_resp.headers.get("x-csrf-token")
-
-            if csrf_token:
-                headers["X-CSRF-TOKEN"] = csrf_token
-
-            shout_url = f"https://groups.roblox.com/v1/groups/{group_id}/status"
-            async with session.patch(shout_url, json={"message": message}, headers=headers) as shout_resp:
-                if shout_resp.status == 200:
-                    print(f"[Roblox Group Shout] Posted announcement successfully: {message[:30]}...")
-                    return True
-                else:
-                    print(f"[Roblox Group Shout Error] Status {shout_resp.status}")
-    except Exception as e:
-        print(f"[Roblox Group Shout Exception] {e}")
-    return False
-
-
-# -------------------------------------------------------------
-# GIVEAWAY INTERACTIVE VIEWS
-# -------------------------------------------------------------
-class GiveawayEntriesView(discord.ui.View):
-    def __init__(self, entries: list):
-        super().__init__(timeout=60)
-        self.entries = entries
-        self.page = 0
-        self.max_per_page = 15
-
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="btn_gw_entries_prev")
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.page > 0:
-            self.page -= 1
-            await self.update_page(interaction)
-        else:
-            await interaction.response.defer()
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, custom_id="btn_gw_entries_next")
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if (self.page + 1) * self.max_per_page < len(self.entries):
-            self.page += 1
-            await self.update_page(interaction)
-        else:
-            await interaction.response.defer()
-
-    async def update_page(self, interaction: discord.Interaction):
-        start = self.page * self.max_per_page
-        end = start + self.max_per_page
-        current_batch = self.entries[start:end]
-
-        lines = [f"<@{uid}>" for uid in current_batch]
-        embed = discord.Embed(
-            title=f"Giveaway Entrants ({len(self.entries)} Total)",
-            description="\n".join(lines) if lines else "No entries recorded yet.",
-            color=0x8B5CF6
-        )
-        embed.set_footer(text=f"Page {self.page + 1} / {((len(self.entries) - 1) // self.max_per_page) + 1}")
-        await interaction.response.edit_message(embed=embed, view=self)
-
-
-class GiveawayPanelView(discord.ui.View):
-    def __init__(self, msg_id: str = "0"):
-        super().__init__(timeout=None)
-        self.msg_id = str(msg_id)
-
-    @discord.ui.button(label="Enter / Leave", style=discord.ButtonStyle.primary, custom_id="btn_gw_enter_toggle")
-    async def enter_toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        user_id = str(interaction.user.id)
-        msg_id_key = str(interaction.message.id)
-
-        gw_data = ACTIVE_GIVEAWAYS.get(msg_id_key)
-        if not gw_data and db_giveaways is not None:
-            gw_data = db_giveaways.find_one({"message_id": msg_id_key})
-
-        if not gw_data:
-            await interaction.followup.send("This giveaway is no longer active or could not be found.", ephemeral=True)
-            return
-
-        entries = gw_data.get("entries", [])
-        if user_id in entries:
-            entries.remove(user_id)
-            action_msg = "You have left the giveaway."
-        else:
-            entries.append(user_id)
-            action_msg = "You have entered the giveaway! Good luck!"
-
-        gw_data["entries"] = entries
-        ACTIVE_GIVEAWAYS[msg_id_key] = gw_data
-
-        if db_giveaways is not None:
-            try:
-                db_giveaways.update_one({"message_id": msg_id_key}, {"$set": {"entries": entries}})
-            except Exception as e:
-                print(f"[Mongo Giveaway Update Error] {e}")
-
-        try:
-            embed = interaction.message.embeds[0]
-            embed.set_footer(text=f"Entries: {len(entries)} | Hosted by Template Engine")
-            await interaction.message.edit(embed=embed)
-        except Exception as edit_err:
-            print(f"[Giveaway Embed Edit Error] {edit_err}")
-
-        await interaction.followup.send(action_msg, ephemeral=True)
-
-    @discord.ui.button(label="Entries", style=discord.ButtonStyle.secondary, custom_id="btn_gw_view_entries")
-    async def view_entries_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        msg_id_key = str(interaction.message.id)
-        gw_data = ACTIVE_GIVEAWAYS.get(msg_id_key)
-        if not gw_data and db_giveaways is not None:
-            gw_data = db_giveaways.find_one({"message_id": msg_id_key})
-
-        entries = gw_data.get("entries", []) if gw_data else []
-
-        if not entries:
-            await interaction.response.send_message("No entrants in this giveaway yet!", ephemeral=True)
-            return
-
-        view = GiveawayEntriesView(entries)
-        lines = [f"<@{uid}>" for uid in entries[:15]]
-        embed = discord.Embed(
-            title=f"Giveaway Entrants ({len(entries)} Total)",
-            description="\n".join(lines),
-            color=0x8B5CF6
-        )
-        embed.set_footer(text=f"Page 1 / {((len(entries) - 1) // 15) + 1}")
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-
-# -------------------------------------------------------------
-# INTERACTIVE UI FOR MISSING BOT & NON-PREMIUM VERIFICATION
-# -------------------------------------------------------------
-class PremiumMissingBotView(discord.ui.View):
-    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None):
-        super().__init__(timeout=None)
-        self.bot = bot
-        self.submitting_user_id = str(submitting_user_id)
-        self.target_guild_id = str(target_guild_id)
-        self.layout = layout or {}
-
-        invite_url = f"https://discord.com/api/oauth2/authorize?client_id={bot.user.id if bot and bot.user else ''}&permissions=8&scope=bot%20applications.commands&guild_id={target_guild_id}"
-        self.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link, custom_id="btn_premium_invite_link"))
-
-    @discord.ui.button(label="Build", style=discord.ButtonStyle.success, custom_id="btn_premium_build_retry")
-    async def build_retry_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
-        bot_inst = self.bot or interaction.client
-        target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
-
-        guild = bot_inst.get_guild(target_gid) if target_gid else None
-        if not guild and target_gid:
-            try:
-                guild = await bot_inst.fetch_guild(target_gid)
-            except Exception:
-                guild = None
-
-        if not guild:
-            embed = discord.Embed(
-                title="Re-Build Failed",
-                description=f"Re-build failed because the bot is still missing from target server ID `{self.target_guild_id}`.\n\nPlease click **Add Bot to Server** above to invite the bot, then click **Build** again.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Bot Detected! Executing Auto-Build...",
-            description=f"Successfully joined **{guild.name}**! Nuking old structure and auto-building layout now...",
-            color=0x2ECC71
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-        cog = bot_inst.get_cog("BotCog")
-        if cog:
-            await cog.execute_auto_build(guild, self.layout)
-
-
-class NonPremiumDeploymentView(discord.ui.View):
-    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, dev_product_url: str = ""):
-        super().__init__(timeout=None)
-        self.bot = bot
-        self.submitting_user_id = str(submitting_user_id)
-        self.target_guild_id = str(target_guild_id)
-        self.layout = layout or {}
-
-        store_url = dev_product_url or "https://www.roblox.com/games/6094950399/Template-Engine#!/store"
-        self.add_item(discord.ui.Button(label="Buy Roblox Dev Product", url=store_url, style=discord.ButtonStyle.link, custom_id="btn_buy_roblox_dev_prod"))
-
-    @discord.ui.button(label="Verify Purchase", style=discord.ButtonStyle.success, custom_id="btn_verify_dev_product")
-    async def verify_purchase_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
-        user_id = str(interaction.user.id)
-        roblox_id = None
-        if db_users is not None:
-            doc = db_users.find_one({"discord_id": user_id})
-            if doc and "roblox_data" in doc:
-                roblox_id = doc["roblox_data"].get("id")
-
-        if not roblox_id:
-            embed = discord.Embed(
-                title="Roblox Account Unlinked",
-                description="Please sync your Roblox account via the account sync channel before verifying purchases.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        dev_product_id = os.getenv("ROBLOX_DEV_PRODUCT_ID", "").strip()
-        cookie_header = get_formatted_roblox_cookie()
-        
-        is_verified = False
-        receipt_token = None
-
-        if cookie_header and roblox_id:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    url = f"https://economy.roblox.com/v2/users/{roblox_id}/transaction-history?transactionType=Purchase"
-                    headers = {"Cookie": cookie_header, "User-Agent": "Mozilla/5.0"}
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            tx_list = data.get("data", [])
-                            for tx in tx_list:
-                                item_info = tx.get("details", {})
-                                item_id = str(item_info.get("id", ""))
-                                tx_id = str(tx.get("id") or tx.get("transactionId"))
-                                tx_created = str(tx.get("created", ""))
-                                
-                                token_hash = hashlib.sha256(f"{tx_id}_{tx_created}".encode()).hexdigest()
-                                if (dev_product_id == "" or item_id == dev_product_id) and token_hash not in USED_DEV_PRODUCT_RECEIPTS:
-                                    is_verified = True
-                                    receipt_token = token_hash
-                                    break
-            except Exception as e:
-                print(f"[Cookie Sales Verify Error] {e}")
-
-        if not is_verified:
-            embed = discord.Embed(
-                title="Purchase Verification Failed",
-                description="No unused Roblox Dev Product purchase receipt was detected for your synced Roblox account.\n\nNote: Each purchase receipt can only be used ONCE per server deployment.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        if receipt_token:
-            USED_DEV_PRODUCT_RECEIPTS.add(receipt_token)
-
-        bot_inst = self.bot or interaction.client
-        target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
-
-        guild = bot_inst.get_guild(target_gid) if target_gid else None
-        if not guild and target_gid:
-            try:
-                guild = await bot_inst.fetch_guild(target_gid)
-            except Exception:
-                guild = None
-
-        if not guild:
-            await interaction.followup.send("Error: The bot is no longer in the target server.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Purchase Verified! Deploying Layout...",
-            description=f"Single-use purchase receipt verified ({receipt_token[:12]}...). Now building {guild.name}!",
-            color=0x2ECC71
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-        cog = bot_inst.get_cog("BotCog")
-        if cog:
-            await cog.execute_auto_build(guild, self.layout)
-
-    @discord.ui.button(label="Use Points (100 Pts)", style=discord.ButtonStyle.primary, custom_id="btn_use_points_build")
-    async def use_points_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
-        user_id = str(interaction.user.id)
-        current_pts = get_user_points(user_id)
-
-        if current_pts < 100:
-            embed = discord.Embed(
-                title="Insufficient Points",
-                description=f"You need at least 100 points to deploy this layout.\n\nYour Balance: {current_pts} pts\nMissing: {100 - current_pts} pts",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        new_total = add_user_points(user_id, -100)
-
-        bot_inst = self.bot or interaction.client
-        target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
-
-        guild = bot_inst.get_guild(target_gid) if target_gid else None
-        if not guild and target_gid:
-            try:
-                guild = await bot_inst.fetch_guild(target_gid)
-            except Exception:
-                guild = None
-
-        if not guild:
-            await interaction.followup.send("Error: Bot is missing from target server.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Points Redeemed! Deploying Layout...",
-            description=f"Deducted 100 points!\n\nUpdated Balance: {new_total:,} pts\nNow nuking and building {guild.name}...",
-            color=0x8B5CF6
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-        for child in self.children:
-            child.disabled = True
-        try:
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
-
-        cog = bot_inst.get_cog("BotCog")
-        if cog:
-            await cog.execute_auto_build(guild, self.layout)
-
-
 # -------------------------------------------------------------
 # ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
 # -------------------------------------------------------------
@@ -562,6 +218,7 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
         user_id = str(interaction.user.id)
         r_username = self.username_input.value.strip()
 
+        # Retrieve stored verification code
         code_data = PENDING_VERIFICATION_CODES.get(user_id)
         if not code_data or datetime.now(timezone.utc).timestamp() > code_data.get("expires_at", 0):
             embed = discord.Embed(
@@ -576,6 +233,7 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
 
         try:
             async with aiohttp.ClientSession() as session:
+                # Resolve Roblox Username to User ID
                 async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [r_username], "excludeBannedUsers": False}) as resp:
                     if resp.status != 200:
                         await interaction.followup.send("Failed to query Roblox API. Please try again later.", ephemeral=True)
@@ -589,6 +247,7 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
                     r_id = str(user_list[0].get("id"))
                     actual_name = user_list[0].get("name")
 
+                # Fetch Roblox Bio / Description
                 async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
                     if resp.status != 200:
                         await interaction.followup.send("Failed to fetch user profile details from Roblox.", ephemeral=True)
@@ -661,6 +320,15 @@ class RobloxVerificationView(discord.ui.View):
     async def verify_submit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RobloxVerifyModal())
 
+    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, custom_id="btn_verify_help")
+    async def verify_help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Roblox Verification Guide",
+            description="**How to link your account:**\n\n1. Click **Generate Code** to receive a code starting with `TE-`.\n2. Open your Roblox profile settings.\n3. Paste the code into your **About** (Bio) section and click Save.\n4. Return here and click **Verify Account**, then enter your exact Roblox username.\n\nOnce verified, your Roblox account will be connected to Template Engine.",
+            color=0x8B5CF6
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 class RobloxUnsyncView(discord.ui.View):
     def __init__(self):
@@ -669,6 +337,7 @@ class RobloxUnsyncView(discord.ui.View):
     @discord.ui.button(label="Un-Sync Account", style=discord.ButtonStyle.danger, custom_id="btn_unsync_account")
     async def unsync_account_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
+
         user_id = str(interaction.user.id)
 
         if db_users is not None:
@@ -689,345 +358,250 @@ class RobloxUnsyncView(discord.ui.View):
 
 
 # -------------------------------------------------------------
-# DISCORD BOT COG IMPLEMENTATION
+# INTERACTIVE UI FOR PREMIUM MISSING BOT RETRY
 # -------------------------------------------------------------
-class BotCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+class PremiumMissingBotView(discord.ui.View):
+    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None):
+        super().__init__(timeout=None)
         self.bot = bot
+        self.submitting_user_id = str(submitting_user_id)
+        self.target_guild_id = str(target_guild_id)
+        self.layout = layout or {}
 
-    # -------------------------------------------------------------
-    # SLASH COMMAND: ROBLOX PROFILE LOOKUP & INTELLIGENCE
-    # -------------------------------------------------------------
-    @app_commands.command(name="search", description="Search and audit a Roblox profile for giveaway indicators, badges, and games.")
-    @app_commands.describe(query="Roblox Username or Roblox User ID to search.")
-    async def search(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer(ephemeral=False)
-        q = query.strip()
+        invite_url = f"https://discord.com/api/oauth2/authorize?client_id={os.getenv('DISCORD_CLIENT_ID', '')}&permissions=8&scope=bot%20applications.commands"
+        if self.target_guild_id and self.target_guild_id != "0":
+            invite_url += f"&guild_id={self.target_guild_id}"
+        self.add_item(discord.ui.Button(label="Add Bot to Server", url=invite_url, style=discord.ButtonStyle.link))
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                r_id = None
-                username = None
-
-                if q.isdigit():
-                    r_id = q
-                    async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
-                        if resp.status == 200:
-                            u_data = await resp.json()
-                            username = u_data.get("name")
-                else:
-                    async with session.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [q], "excludeBannedUsers": False}) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            user_list = data.get("data", [])
-                            if user_list:
-                                r_id = str(user_list[0].get("id"))
-                                username = user_list[0].get("name")
-
-                if not r_id or not username:
-                    await interaction.followup.send(f"Could not find Roblox user matching `{q}`.")
-                    return
-
-                async with session.get(f"https://users.roblox.com/v1/users/{r_id}") as resp:
-                    p_data = await resp.json() if resp.status == 200 else {}
-
-                async with session.get(f"https://groups.roblox.com/v2/users/{r_id}/groups/roles") as resp:
-                    g_data = await resp.json() if resp.status == 200 else {}
-
-                async with session.get(f"https://games.roblox.com/v2/users/{r_id}/games?sortOrder=Desc&limit=10") as resp:
-                    games_data = await resp.json() if resp.status == 200 else {}
-
-                async with session.get(f"https://badges.roblox.com/v1/users/{r_id}/badges?limit=5&sortOrder=Desc") as resp:
-                    badges_data = await resp.json() if resp.status == 200 else {}
-
-                async with session.get(f"https://users.roblox.com/v1/users/{r_id}/username-history?limit=10") as resp:
-                    hist_data = await resp.json() if resp.status == 200 else {}
-
-                async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar?userIds={r_id}&size=720x720&format=Png&isCircular=false") as resp:
-                    thumb_data = await resp.json() if resp.status == 200 else {}
-
-                display_name = p_data.get("displayName", username)
-                created_raw = p_data.get("created", "")
-                created_str = "Unknown"
-                age_str = "Unknown"
-
-                if created_raw:
-                    try:
-                        dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                        created_str = dt.strftime("%B %d, %Y")
-                        days = (datetime.now(timezone.utc) - dt).days
-                        age_str = f"{days:,} days ({days // 365} yrs)"
-                    except Exception:
-                        pass
-
-                groups_list = g_data.get("data", [])
-                formatted_groups = []
-                giveaway_indicators = []
-
-                te_group_id = str(os.getenv("ROBLOX_GROUP_ID", "")).strip()
-                in_te_group = False
-                te_role_name = None
-
-                gw_keywords = ["robux", "giveaway", "rbx", "free", "rewards", "payout", "claim"]
-
-                for item in groups_list:
-                    grp = item.get("group", {})
-                    g_name = grp.get("name", "Group")
-                    g_id = str(grp.get("id", ""))
-                    role = item.get("role", {}).get("name", "Member")
-                    g_desc = grp.get("description", "").lower()
-                    g_shout = (grp.get("shout") or {}).get("body", "").lower() if isinstance(grp.get("shout"), dict) else ""
-
-                    if te_group_id and g_id == te_group_id:
-                        in_te_group = True
-                        te_role_name = role
-
-                    matches = [kw for kw in gw_keywords if kw in g_name.lower() or kw in g_desc or kw in g_shout]
-                    if matches:
-                        giveaway_indicators.append(f"• **{g_name}** — Keyword detected: `{', '.join(set(matches))}`")
-
-                if te_group_id:
-                    if in_te_group:
-                        formatted_groups.append(f"• **[Template Engine Group](https://www.roblox.com/groups/{te_group_id})**\n   └─ Status: `Member` ✅\n   └─ Role: `{te_role_name}`")
-                    else:
-                        formatted_groups.append(f"• **[Template Engine Group](https://www.roblox.com/groups/{te_group_id})**\n   └─ Status: `Not a Member` ❌")
-                else:
-                    formatted_groups.append("• *ROBLOX_GROUP_ID not configured in environment.*")
-
-                exp_list = games_data.get("data", [])
-                formatted_exp = []
-                for game in exp_list[:3]:
-                    g_title = game.get("name", "Experience")
-                    visits = game.get("placeVisits", 0)
-                    formatted_exp.append(f"• **{g_title}**\n   └─ Visits: `{visits:,}`")
-
-                badge_list = badges_data.get("data", [])
-                formatted_badges = [f"• {b.get('name')}" for b in badge_list[:3]]
-
-                names_hist = hist_data.get("data", [])
-                formatted_hist = [f"• {n.get('name')}" for n in names_hist[:5]]
-
-                avatar_url = ""
-                if thumb_data.get("data"):
-                    avatar_url = thumb_data["data"][0].get("imageUrl", "")
-
-                embed = discord.Embed(
-                    title="🔎 Roblox Profile Lookup",
-                    color=0x8B5CF6
-                )
-                if avatar_url:
-                    embed.set_thumbnail(url=avatar_url)
-
-                user_field = (
-                    f"**Username:** {username}\n"
-                    f"**Display Name:** {display_name}\n"
-                    f"**User ID:** `{r_id}`\n"
-                    f"**Account Created:** {created_str}\n"
-                    f"**Account Age:** {age_str}"
-                )
-                embed.add_field(name="👤 USER", value=user_field, inline=False)
-
-                if formatted_groups:
-                    embed.add_field(name="👥 GROUPS", value="\n".join(formatted_groups), inline=False)
-
-                if giveaway_indicators:
-                    embed.add_field(name="💰 GIVEAWAY INDICATORS", value="\n".join(giveaway_indicators), inline=False)
-
-                if formatted_exp:
-                    embed.add_field(name="🎮 EXPERIENCES", value="\n".join(formatted_exp), inline=False)
-
-                if formatted_badges:
-                    embed.add_field(name="🏆 BADGES", value="\n".join(formatted_badges), inline=False)
-
-                if formatted_hist:
-                    embed.add_field(name="📜 USERNAME HISTORY", value="\n".join(formatted_hist), inline=False)
-
-                embed.set_footer(text="Template Engine Roblox Intelligence Audit")
-                await interaction.followup.send(embed=embed)
-
-        except Exception as e:
-            print(f"[Roblox Search Command Error] {e}")
-            await interaction.followup.send(f"An error occurred while searching Roblox profile: `{str(e)}`")
-
-    # -------------------------------------------------------------
-    # SLASH COMMAND: GIVEAWAY SYSTEM (CREATE / EDIT / END)
-    # -------------------------------------------------------------
-    @app_commands.command(name="giveaway", description="Create, edit, or end server giveaways with Roblox group shout integration.")
-    @app_commands.describe(
-        action="Action to perform: create, edit, or end.",
-        channel="Target channel to post or announce the giveaway.",
-        duration="Giveaway duration e.g. 1h, 1d, 7d.",
-        prize="The prize being given away.",
-        description="Custom details for the giveaway.",
-        message_link="Message ID or link for editing or ending a giveaway."
-    )
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Create Giveaway", value="create"),
-        app_commands.Choice(name="Edit Giveaway", value="edit"),
-        app_commands.Choice(name="End Giveaway", value="end")
-    ])
-    async def giveaway_cmd(
-        self,
-        interaction: discord.Interaction,
-        action: app_commands.Choice[str],
-        channel: Optional[discord.TextChannel] = None,
-        duration: Optional[str] = "1d",
-        prize: Optional[str] = "100 Points",
-        description: Optional[str] = "Click the button below to enter!",
-        message_link: Optional[str] = None
-    ):
+    @discord.ui.button(label="Build", style=discord.ButtonStyle.success, custom_id="btn_premium_build_retry")
+    async def retry_build_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
-        if interaction.user.id != BOT_OWNER_ID:
+        bot_inst = self.bot or interaction.client
+        target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
+
+        guild = bot_inst.get_guild(target_gid) if target_gid else None
+        if not guild and target_gid:
+            try:
+                guild = await bot_inst.fetch_guild(target_gid)
+            except Exception:
+                guild = None
+
+        if not guild:
             embed = discord.Embed(
-                title="Permission Denied",
-                description="This command is strictly restricted to the bot owner.",
+                title="Re-Build Failed",
+                description=f"Re-build failed because the bot is still missing from target server ID `{self.target_guild_id}`.\n\nPlease invite the bot using the link button above and try clicking **Build** again.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        target_channel = channel or interaction.channel
+        embed = discord.Embed(
+            title="Bot Detected! Deploying Layout...",
+            description=f"Successfully joined **{guild.name}**!\nNow wiping existing channels/roles and deploying your blueprint...",
+            color=0x2ECC71
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
-        if action.value == "create":
-            dur_td = parse_duration_to_timedelta(duration or "1d")
-            end_dt = datetime.now(timezone.utc) + dur_td
-            end_ts = int(end_dt.timestamp())
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
 
+        cog = bot_inst.get_cog("BotCog")
+        if cog:
+            await cog.execute_auto_build(guild, self.layout)
+
+
+# -------------------------------------------------------------
+# INTERACTIVE UI FOR NON-PREMIUM VERIFICATION & POINTS PURCHASE
+# -------------------------------------------------------------
+class NonPremiumDeploymentView(discord.ui.View):
+    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, dev_product_url: str = ""):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.submitting_user_id = str(submitting_user_id)
+        self.target_guild_id = str(target_guild_id)
+        self.layout = layout or {}
+
+        final_url = dev_product_url or "https://www.roblox.com/games/6094950399/Template-Engine#!/store"
+        self.add_item(discord.ui.Button(label="Buy Roblox Dev Product", url=final_url, style=discord.ButtonStyle.link))
+
+    @discord.ui.button(label="Verify Purchase", style=discord.ButtonStyle.success, custom_id="btn_verify_dev_product")
+    async def verify_purchase_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        user_id = str(interaction.user.id)
+
+        roblox_id = None
+        if db_users is not None:
+            doc = db_users.find_one({"discord_id": user_id})
+            if doc and "roblox_data" in doc:
+                roblox_id = doc["roblox_data"].get("id")
+
+        if not roblox_id:
             embed = discord.Embed(
-                title=f"🎉 GIVEAWAY: {prize}",
-                description=f"{description}\n\n**Ends:** <t:{end_ts}:R>\n**Hosted By:** {interaction.user.mention}",
-                color=0x8B5CF6
+                title="Roblox Account Unlinked",
+                description="Please sync your Roblox account via the account sync channel before verifying purchases.",
+                color=0xF43F5E
             )
-            embed.set_image(url=GIVEAWAY_BANNER_URL)
-            embed.set_footer(text="Entries: 0 | Hosted by Template Engine")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
-            view = GiveawayPanelView()
-            gw_msg = await target_channel.send(embed=embed, view=view)
+        dev_product_id = os.getenv("ROBLOX_DEV_PRODUCT_ID", "").strip()
+        open_cloud_key = os.getenv("ROBLOX_OPEN_CLOUD_KEY", "").strip()
+        cookie_headers = get_roblox_cookie_header()
 
-            gw_data = {
-                "message_id": str(gw_msg.id),
-                "channel_id": str(target_channel.id),
-                "guild_id": str(interaction.guild_id),
-                "prize": prize,
-                "description": description,
-                "end_timestamp": end_ts,
-                "entries": [],
-                "created_at": datetime.now(timezone.utc).isoformat()
-            }
+        is_verified = False
+        receipt_token = None
 
-            ACTIVE_GIVEAWAYS[str(gw_msg.id)] = gw_data
-            if db_giveaways is not None:
-                try:
-                    db_giveaways.insert_one(gw_data)
-                except Exception as e:
-                    print(f"[Mongo Save Giveaway Error] {e}")
+        # 1. PRIMARY CHECK: ROBLOX COOKIE ECONOMY API SALES AUDIT
+        if cookie_headers and roblox_id:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"https://economy.roblox.com/v2/users/{roblox_id}/transaction-history?transactionType=Purchase&limit=50"
+                    async with session.get(url, headers=cookie_headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            transactions = data.get("data", [])
+                            if isinstance(transactions, list):
+                                for item in transactions:
+                                    tx_id = str(item.get("id") or item.get("transactionId") or "").strip()
+                                    details = item.get("details") or {}
+                                    item_id = str(details.get("id") or item.get("targetId") or "").strip()
+                                    created_time = item.get("created", "")
 
-            roblox_group_id = os.getenv("ROBLOX_GROUP_ID", "").strip()
-            if roblox_group_id:
-                shout_msg = f"🎉 NEW GIVEAWAY: {prize}! Join our community server to enter!"
-                asyncio.create_task(post_roblox_group_shout(roblox_group_id, shout_msg))
+                                    unique_tx_key = f"cookie_tx_{tx_id}_{created_time}"
 
-            confirm_embed = discord.Embed(
-                title="Giveaway Created!",
-                description=f"Giveaway successfully announced in {target_channel.mention}!",
-                color=0x2ECC71
+                                    if (not dev_product_id or item_id == dev_product_id) and unique_tx_key not in USED_DEV_PRODUCT_RECEIPTS:
+                                        is_verified = True
+                                        receipt_token = unique_tx_key
+                                        break
+            except Exception as cookie_err:
+                print(f"[Roblox Cookie Economy API Exception] {cookie_err}")
+
+        # 2. FALLBACK CHECK: OPEN CLOUD API
+        if not is_verified and open_cloud_key and dev_product_id:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"https://apis.roblox.com/developer-products/v1/developer-products/{dev_product_id}/purchases?userId={roblox_id}"
+                    headers = {"x-api-key": open_cloud_key}
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            purchases = data.get("purchases", [])
+                            if isinstance(purchases, list):
+                                for p in purchases:
+                                    r_id = str(p.get("purchaseToken") or p.get("receipt") or "").strip()
+                                    p_prod_id = str(p.get("developerProductId") or p.get("productId") or "").strip()
+                                    
+                                    unique_opencloud_key = f"oc_{r_id}"
+
+                                    if r_id and (not dev_product_id or p_prod_id == dev_product_id) and unique_opencloud_key not in USED_DEV_PRODUCT_RECEIPTS:
+                                        is_verified = True
+                                        receipt_token = unique_opencloud_key
+                                        break
+            except Exception as oc_err:
+                print(f"[Dev Product Verify OpenCloud Exception] {oc_err}")
+
+        if not is_verified:
+            embed = discord.Embed(
+                title="Purchase Verification Failed",
+                description="No unused Roblox purchase transaction was detected for your synced Roblox account.\n\n"
+                            "• Make sure you purchased the Developer Product on Roblox using your synced account.\n"
+                            "• Each purchase transaction can only be redeemed **ONCE** for a server deployment.",
+                color=0xF43F5E
             )
-            await interaction.followup.send(embed=confirm_embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
-        elif action.value == "edit":
-            if not message_link:
-                await interaction.followup.send("Please provide the message ID or link to edit the giveaway.", ephemeral=True)
-                return
+        if receipt_token:
+            USED_DEV_PRODUCT_RECEIPTS.add(receipt_token)
 
-            msg_id = message_link.split("/")[-1].strip()
-            gw_data = ACTIVE_GIVEAWAYS.get(msg_id)
-            if not gw_data and db_giveaways is not None:
-                gw_data = db_giveaways.find_one({"message_id": msg_id})
+        bot_inst = self.bot or interaction.client
+        target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
 
-            if not gw_data:
-                await interaction.followup.send(f"Could not find an active giveaway matching ID `{msg_id}`.", ephemeral=True)
-                return
-
-            end_ts = gw_data.get("end_timestamp", int(datetime.now(timezone.utc).timestamp()))
-            gw_channel_id = int(gw_data.get("channel_id", target_channel.id))
-            gw_channel = self.bot.get_channel(gw_channel_id) or target_channel
-
+        guild = bot_inst.get_guild(target_gid) if target_gid else None
+        if not guild and target_gid:
             try:
-                target_msg = await gw_channel.fetch_message(int(msg_id))
-                embed = target_msg.embeds[0]
-                embed.title = f"🎉 GIVEAWAY: {prize}"
-                embed.description = f"{description}\n\n**Ends:** <t:{end_ts}:R>\n**Hosted By:** {interaction.user.mention}"
-                embed.set_image(url=GIVEAWAY_BANNER_URL)
-                await target_msg.edit(embed=embed)
-
-                gw_data["prize"] = prize
-                gw_data["description"] = description
-                ACTIVE_GIVEAWAYS[msg_id] = gw_data
-
-                if db_giveaways is not None:
-                    db_giveaways.update_one({"message_id": msg_id}, {"$set": {"prize": prize, "description": description}})
-
-                await interaction.followup.send("Giveaway details updated successfully!", ephemeral=True)
-            except Exception as e:
-                await interaction.followup.send(f"Failed to edit giveaway message: `{str(e)}`", ephemeral=True)
-
-        elif action.value == "end":
-            if not message_link:
-                await interaction.followup.send("Please provide the message ID or link to end the giveaway.", ephemeral=True)
-                return
-
-            msg_id = message_link.split("/")[-1].strip()
-            gw_data = ACTIVE_GIVEAWAYS.get(msg_id)
-            if not gw_data and db_giveaways is not None:
-                gw_data = db_giveaways.find_one({"message_id": msg_id})
-
-            if not gw_data:
-                await interaction.followup.send(f"Could not find an active giveaway matching ID `{msg_id}`.", ephemeral=True)
-                return
-
-            await self.end_giveaway_logic(gw_data)
-            await interaction.followup.send("Giveaway ended early successfully!", ephemeral=True)
-
-    async def end_giveaway_logic(self, gw_data: dict):
-        msg_id = str(gw_data.get("message_id"))
-        channel_id = int(gw_data.get("channel_id", 0))
-        entries = gw_data.get("entries", [])
-        prize = gw_data.get("prize", "Prize")
-
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            try:
-                channel = await self.bot.fetch_channel(channel_id)
+                guild = await bot_inst.fetch_guild(target_gid)
             except Exception:
-                channel = None
+                guild = None
 
-        winner_mention = "No valid entrants"
-        if entries:
-            winner_id = random.choice(entries)
-            winner_mention = f"<@{winner_id}>"
+        if not guild:
+            await interaction.followup.send("Error: The bot is no longer in the target server.", ephemeral=True)
+            return
 
-        if channel:
+        embed = discord.Embed(
+            title="Purchase Verified! Deploying Layout...",
+            description=f"Single-use purchase transaction verified (`{receipt_token[:18]}...`). Now building {guild.name}!",
+            color=0x2ECC71
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        cog = bot_inst.get_cog("BotCog")
+        if cog:
+            await cog.execute_auto_build(guild, self.layout)
+
+    @discord.ui.button(label="Use Points (100 Pts)", style=discord.ButtonStyle.primary, custom_id="btn_use_points_build")
+    async def use_points_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        user_id = str(interaction.user.id)
+        current_pts = get_user_points(user_id)
+
+        if current_pts < 100:
+            embed = discord.Embed(
+                title="Insufficient Points",
+                description=f"You need at least 100 points to deploy this layout.\n\nYour Balance: {current_pts} pts\nMissing: {100 - current_pts} pts",
+                color=0xF43F5E
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        new_total = add_user_points(user_id, -100)
+
+        bot_inst = self.bot or interaction.client
+        target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
+
+        guild = bot_inst.get_guild(target_gid) if target_gid else None
+        if not guild and target_gid:
             try:
-                target_msg = await channel.fetch_message(int(msg_id))
-                embed = target_msg.embeds[0]
-                embed.title = f"🎉 GIVEAWAY ENDED: {prize}"
-                embed.description = f"**Winner:** {winner_mention}\n**Total Entries:** {len(entries)}"
-                embed.color = 0x2ECC71
-                embed.set_image(url=GIVEAWAY_BANNER_URL)
-                await target_msg.edit(embed=embed, view=None)
+                guild = await bot_inst.fetch_guild(target_gid)
+            except Exception:
+                guild = None
 
-                if entries:
-                    await channel.send(f"Congratulations {winner_mention}! You won **{prize}**!")
-            except Exception as e:
-                print(f"[End Giveaway Logic Error] {e}")
+        if not guild:
+            await interaction.followup.send("Error: Bot is missing from target server.", ephemeral=True)
+            return
 
-        ACTIVE_GIVEAWAYS.pop(msg_id, None)
-        if db_giveaways is not None:
-            try:
-                db_giveaways.delete_one({"message_id": msg_id})
-            except Exception as e:
-                print(f"[Mongo Delete Giveaway Error] {e}")
+        embed = discord.Embed(
+            title="Points Redeemed! Deploying Layout...",
+            description=f"Deducted 100 points!\n\nUpdated Balance: {new_total:,} pts\nNow nuking and building {guild.name}...",
+            color=0x8B5CF6
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+        cog = bot_inst.get_cog("BotCog")
+        if cog:
+            await cog.execute_auto_build(guild, self.layout)
+
+
+# -------------------------------------------------------------
+# DISCORD BOT COG IMPLEMENTATION
+# -------------------------------------------------------------
+class BotCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
 
     # -------------------------------------------------------------
     # SLASH COMMAND: SET VERIFICATION OR UNSYNC INTERACTIVE PANELS
@@ -1051,10 +625,13 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        if interaction.user.id != BOT_OWNER_ID:
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
             embed = discord.Embed(
                 title="Permission Denied",
-                description="This command is strictly restricted to the bot owner.",
+                description="You need Administrator permissions to deploy system panels.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1092,98 +669,14 @@ class BotCog(commands.Cog):
             await interaction.followup.send(f"Failed to deploy panel: `{str(e)}`", ephemeral=True)
 
     # -------------------------------------------------------------
-    # EVENT LISTENER: WELCOME BONUS (20 POINTS) & WELCOME MESSAGE
+    # EVENT LISTENER: WELCOME BONUS (20 POINTS)
     # -------------------------------------------------------------
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         if member.bot:
             return
-
         add_user_points(str(member.id), 20)
         print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
-
-        guild_id_str = str(member.guild.id)
-        settings = LOCAL_GUILD_SETTINGS.get(guild_id_str)
-
-        if not settings and db_guild_settings is not None:
-            try:
-                settings = db_guild_settings.find_one({"guild_id": guild_id_str})
-                if settings:
-                    LOCAL_GUILD_SETTINGS[guild_id_str] = settings
-            except Exception as e:
-                print(f"[Mongo Fetch Welcome Error] {e}")
-
-        if settings and settings.get("welcome_channel_id"):
-            channel_id = int(settings["welcome_channel_id"])
-            channel = member.guild.get_channel(channel_id)
-
-            if channel:
-                raw_msg = settings.get("welcome_message", "Welcome {user} to **{server}**!")
-                formatted_msg = raw_msg.replace("{user}", member.mention).replace("{username}", member.name).replace("{server}", member.guild.name)
-
-                embed = discord.Embed(
-                    title=f"Welcome to {member.guild.name}!",
-                    description=formatted_msg,
-                    color=0x8B5CF6
-                )
-                embed.set_thumbnail(url=member.display_avatar.url)
-                embed.set_footer(text=f"Member #{member.guild.member_count}")
-
-                try:
-                    await channel.send(embed=embed)
-                except Exception as send_err:
-                    print(f"[Welcome Send Error] {send_err}")
-
-    # -------------------------------------------------------------
-    # SLASH COMMAND: SET WELCOME CHANNEL AND MESSAGE
-    # -------------------------------------------------------------
-    @app_commands.command(name="welcome-set", description="Configure the automated welcome greeting channel and custom message.")
-    @app_commands.describe(
-        channel="The channel where welcome greetings will be posted.",
-        message="Custom message template. Variables: {user}, {username}, {server}."
-    )
-    async def welcome_set_cmd(
-        self,
-        interaction: discord.Interaction,
-        channel: discord.TextChannel,
-        message: Optional[str] = "Welcome {user} to **{server}**! Enjoy your stay!"
-    ):
-        await interaction.response.defer(ephemeral=True)
-
-        if interaction.user.id != BOT_OWNER_ID:
-            embed = discord.Embed(
-                title="Permission Denied",
-                description="This command is strictly restricted to the bot owner.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        guild_id_str = str(interaction.guild_id)
-        settings_payload = {
-            "guild_id": guild_id_str,
-            "welcome_channel_id": str(channel.id),
-            "welcome_message": message
-        }
-
-        LOCAL_GUILD_SETTINGS[guild_id_str] = settings_payload
-
-        if db_guild_settings is not None:
-            try:
-                db_guild_settings.update_one(
-                    {"guild_id": guild_id_str},
-                    {"$set": settings_payload},
-                    upsert=True
-                )
-            except Exception as e:
-                print(f"[Mongo Save Welcome Error] {e}")
-
-        embed = discord.Embed(
-            title="Welcome Greeting Configured",
-            description=f"Automated welcome greetings will now be sent to {channel.mention}.\n\n**Template:**\n```{message}```\n**Supported Tags:** `{user}` (mention), `{username}` (name), `{server}` (server name)",
-            color=0x2ECC71
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # -------------------------------------------------------------
     # SLASH COMMAND: CHECK USER POINTS
@@ -1257,10 +750,13 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        if interaction.user.id != BOT_OWNER_ID:
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
             embed = discord.Embed(
                 title="Permission Denied",
-                description="This command is strictly restricted to the bot owner.",
+                description="You need Administrator permissions to modify user points.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1311,10 +807,13 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        if interaction.user.id != BOT_OWNER_ID:
+        is_owner = (interaction.user.id == BOT_OWNER_ID)
+        is_admin = interaction.permissions.administrator if interaction.permissions else False
+
+        if not (is_owner or is_admin):
             embed = discord.Embed(
                 title="Permission Denied",
-                description="This command is strictly restricted to the bot owner.",
+                description="You need Administrator permissions to manage TE Premium memberships.",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1358,10 +857,11 @@ class BotCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         is_design_channel = str(message.channel.id) in [str(PREMIUM_DESIGN_CHANNEL_ID), str(NON_PREMIUM_DESIGN_CHANNEL_ID)]
-
+        
         if message.author.bot and not (is_design_channel and message.attachments):
             return
 
+        # CHAT POINTING & ANTI-SPAM SYSTEM
         if not message.author.bot:
             user_id_str = str(message.author.id)
             now_ts = datetime.now(timezone.utc).timestamp()
@@ -1384,6 +884,7 @@ class BotCog(commands.Cog):
                     user_track["penalty_until"] = now_ts + (30 * 60)
                     user_track["last_time"] = now_ts
                     user_track["msg_count"] = 0
+                    print(f"[Points Penalty] User {message.author.name} ({user_id_str}) penalized for 30 mins due to duplicate message.")
                 else:
                     if time_passed >= 30.0:
                         user_track["last_time"] = now_ts
@@ -1397,6 +898,7 @@ class BotCog(commands.Cog):
                             user_track["msg_count"] = 0
                         user_track["last_content"] = content_clean
 
+        # AUTO-BUILD / NON-PREMIUM DM LISTENER
         if not is_design_channel:
             return
 
@@ -1425,6 +927,7 @@ class BotCog(commands.Cog):
             print("[Auto-Build Error] Target server ID is missing or 0.")
             return
 
+        # Fetch target guild
         guild = self.bot.get_guild(int(target_guild_id))
         if not guild:
             try:
@@ -1434,18 +937,18 @@ class BotCog(commands.Cog):
                 guild = None
 
         if not guild:
-            await self.notify_missing_bot(submitting_user_id, target_guild_id, layout, message.channel)
+            await self.notify_missing_bot(submitting_user_id, target_guild_id, layout)
             return
 
         if not is_premium_submission and str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
-            print(f"[Frontend Direct Dispatch] Attempting DM/Channel dispatch to submitter {submitting_user_id}...")
+            print(f"[Frontend Direct DM] Initiating direct DM with 5 retries to submitter {submitting_user_id} before logging...")
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
         else:
             print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
             await self.execute_auto_build(guild, layout)
 
     async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None):
-        dev_product_url = "https://www.roblox.com/games/6094950399/Template-Engine#!/store"
+        dev_product_url = os.getenv("ROBLOX_DEV_PRODUCT_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
         user_pts = get_user_points(user_id)
 
         embed = discord.Embed(
@@ -1489,7 +992,7 @@ class BotCog(commands.Cog):
                     dm_sent = True
                     break
                 except discord.Forbidden:
-                    print(f"[DM Blocked] Direct Messages are disabled for user {user_id}. Falling back to channel post.")
+                    print(f"[DM Blocked] Direct Messages are disabled for user {user_id}.")
                     break
                 except Exception as attempt_err:
                     print(f"[DM Retry {attempt}/5] DM delivery failed: {attempt_err}")
@@ -1499,14 +1002,7 @@ class BotCog(commands.Cog):
         if dm_sent:
             return
 
-        if fallback_channel:
-            try:
-                await fallback_channel.send(content=f"<@{user_id}> (DM delivery unavailable, options sent here):", embed=embed, view=view)
-                print(f"[Fallback Success] Posted deployment embed in submission channel #{fallback_channel.name}")
-                return
-            except Exception as chan_err:
-                print(f"[Fallback Channel Send Error] Could not post to submission channel: {chan_err}")
-
+        # FALLBACK 1: TARGET GUILD TEXT CHANNEL
         target_gid = int(target_guild_id) if target_guild_id and target_guild_id != "0" else 0
         target_guild = self.bot.get_guild(target_gid) if target_gid else None
 
@@ -1527,31 +1023,36 @@ class BotCog(commands.Cog):
                 try:
                     await target_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
                     print(f"[Fallback Success] Posted deployment embed in target server channel #{target_channel.name}")
+                    return
                 except Exception as t_err:
                     print(f"[Target Server Send Error] Could not post in target server {target_guild.name}: {t_err}")
 
-    async def notify_missing_bot(self, user_id: str, target_guild_id: str, layout: dict = None, fallback_channel: Optional[discord.TextChannel] = None):
-        embed = discord.Embed(
-            title="Bot Missing in Target Server",
-            description=f"<@{user_id}> Auto-deployment paused. The bot is not present in target server ID `{target_guild_id}`.\n\nPlease add the bot using the link below, then click **Build**.",
-            color=0xF43F5E
-        )
-        view = PremiumMissingBotView(bot=self.bot, submitting_user_id=user_id, target_guild_id=target_guild_id, layout=layout)
-        
-        dm_sent = False
+        # FALLBACK 2: MAIN SUBMISSION CHANNEL
+        if fallback_channel:
+            try:
+                await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
+                print(f"[Fallback Success] Posted deployment embed in submission channel #{fallback_channel.name}")
+            except Exception as chan_err:
+                print(f"[Fallback Channel Send Error] Could not post to submission channel: {chan_err}")
+
+    async def notify_missing_bot(self, user_id: str, target_guild_id: str, layout: dict = None):
         try:
             user = await self.bot.fetch_user(int(user_id))
             if user:
+                embed = discord.Embed(
+                    title="Bot Missing in Target Server",
+                    description=f"Auto-deployment paused. The bot is not present in target server ID `{target_guild_id}`.\n\nPlease add the bot using the link button below, then click **Build** to trigger deployment.",
+                    color=0xF43F5E
+                )
+                view = PremiumMissingBotView(
+                    bot=self.bot,
+                    submitting_user_id=user_id,
+                    target_guild_id=target_guild_id,
+                    layout=layout
+                )
                 await user.send(embed=embed, view=view)
-                dm_sent = True
         except Exception as e:
-            print(f"[DM Warning] Failed sending DM to {user_id}: {e}")
-
-        if not dm_sent and fallback_channel:
-            try:
-                await fallback_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
-            except Exception as e:
-                print(f"[Channel Fallback Warning] Failed sending channel message: {e}")
+            print(f"[DM Warning] Failed sending missing bot notification to {user_id}: {e}")
 
     async def nuke_guild_structure(self, guild: discord.Guild):
         """Deletes existing channels, categories, and custom roles prior to auto-building."""
@@ -1621,16 +1122,10 @@ class BotCog(commands.Cog):
                                 name=chan_clean_name,
                                 reason="Template Engine Auto-Build"
                             )
-                        elif chan_type == "stage":
-                            await category.create_stage_channel(
+                        elif chan_type in ["forum", "stage"]:
+                            await category.create_text_channel(
                                 name=chan_clean_name,
-                                topic=chan_topic,
-                                reason="Template Engine Auto-Build"
-                            )
-                        elif chan_type == "forum":
-                            await category.create_forum_channel(
-                                name=chan_clean_name,
-                                topic=chan_topic,
+                                topic=f"[{chan_type.upper()}] {chan_topic}",
                                 reason="Template Engine Auto-Build"
                             )
                         else:
@@ -1647,9 +1142,8 @@ class BotCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    # Register persistent views for static panels
     bot.add_view(RobloxVerificationView())
     bot.add_view(RobloxUnsyncView())
-    bot.add_view(GiveawayPanelView())
-    bot.add_view(NonPremiumDeploymentView(bot=bot))
-    bot.add_view(PremiumMissingBotView(bot=bot))
+    bot.add_view(PremiumMissingBotView())
     await bot.add_cog(BotCog(bot))
