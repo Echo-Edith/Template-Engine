@@ -406,6 +406,33 @@ def delete_cases(guild_id, user_id, action: str, case_id: Optional[int] = None) 
     return removed
 
 
+def get_case(guild_id, case_id) -> Optional[dict]:
+    """Finds one case by its ID. Case IDs are unique per server."""
+    gid, cid = str(guild_id), int(case_id)
+    if db_cases is not None:
+        try:
+            doc = db_cases.find_one({"guild_id": gid, "case_id": cid}, {"_id": 0})
+            if doc:
+                return doc
+        except Exception as e:
+            print(f"[Case Lookup Error] {e}")
+    return next((c for c in LOCAL_CASES if c["guild_id"] == gid and c["case_id"] == cid), None)
+
+
+def delete_case(guild_id, case_id) -> bool:
+    """Removes one case by its ID. Returns True if a record was removed."""
+    gid, cid = str(guild_id), int(case_id)
+    removed = False
+    if db_cases is not None:
+        try:
+            removed = db_cases.delete_one({"guild_id": gid, "case_id": cid}).deleted_count > 0
+        except Exception as e:
+            print(f"[Case Delete Error] {e}")
+    before = len(LOCAL_CASES)
+    LOCAL_CASES[:] = [c for c in LOCAL_CASES if not (c["guild_id"] == gid and c["case_id"] == cid)]
+    return removed or len(LOCAL_CASES) < before
+
+
 async def dm_moderation_notice(user, guild: discord.Guild, action: str, reason: str,
                                case_id: Optional[int] = None, duration: Optional[str] = None) -> bool:
     """DMs the moderated user. The moderator is never included (privacy). Returns True if delivered."""

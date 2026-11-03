@@ -36,7 +36,9 @@ from cogs.features import (
     build_pages,
     send_pages,
     add_case,
+    get_case,
     get_cases,
+    delete_case,
     delete_cases,
     dm_moderation_notice,
     set_afk,
@@ -1401,58 +1403,46 @@ class CommandsCog(commands.Cog):
         case = add_case(guild.id, target.id, "unban", "Ban removed", interaction.user.id)
         await interaction.followup.send(embed=self._mod_result("User Unbanned", target, case, None), ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="clear", description="Clear a member's warnings, mute, kick or ban records.")
-    @app_commands.describe(user="The user.", action="Which record type to clear.", case_id="Optional case ID. Leave empty to clear all of that type.")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Warnings", value="warn"),
-        app_commands.Choice(name="Mute", value="mute"),
-        app_commands.Choice(name="Kick", value="kick"),
-        app_commands.Choice(name="Ban", value="ban"),
-    ])
+    @app_commands.command(name="clear", description="Remove a moderation case from the log by its case ID.")
+    @app_commands.describe(case_id="The case ID from /modlog or from the moderation result, e.g. 12.")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    async def clear_cmd(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], case_id: Optional[int] = None):
+    async def clear_cmd(self, interaction: discord.Interaction, case_id: app_commands.Range[int, 1, 100000000]):
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
-        notes = []
 
-        if case_id is not None:
-            match = next((c for c in get_cases(guild.id, user.id) if c["case_id"] == case_id and c["action"] == action.value), None)
-            if not match:
-                await interaction.followup.send(
-                    embed=embed_err("Case Not Found", f"{user.mention} has no `{action.name}` case with ID `#{case_id}`."),
-                    ephemeral=True, allowed_mentions=NO_PINGS
-                )
-                return
-
-        removed = delete_cases(guild.id, user.id, action.value, case_id)
-
-        # Clearing everything of a type also lifts a mute / ban that is still active
-        if case_id is None and action.value == "mute":
-            member = guild.get_member(user.id)
-            if member and member.is_timed_out():
-                try:
-                    await member.timeout(None, reason=f"Mute cleared by {interaction.user} ({interaction.user.id})")
-                    notes.append("Active mute removed.")
-                except Exception as e:
-                    notes.append(f"Could not remove the active mute: `{e}`")
-        if case_id is None and action.value == "ban":
-            try:
-                await guild.fetch_ban(user)
-                await guild.unban(user, reason=f"Ban cleared by {interaction.user} ({interaction.user.id})")
-                notes.append("Active ban removed.")
-            except discord.NotFound:
-                pass
-            except Exception as e:
-                notes.append(f"Could not remove the active ban: `{e}`")
-
-        if removed == 0 and not notes:
-            await interaction.followup.send(embed=embed_err("Nothing To Clear", f"{user.mention} has no `{action.name}` records."), ephemeral=True, allowed_mentions=NO_PINGS)
+        case = get_case(guild.id, case_id)
+        if not case:
+            await interaction.followup.send(embed=embed_err("Case Not Found", f"This server has no case with ID `#{case_id}`."), ephemeral=True)
             return
 
-        embed = embed_ok("Records Cleared", f"{user.mention}\nType: **{action.name}**\nRecords removed: `{removed}`" + (f"\nCase: `#{case_id}`" if case_id is not None else ""))
+        if not delete_case(guild.id, case_id):
+            await interaction.followup.send(embed=embed_err("Could Not Remove Case", f"Case `#{case_id}` could not be removed. Try again."), ephemeral=True)
+            return
+
+        label = MOD_ACTION_LABELS.get(case["action"], case["action"].title())
+        embed = embed_ok("Case Removed", f"Case `#{case_id}` (**{label}**) for <@{case['user_id']}> was removed from the log.")
+        embed.add_field(name="User ID", value=f"`{case['user_id']}`", inline=True)
+        embed.add_field(name="Reason", value=str(case["reason"])[:500] or "None", inline=False)
+
+        # Removing a record does not undo the punishment itself, so say so if it is still active
+        notes = []
+        try:
+            uid = int(case["user_id"])
+            if case["action"] == "mute":
+                member = guild.get_member(uid)
+                if member and member.is_timed_out():
+                    notes.append("This user is still muted. Use `/unmute` to remove the mute.")
+            elif case["action"] == "ban":
+                try:
+                    await guild.fetch_ban(discord.Object(id=uid))
+                    notes.append("This user is still banned. Use `/unban` to unban them.")
+                except discord.NotFound:
+                    pass
+        except Exception as e:
+            print(f"[Clear Note Error] {e}")
         if notes:
-            embed.add_field(name="Notes", value="\n".join(notes), inline=False)
+            embed.add_field(name="Note", value="\n".join(notes), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
 
     @app_commands.command(name="purge", description="Delete recent messages in this channel (old messages too, but slower).")
@@ -1548,14 +1538,14 @@ class CommandsCog(commands.Cog):
         entries = []
         for c in cases:
             label = MOD_ACTION_LABELS.get(c["action"], c["action"].title())
-            head = f"**#{c['case_id']} | {label}** | <t:{int(c['created_at'])}:R>"
+            head = f"Case `#{c['case_id']}` | **{label}** | <t:{int(c['created_at'])}:R>"
             if c.get("duration"):
                 head += f" | `{c['duration']}`"
             entries.append(f"{head}\nReason: {str(c['reason'])[:200]}\nModerator: <@{c['moderator_id']}>\n")
 
         pages = build_pages(
             f"Moderation Log | {user.name}", entries, per_page=10,
-            header=f"{user.mention} (`{user.id}`)\nTotal records: `{len(entries)}`\n\n"
+            header=f"{user.mention} (`{user.id}`)\nTotal records: `{len(entries)}`\nRemove a record with `/clear` and its case ID.\n\n"
         )
         if not entries:
             pages = [embed_info(f"Moderation Log | {user.name}", f"{user.mention} has no moderation records.")]
