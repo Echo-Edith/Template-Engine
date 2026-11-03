@@ -604,6 +604,39 @@ class BotCog(commands.Cog):
         self.bot = bot
 
     # -------------------------------------------------------------
+    # OWNER LOCK: every slash command in this cog is hard-coded to BOT_OWNER_ID
+    # -------------------------------------------------------------
+    PUBLIC_COMMANDS = {"points", "leaderboard"}
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == BOT_OWNER_ID:
+            return True
+
+        # Public commands: anyone can use these
+        if interaction.command and interaction.command.name in self.PUBLIC_COMMANDS:
+            return True
+
+        embed = discord.Embed(
+            title="Permission Denied",
+            description=f"These commands can only be used by the bot owner (`{BOT_OWNER_ID}`).",
+            color=0xF43F5E
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            print(f"[Owner Check Error] {e}")
+        return False
+
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        # The owner check already replied to the user, so ignore that failure quietly.
+        if isinstance(error, app_commands.CheckFailure):
+            return
+        print(f"[App Command Error] {error}")
+
+    # -------------------------------------------------------------
     # SLASH COMMAND: SET VERIFICATION OR UNSYNC INTERACTIVE PANELS
     # -------------------------------------------------------------
     @app_commands.command(name="set", description="Deploy verification or un-sync interactive embed panels into a channel.")
@@ -624,18 +657,6 @@ class BotCog(commands.Cog):
         description: str
     ):
         await interaction.response.defer(ephemeral=True)
-
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
-            embed = discord.Embed(
-                title="Permission Denied",
-                description="You need Administrator permissions to deploy system panels.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
 
         try:
             if action.value == "verification":
@@ -750,18 +771,6 @@ class BotCog(commands.Cog):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
-            embed = discord.Embed(
-                title="Permission Denied",
-                description="You need Administrator permissions to modify user points.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
         if amount <= 0:
             embed = discord.Embed(
                 title="Invalid Amount",
@@ -806,18 +815,6 @@ class BotCog(commands.Cog):
         duration: Optional[str] = "30d"
     ):
         await interaction.response.defer(ephemeral=True)
-
-        is_owner = (interaction.user.id == BOT_OWNER_ID)
-        is_admin = interaction.permissions.administrator if interaction.permissions else False
-
-        if not (is_owner or is_admin):
-            embed = discord.Embed(
-                title="Permission Denied",
-                description="You need Administrator permissions to manage TE Premium memberships.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
 
         try:
             if action.value == "add":
