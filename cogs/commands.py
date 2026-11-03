@@ -1,8 +1,10 @@
 import os
+import re
 import json
+import uuid
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List
 
 import aiohttp
 import discord
@@ -13,13 +15,56 @@ from cogs.features import (
     BOT_OWNER_ID,
     RobloxVerificationView,
     RobloxUnsyncView,
+    GiveawayView,
+    GIVEAWAYS,
+    MOD_ACTION_LABELS,
+    MAX_REMINDERS_PER_USER,
+    COLOR_PURPLE,
+    COLOR_GOLD,
+    get_roblox_cookie_header,
     get_user_points,
     add_user_points,
     get_top_leaderboard,
     parse_duration_to_timedelta,
+    parse_duration_strict,
+    format_timedelta,
     set_user_premium,
     remove_user_premium,
+    embed_ok,
+    embed_err,
+    embed_info,
+    build_pages,
+    send_pages,
+    add_case,
+    get_cases,
+    delete_cases,
+    dm_moderation_notice,
+    set_afk,
+    count_user_reminders,
+    add_reminder,
+    save_giveaway,
+    delete_giveaway_record,
+    build_giveaway_embed,
+    finish_giveaway,
+    reroll_giveaway,
+    get_giveaway_message,
 )
+
+# -------------------------------------------------------------
+# WHO CAN USE WHAT (edit these sets to change access)
+#   PUBLIC_COMMANDS : anyone
+#   ADMIN_COMMANDS  : server members with the Administrator permission
+#   anything else   : bot owner only (set, points-set, premium-set, game, revenue, cookie-check)
+# -------------------------------------------------------------
+PUBLIC_COMMANDS = {
+    "points", "leaderboard", "roblox-user", "gameinfo", "timestamp", "remind",
+    "afk", "whois", "permissions", "rolelist", "channelstats",
+}
+ADMIN_COMMANDS = {
+    "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
+    "warn", "clear", "purge", "mute", "unmute", "kick", "ban", "unban",
+    "lock", "unlock", "modlog", "giveaway",
+}
 
 
 # -------------------------------------------------------------
@@ -65,6 +110,157 @@ class GameCodeModal(discord.ui.Modal, title="Run Luau Code"):
 
 
 # -------------------------------------------------------------
+# SHARED HELPERS FOR THE EXTRA COMMANDS
+# -------------------------------------------------------------
+NO_PINGS = discord.AllowedMentions.none()
+
+
+async def roblox_get(session: aiohttp.ClientSession, url: str, headers: Optional[dict] = None, params: Optional[dict] = None):
+    """GET a Roblox endpoint. Returns (status, json_or_None). Status 0 means the request itself failed."""
+    try:
+        async with session.get(url, headers=headers, params=params) as resp:
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = None
+            return resp.status, data
+    except Exception as e:
+        print(f"[Roblox GET Error] {url}: {e}")
+        return 0, None
+
+
+async def resolve_roblox_user(session: aiohttp.ClientSession, username: str) -> Optional[dict]:
+    """Roblox username -> {"id", "name", "displayName"} (banned users included)."""
+    try:
+        async with session.post(
+            "https://users.roblox.com/v1/usernames/users",
+            json={"usernames": [username.strip()], "excludeBannedUsers": False}
+        ) as resp:
+            if resp.status != 200:
+                return None
+            rows = (await resp.json()).get("data", [])
+            return rows[0] if rows else None
+    except Exception as e:
+        print(f"[Roblox Resolve Error] {e}")
+        return None
+
+
+def iso_to_ts(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    try:
+        cleaned = re.sub(r"\.\d+", "", value).replace("Z", "+00:00")
+        return int(datetime.fromisoformat(cleaned).timestamp())
+    except Exception:
+        return None
+
+
+def parse_hex_color(text: Optional[str], default: int = COLOR_PURPLE) -> Optional[int]:
+    """Returns the color as an int, the default for empty text, or None if the text is not a hex color."""
+    if not text or not text.strip():
+        return default
+    cleaned = text.strip().lstrip("#")
+    if re.fullmatch(r"[0-9a-fA-F]{6}", cleaned):
+        return int(cleaned, 16)
+    return None
+
+
+def pretty_perm(name: str) -> str:
+    return name.replace("_", " ").title()
+
+
+def check_hierarchy(interaction: discord.Interaction, target: discord.Member) -> Optional[str]:
+    """Returns a reason why the action is not allowed, or None if it is fine."""
+    guild = interaction.guild
+    if target.id == interaction.user.id:
+        return "You cannot use this on yourself."
+    if target.id == guild.me.id:
+        return "I cannot use this on myself."
+    if target.id == guild.owner_id:
+        return "You cannot use this on the server owner."
+    if guild.me.top_role <= target.top_role:
+        return "My highest role is not above that member's highest role. Move my role higher."
+    if interaction.user.id not in (BOT_OWNER_ID, guild.owner_id) and interaction.user.top_role <= target.top_role:
+        return "That member's highest role is the same as or above yours."
+    return None
+
+
+# -------------------------------------------------------------
+# MODALS: /embed and /announce
+# -------------------------------------------------------------
+class EmbedBuilderModal(discord.ui.Modal, title="Create Embed"):
+    title_input = discord.ui.TextInput(label="Title", required=False, max_length=256)
+    description_input = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, required=True, max_length=4000)
+    color_input = discord.ui.TextInput(label="Color (hex, e.g. 8B5CF6)", required=False, max_length=7)
+    image_input = discord.ui.TextInput(label="Image URL", required=False, max_length=500)
+    footer_input = discord.ui.TextInput(label="Footer", required=False, max_length=200)
+
+    def __init__(self, channel: discord.abc.Messageable):
+        super().__init__()
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        color = parse_hex_color(self.color_input.value)
+        if color is None:
+            await interaction.followup.send(embed=embed_err("Invalid Color", "Use a 6 digit hex color such as `8B5CF6`."), ephemeral=True)
+            return
+
+        embed = discord.Embed(title=self.title_input.value or None, description=self.description_input.value, color=color)
+        image = (self.image_input.value or "").strip()
+        if image:
+            if not re.match(r"^https?://\S+$", image):
+                await interaction.followup.send(embed=embed_err("Invalid Image URL", "The image URL must start with `http://` or `https://`."), ephemeral=True)
+                return
+            embed.set_image(url=image)
+        if self.footer_input.value:
+            embed.set_footer(text=self.footer_input.value)
+
+        try:
+            await self.channel.send(embed=embed, allowed_mentions=NO_PINGS)
+        except Exception as e:
+            await interaction.followup.send(embed=embed_err("Could Not Send Embed", f"`{e}`"), ephemeral=True)
+            return
+        await interaction.followup.send(embed=embed_ok("Embed Sent", f"Posted in {getattr(self.channel, 'mention', 'the channel')}."), ephemeral=True)
+
+
+class AnnounceModal(discord.ui.Modal, title="Create Announcement"):
+    title_input = discord.ui.TextInput(label="Title", required=True, max_length=256)
+    message_input = discord.ui.TextInput(label="Announcement", style=discord.TextStyle.paragraph, required=True, max_length=4000)
+
+    def __init__(self, channel: discord.TextChannel, ping: str, role: Optional[discord.Role]):
+        super().__init__()
+        self.channel = channel
+        self.ping = ping
+        self.role = role
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        embed = discord.Embed(title=self.title_input.value, description=self.message_input.value, color=COLOR_PURPLE)
+        embed.set_footer(text=f"Announcement | {interaction.guild.name}")
+        embed.timestamp = datetime.now(timezone.utc)
+
+        parts = []
+        if self.ping == "everyone":
+            parts.append("@everyone")
+        elif self.ping == "here":
+            parts.append("@here")
+        if self.role:
+            parts.append(self.role.mention)
+        mentions = discord.AllowedMentions(
+            everyone=self.ping in ("everyone", "here"),
+            roles=[self.role] if self.role else False,
+            users=False
+        )
+        try:
+            await self.channel.send(content=" ".join(parts) or None, embed=embed, allowed_mentions=mentions)
+        except Exception as e:
+            await interaction.followup.send(embed=embed_err("Could Not Send Announcement", f"`{e}`"), ephemeral=True)
+            return
+        await interaction.followup.send(embed=embed_ok("Announcement Sent", f"Posted in {self.channel.mention}."), ephemeral=True)
+
+
+# -------------------------------------------------------------
 # COMMANDS COG: all slash commands
 # -------------------------------------------------------------
 class CommandsCog(commands.Cog):
@@ -72,23 +268,33 @@ class CommandsCog(commands.Cog):
         self.bot = bot
 
     # -------------------------------------------------------------
-    # OWNER LOCK: every slash command in this cog is hard-coded to BOT_OWNER_ID
+    # ACCESS LEVELS: bot owner can use everything, see PUBLIC_COMMANDS / ADMIN_COMMANDS above
     # -------------------------------------------------------------
-    PUBLIC_COMMANDS = {"points", "leaderboard"}
-
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == BOT_OWNER_ID:
             return True
 
+        cmd = interaction.command
+        root_name = (cmd.root_parent or cmd).name if cmd else ""
+
         # Public commands: anyone can use these
-        if interaction.command and interaction.command.name in self.PUBLIC_COMMANDS:
+        if root_name in PUBLIC_COMMANDS:
             return True
 
-        embed = discord.Embed(
-            title="Permission Denied",
-            description=f"These commands can only be used by the bot owner (`{BOT_OWNER_ID}`).",
-            color=0xF43F5E
-        )
+        # Admin commands: server Administrator permission required
+        if root_name in ADMIN_COMMANDS:
+            if interaction.guild is not None and interaction.permissions.administrator:
+                return True
+            embed = embed_err(
+                "Permission Denied",
+                "This command needs the `Administrator` permission and can only be used inside a server."
+            )
+        else:
+            embed = discord.Embed(
+                title="Permission Denied",
+                description=f"These commands can only be used by the bot owner (`{BOT_OWNER_ID}`).",
+                color=0xF43F5E
+            )
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(embed=embed, ephemeral=True)
@@ -103,6 +309,15 @@ class CommandsCog(commands.Cog):
         if isinstance(error, app_commands.CheckFailure):
             return
         print(f"[App Command Error] {error}")
+        # Tell the user instead of leaving them with "application did not respond"
+        embed = embed_err("Command Failed", f"Something went wrong:\n`{str(error)[:500]}`")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception:
+            pass
 
     # -------------------------------------------------------------
     # SLASH COMMAND: SET VERIFICATION OR UNSYNC INTERACTIVE PANELS
@@ -477,6 +692,1057 @@ class CommandsCog(commands.Cog):
             embed.set_footer(text="Took longer than 90 seconds. The task may still finish on Roblox.")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # =============================================================
+    # ROBLOX COMMANDS
+    # =============================================================
+    @app_commands.command(name="revenue", description="Show your Roblox group's revenue (owner only).")
+    @app_commands.describe(period="Time period to show (default: Month).")
+    @app_commands.choices(period=[
+        app_commands.Choice(name="Last 24 hours", value="Day"),
+        app_commands.Choice(name="Last 7 days", value="Week"),
+        app_commands.Choice(name="Last 30 days", value="Month"),
+        app_commands.Choice(name="Last 365 days", value="Year"),
+    ])
+    async def revenue_cmd(self, interaction: discord.Interaction, period: Optional[app_commands.Choice[str]] = None):
+        await interaction.response.defer(ephemeral=True)
+
+        group_id = os.getenv("ROBLOX_GROUP_ID", "").strip()
+        cookie_headers = get_roblox_cookie_header()
+        if not group_id:
+            await interaction.followup.send(embed=embed_err("Missing Group ID", "`ROBLOX_GROUP_ID` is not set."), ephemeral=True)
+            return
+        if not cookie_headers:
+            await interaction.followup.send(embed=embed_err("Missing Cookie", "`ROBLOX_COOKIE` is not set."), ephemeral=True)
+            return
+
+        frame = period.value if period else "Month"
+        frame_label = period.name if period else "Last 30 days"
+
+        async with aiohttp.ClientSession() as session:
+            status, summary = await roblox_get(session, f"https://economy.roblox.com/v1/groups/{group_id}/revenue/summary/{frame}", headers=cookie_headers)
+            _, funds = await roblox_get(session, f"https://economy.roblox.com/v1/groups/{group_id}/currency", headers=cookie_headers)
+            _, info = await roblox_get(session, f"https://groups.roblox.com/v1/groups/{group_id}")
+
+        if status != 200 or not isinstance(summary, dict):
+            hint = " The cookie may be expired, or that account cannot view group revenue." if status in (401, 403) else ""
+            await interaction.followup.send(embed=embed_err("Could Not Fetch Revenue", f"Roblox returned HTTP `{status}`.{hint}"), ephemeral=True)
+            return
+
+        group_name = (info or {}).get("name") or f"Group {group_id}"
+        embed = discord.Embed(title=f"{group_name} | Revenue", description=f"Period: **{frame_label}**", color=COLOR_GOLD)
+
+        for key, value in summary.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            label = re.sub(r"(?<!^)(?=[A-Z])", " ", key).replace(" Robux", "").title()
+            embed.add_field(name=label, value=f"`{value:,} R$`", inline=True)
+
+        if isinstance(funds, dict) and isinstance(funds.get("robux"), (int, float)):
+            embed.add_field(name="Group Funds", value=f"`{funds['robux']:,} R$`", inline=False)
+        embed.add_field(name="Group ID", value=f"`{group_id}`", inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="roblox-user", description="Look up a Roblox account by username.")
+    @app_commands.describe(username="The Roblox username to look up.")
+    async def roblox_user_cmd(self, interaction: discord.Interaction, username: str):
+        await interaction.response.defer()
+
+        async with aiohttp.ClientSession() as session:
+            found = await resolve_roblox_user(session, username)
+            if not found:
+                await interaction.followup.send(embed=embed_err("User Not Found", f"No Roblox user named `{username[:50]}`."))
+                return
+
+            uid = found["id"]
+            _, profile = await roblox_get(session, f"https://users.roblox.com/v1/users/{uid}")
+            _, friends = await roblox_get(session, f"https://friends.roblox.com/v1/users/{uid}/friends/count")
+            _, followers = await roblox_get(session, f"https://friends.roblox.com/v1/users/{uid}/followers/count")
+            _, following = await roblox_get(session, f"https://friends.roblox.com/v1/users/{uid}/followings/count")
+            _, thumb = await roblox_get(
+                session, "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+                params={"userIds": uid, "size": "420x420", "format": "Png"}
+            )
+
+        if not isinstance(profile, dict):
+            await interaction.followup.send(embed=embed_err("Lookup Failed", "Roblox did not return the profile. Try again later."))
+            return
+
+        name = profile.get("name", found.get("name", username))
+        display = profile.get("displayName") or name
+        bio = (profile.get("description") or "").strip() or "No bio"
+        created = iso_to_ts(profile.get("created"))
+
+        def count(data):
+            return f"`{data['count']:,}`" if isinstance(data, dict) and "count" in data else "`Unknown`"
+
+        embed = discord.Embed(
+            title=f"{display} (@{name})",
+            url=f"https://www.roblox.com/users/{uid}/profile",
+            description=bio[:1000],
+            color=COLOR_PURPLE
+        )
+        embed.add_field(name="User ID", value=f"`{uid}`", inline=True)
+        embed.add_field(name="Username", value=f"`{name}`", inline=True)
+        embed.add_field(name="Display Name", value=f"`{display}`", inline=True)
+        embed.add_field(name="Banned", value="`Yes`" if profile.get("isBanned") else "`No`", inline=True)
+        embed.add_field(name="Created", value=f"<t:{created}:F> (<t:{created}:R>)" if created else "`Unknown`", inline=False)
+        embed.add_field(name="Friends", value=count(friends), inline=True)
+        embed.add_field(name="Followers", value=count(followers), inline=True)
+        embed.add_field(name="Following", value=count(following), inline=True)
+
+        try:
+            image_url = thumb["data"][0].get("imageUrl")
+            if image_url:
+                embed.set_thumbnail(url=image_url)
+        except Exception:
+            pass
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="cookie-check", description="Check if the saved Roblox cookie is still valid (owner only).")
+    async def cookie_check_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        cookie_headers = get_roblox_cookie_header()
+        if not cookie_headers:
+            await interaction.followup.send(embed=embed_err("Missing Cookie", "`ROBLOX_COOKIE` is not set."), ephemeral=True)
+            return
+
+        async with aiohttp.ClientSession() as session:
+            status, me = await roblox_get(session, "https://users.roblox.com/v1/users/authenticated", headers=cookie_headers)
+            robux = None
+            if status == 200 and isinstance(me, dict) and me.get("id"):
+                _, bal = await roblox_get(session, f"https://economy.roblox.com/v1/users/{me['id']}/currency", headers=cookie_headers)
+                if isinstance(bal, dict):
+                    robux = bal.get("robux")
+
+        if status == 200 and isinstance(me, dict) and me.get("id"):
+            embed = embed_ok("Cookie Is Valid", "The saved cookie is working.")
+            embed.add_field(name="Account", value=f"`{me.get('name')}`", inline=True)
+            embed.add_field(name="Display Name", value=f"`{me.get('displayName')}`", inline=True)
+            embed.add_field(name="User ID", value=f"`{me.get('id')}`", inline=True)
+            if robux is not None:
+                embed.add_field(name="Robux", value=f"`{robux:,} R$`", inline=True)
+            embed.add_field(name="Group ID", value=f"`{os.getenv('ROBLOX_GROUP_ID', '').strip() or 'not set'}`", inline=True)
+        elif status in (401, 403):
+            embed = embed_err("Cookie Is Invalid", f"Roblox rejected the cookie (HTTP `{status}`). It is expired or logged out. Set a new `ROBLOX_COOKIE`.")
+        else:
+            embed = embed_err("Could Not Check Cookie", f"Roblox returned HTTP `{status}`. Try again later.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="groupcheck", description="Check if a Roblox user is in your group.")
+    @app_commands.describe(user="The Roblox username to check.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def groupcheck_cmd(self, interaction: discord.Interaction, user: str):
+        await interaction.response.defer(ephemeral=True)
+
+        group_id = os.getenv("ROBLOX_GROUP_ID", "").strip()
+        if not group_id:
+            await interaction.followup.send(embed=embed_err("Missing Group ID", "`ROBLOX_GROUP_ID` is not set."), ephemeral=True)
+            return
+
+        async with aiohttp.ClientSession() as session:
+            found = await resolve_roblox_user(session, user)
+            if not found:
+                await interaction.followup.send(embed=embed_err("User Not Found", f"No Roblox user named `{user[:50]}`."), ephemeral=True)
+                return
+            uid = found["id"]
+            status, data = await roblox_get(
+                session, f"https://groups.roblox.com/v2/users/{uid}/groups/roles",
+                headers=get_roblox_cookie_header() or None
+            )
+            _, info = await roblox_get(session, f"https://groups.roblox.com/v1/groups/{group_id}")
+
+        if status != 200 or not isinstance(data, dict):
+            await interaction.followup.send(embed=embed_err("Lookup Failed", f"Roblox returned HTTP `{status}`."), ephemeral=True)
+            return
+
+        group_name = (info or {}).get("name") or f"Group {group_id}"
+        match = next((g for g in data.get("data", []) if str(g.get("group", {}).get("id")) == group_id), None)
+
+        if match:
+            role = match.get("role", {})
+            embed = embed_ok("Group Member", f"**{found['name']}** is in **{group_name}**.")
+            embed.add_field(name="Role", value=f"`{role.get('name', 'Unknown')}`", inline=True)
+            embed.add_field(name="Rank", value=f"`{role.get('rank', '?')}`", inline=True)
+        else:
+            embed = embed_err("Not In Group", f"**{found['name']}** is not in **{group_name}**.")
+        embed.add_field(name="User ID", value=f"`{uid}`", inline=True)
+        embed.add_field(name="Group ID", value=f"`{group_id}`", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="gameinfo", description="Show info about a Roblox game.")
+    @app_commands.describe(game="Game name, place ID, universe ID or a roblox.com/games link.")
+    async def gameinfo_cmd(self, interaction: discord.Interaction, game: str):
+        await interaction.response.defer()
+
+        query = game.strip()
+        link = re.search(r"games/(\d+)", query)
+        if link:
+            query = link.group(1)
+
+        async with aiohttp.ClientSession() as session:
+            universe_id = None
+            if query.isdigit():
+                status, data = await roblox_get(session, f"https://apis.roblox.com/universes/v1/places/{query}/universe")
+                if status == 200 and isinstance(data, dict) and data.get("universeId"):
+                    universe_id = str(data["universeId"])
+                else:
+                    universe_id = query  # maybe it is already a universe ID
+            else:
+                _, data = await roblox_get(
+                    session, "https://apis.roblox.com/search-api/omni-search",
+                    params={"searchQuery": query, "sessionId": str(uuid.uuid4()), "pageType": "all"}
+                )
+                for group in (data or {}).get("searchResults", []):
+                    for item in group.get("contents", []):
+                        if item.get("universeId"):
+                            universe_id = str(item["universeId"])
+                            break
+                    if universe_id:
+                        break
+
+            if not universe_id:
+                await interaction.followup.send(embed=embed_err("Game Not Found", f"No game found for `{query[:80]}`."))
+                return
+
+            _, details = await roblox_get(session, "https://games.roblox.com/v1/games", params={"universeIds": universe_id})
+            _, votes = await roblox_get(session, "https://games.roblox.com/v1/games/votes", params={"universeIds": universe_id})
+
+        try:
+            g = details["data"][0]
+        except Exception:
+            await interaction.followup.send(embed=embed_err("Game Not Found", f"No game found for `{query[:80]}`."))
+            return
+
+        place_id = g.get("rootPlaceId")
+        embed = discord.Embed(
+            title=g.get("name", "Unknown Game"),
+            url=f"https://www.roblox.com/games/{place_id}" if place_id else None,
+            description=(g.get("description") or "No description")[:500],
+            color=COLOR_PURPLE
+        )
+        embed.add_field(name="Playing", value=f"`{g.get('playing', 0):,}`", inline=True)
+        embed.add_field(name="Visits", value=f"`{g.get('visits', 0):,}`", inline=True)
+        embed.add_field(name="Favorites", value=f"`{g.get('favoritedCount', 0):,}`", inline=True)
+
+        try:
+            up, down = votes["data"][0]["upVotes"], votes["data"][0]["downVotes"]
+            total = up + down
+            ratio = f"`{round(up / total * 100)}%` ({up:,} up / {down:,} down)" if total else "`No votes`"
+            embed.add_field(name="Rating", value=ratio, inline=False)
+        except Exception:
+            pass
+
+        embed.add_field(name="Max Players", value=f"`{g.get('maxPlayers', '?')}`", inline=True)
+        creator = g.get("creator") or {}
+        embed.add_field(name="Creator", value=f"`{creator.get('name', 'Unknown')}` ({creator.get('type', '?')})", inline=True)
+        created, updated = iso_to_ts(g.get("created")), iso_to_ts(g.get("updated"))
+        if created:
+            embed.add_field(name="Created", value=f"<t:{created}:D>", inline=True)
+        if updated:
+            embed.add_field(name="Last Updated", value=f"<t:{updated}:R>", inline=True)
+        embed.add_field(name="Universe ID", value=f"`{universe_id}`", inline=True)
+        if place_id:
+            embed.add_field(name="Place ID", value=f"`{place_id}`", inline=True)
+        await interaction.followup.send(embed=embed)
+
+    # =============================================================
+    # UTILITY COMMANDS
+    # =============================================================
+    @app_commands.command(name="remind", description="Set a reminder. The bot will DM you when it is time.")
+    @app_commands.describe(time="When to remind you, e.g. 10m, 2h, 1d, 1h30m.", message="What to remind you about.")
+    async def remind_cmd(self, interaction: discord.Interaction, time: str, message: app_commands.Range[str, 1, 1500]):
+        delta = parse_duration_strict(time)
+        if delta is None or delta < timedelta(seconds=10) or delta > timedelta(days=365):
+            await interaction.response.send_message(
+                embed=embed_err("Invalid Time", "Use a time between `10s` and `1y`, for example `10m`, `2h`, `1d` or `1h30m`."),
+                ephemeral=True
+            )
+            return
+        if count_user_reminders(interaction.user.id) >= MAX_REMINDERS_PER_USER:
+            await interaction.response.send_message(
+                embed=embed_err("Too Many Reminders", f"You can have at most `{MAX_REMINDERS_PER_USER}` active reminders."),
+                ephemeral=True
+            )
+            return
+
+        due_ts = datetime.now(timezone.utc).timestamp() + delta.total_seconds()
+        reminder = add_reminder(interaction.user.id, interaction.channel_id or 0, message, due_ts)
+        embed = embed_ok("Reminder Set", f"I will remind you <t:{int(due_ts)}:R> (in `{format_timedelta(delta)}`).")
+        embed.add_field(name="Message", value=message[:1000], inline=False)
+        embed.add_field(name="Reminder ID", value=f"`{reminder['id']}`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="afk", description="Set yourself as AFK. Pinging you shows your reason; talking removes AFK.")
+    @app_commands.describe(reason="Why you are AFK.")
+    @app_commands.guild_only()
+    async def afk_cmd(self, interaction: discord.Interaction, reason: Optional[app_commands.Range[str, 1, 200]] = "AFK"):
+        set_afk(interaction.guild.id, interaction.user.id, reason or "AFK")
+        embed = embed_info("You Are Now AFK", f"{interaction.user.mention} is now AFK: {reason}")
+        embed.set_footer(text="Send any message to remove your AFK.")
+        await interaction.response.send_message(embed=embed, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="timestamp", description="Get Discord timestamp codes you can copy.")
+    @app_commands.describe(time="Optional. A duration from now (2h, 1d), a date like 2026-12-25 18:00 (UTC), or a unix time. Empty = now.")
+    async def timestamp_cmd(self, interaction: discord.Interaction, time: Optional[str] = None):
+        now = datetime.now(timezone.utc)
+        target = now
+        if time and time.strip():
+            text = time.strip()
+            delta = parse_duration_strict(text)
+            if delta is not None:
+                target = now + delta
+            elif text.isdigit():
+                try:
+                    target = datetime.fromtimestamp(int(text), tz=timezone.utc)
+                except Exception:
+                    target = None
+            else:
+                target = None
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        target = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+                        break
+                    except ValueError:
+                        continue
+            if target is None:
+                await interaction.response.send_message(
+                    embed=embed_err("Invalid Time", "Use a duration like `2h`, a date like `2026-12-25 18:00` (UTC), or a unix time."),
+                    ephemeral=True
+                )
+                return
+
+        ts = int(target.timestamp())
+        styles = [("t", "Short time"), ("T", "Long time"), ("d", "Short date"), ("D", "Long date"),
+                  ("f", "Short date/time"), ("F", "Long date/time"), ("R", "Relative")]
+        lines = [f"**{label}**: <t:{ts}:{code}>\n`<t:{ts}:{code}>`" for code, label in styles]
+        embed = embed_info("Discord Timestamps", "\n\n".join(lines))
+        embed.add_field(name="Unix Time", value=f"`{ts}`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="whois", description="Show information about a member.")
+    @app_commands.describe(user="The member to look up (defaults to you).")
+    @app_commands.guild_only()
+    async def whois_cmd(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        member = user or interaction.user
+        embed = discord.Embed(title=str(member), description=member.mention, color=member.color if member.color.value else COLOR_PURPLE)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="User ID", value=f"`{member.id}`", inline=True)
+        embed.add_field(name="Username", value=f"`{member.name}`", inline=True)
+        embed.add_field(name="Nickname", value=f"`{member.nick}`" if member.nick else "`None`", inline=True)
+        embed.add_field(name="Bot", value="`Yes`" if member.bot else "`No`", inline=True)
+        embed.add_field(name="Created", value=f"<t:{int(member.created_at.timestamp())}:F>\n(<t:{int(member.created_at.timestamp())}:R>)", inline=False)
+        if member.joined_at:
+            embed.add_field(name="Joined", value=f"<t:{int(member.joined_at.timestamp())}:F>\n(<t:{int(member.joined_at.timestamp())}:R>)", inline=False)
+        if member.is_timed_out():
+            embed.add_field(name="Timed Out Until", value=f"<t:{int(member.timed_out_until.timestamp())}:R>", inline=False)
+
+        roles = [r.mention for r in reversed(member.roles) if not r.is_default()]
+        roles_text = ", ".join(roles) if roles else "None"
+        if len(roles_text) > 1000:
+            roles_text = roles_text[:1000].rsplit(",", 1)[0] + ", ..."
+        embed.add_field(name=f"Roles ({len(roles)})", value=roles_text, inline=False)
+        if not member.top_role.is_default():
+            embed.add_field(name="Highest Role", value=member.top_role.mention, inline=True)
+        if member.guild_permissions.administrator:
+            embed.add_field(name="Key Permission", value="`Administrator`", inline=True)
+        await interaction.response.send_message(embed=embed, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="permissions", description="Show a member's permissions in this channel.")
+    @app_commands.describe(user="The member to check (defaults to you).")
+    @app_commands.guild_only()
+    async def permissions_cmd(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        member = user or interaction.user
+        perms = interaction.channel.permissions_for(member)
+        granted = sorted(pretty_perm(name) for name, value in perms if value)
+        denied = sorted(pretty_perm(name) for name, value in perms if not value)
+
+        embed = embed_info(f"Permissions | {member.display_name}", f"{member.mention} in {interaction.channel.mention}")
+        if perms.administrator:
+            embed.add_field(name="Administrator", value="This member has every permission.", inline=False)
+        embed.add_field(name=f"Allowed ({len(granted)})", value="```\n" + ("\n".join(granted) or "None")[:950] + "\n```", inline=False)
+        embed.add_field(name=f"Denied ({len(denied)})", value="```\n" + ("\n".join(denied) or "None")[:950] + "\n```", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="rolelist", description="List every role in the server, one per line.")
+    @app_commands.guild_only()
+    async def rolelist_cmd(self, interaction: discord.Interaction):
+        roles = [r for r in reversed(interaction.guild.roles) if not r.is_default()]
+        lines = [f"{r.mention} | `{r.id}` | {len(r.members)} members" for r in roles]
+        pages = build_pages(f"Roles in {interaction.guild.name}", lines, per_page=20, header=f"Total roles: `{len(roles)}`\n\n")
+        await send_pages(interaction, pages, ephemeral=False)
+
+    @app_commands.command(name="channelstats", description="Show channel counts for this server.")
+    @app_commands.guild_only()
+    async def channelstats_cmd(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        channel = interaction.channel
+        embed = embed_info(f"Channel Stats | {guild.name}")
+        embed.add_field(name="Total Channels", value=f"`{len(guild.channels)}`", inline=True)
+        embed.add_field(name="Categories", value=f"`{len(guild.categories)}`", inline=True)
+        embed.add_field(name="Text", value=f"`{len(guild.text_channels)}`", inline=True)
+        embed.add_field(name="Voice", value=f"`{len(guild.voice_channels)}`", inline=True)
+        embed.add_field(name="Stage", value=f"`{len(guild.stage_channels)}`", inline=True)
+        embed.add_field(name="Forum", value=f"`{len(guild.forums)}`", inline=True)
+        embed.add_field(name="Active Threads", value=f"`{len(guild.threads)}`", inline=True)
+
+        details = [f"Channel: {channel.mention}", f"ID: `{channel.id}`"]
+        if getattr(channel, "created_at", None):
+            details.append(f"Created: <t:{int(channel.created_at.timestamp())}:R>")
+        if isinstance(channel, discord.TextChannel):
+            details.append(f"Slowmode: `{channel.slowmode_delay}s`")
+            details.append(f"NSFW: `{'Yes' if channel.is_nsfw() else 'No'}`")
+            if channel.category:
+                details.append(f"Category: `{channel.category.name}`")
+        embed.add_field(name="This Channel", value="\n".join(details), inline=False)
+        await interaction.response.send_message(embed=embed)
+
+    # =============================================================
+    # ADMIN UTILITY COMMANDS
+    # =============================================================
+    @app_commands.command(name="slowmode", description="Set slowmode for a channel. Use off or 0 to disable.")
+    @app_commands.describe(duration="e.g. 5s, 30s, 2m, 1h (max 6h) or off.", channel="Channel (defaults to this one).")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def slowmode_cmd(self, interaction: discord.Interaction, duration: str, channel: Optional[discord.TextChannel] = None):
+        channel = channel or interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(embed=embed_err("Wrong Channel", "Slowmode can only be set on text channels."), ephemeral=True)
+            return
+
+        if duration.strip().lower() in ("off", "0", "none", "disable"):
+            seconds = 0
+        else:
+            delta = parse_duration_strict(duration)
+            if delta is None or delta.total_seconds() > 21600:
+                await interaction.response.send_message(embed=embed_err("Invalid Duration", "Use `5s`, `30s`, `2m`, `1h` (max `6h`) or `off`."), ephemeral=True)
+                return
+            seconds = int(delta.total_seconds())
+
+        try:
+            await channel.edit(slowmode_delay=seconds, reason=f"Slowmode set by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I need `Manage Channels` in that channel."), ephemeral=True)
+            return
+        text = f"Slowmode in {channel.mention} is now `{format_timedelta(timedelta(seconds=seconds))}`." if seconds else f"Slowmode in {channel.mention} is now off."
+        await interaction.response.send_message(embed=embed_ok("Slowmode Updated", text), ephemeral=True)
+
+    @app_commands.command(name="nick", description="Change or reset a member's nickname.")
+    @app_commands.describe(user="The member to rename.", nickname="New nickname. Leave empty to reset.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def nick_cmd(self, interaction: discord.Interaction, user: discord.Member, nickname: Optional[app_commands.Range[str, 1, 32]] = None):
+        problem = None if user.id == interaction.user.id else check_hierarchy(interaction, user)
+        if problem:
+            await interaction.response.send_message(embed=embed_err("Cannot Change Nickname", problem), ephemeral=True)
+            return
+        try:
+            await user.edit(nick=nickname, reason=f"Nickname changed by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I cannot change that member's nickname."), ephemeral=True)
+            return
+        text = f"{user.mention}'s nickname is now `{nickname}`." if nickname else f"{user.mention}'s nickname was reset."
+        await interaction.response.send_message(embed=embed_ok("Nickname Updated", text), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    role_group = app_commands.Group(
+        name="role", description="Add or remove roles.", guild_only=True,
+        default_permissions=discord.Permissions(administrator=True)
+    )
+
+    def _role_problem(self, interaction: discord.Interaction, role: discord.Role) -> Optional[str]:
+        guild = interaction.guild
+        if role.is_default():
+            return "You cannot use `@everyone`."
+        if role.managed:
+            return "That role is managed by an integration and cannot be assigned."
+        if role >= guild.me.top_role:
+            return "That role is above or equal to my highest role. Move my role higher."
+        if interaction.user.id not in (BOT_OWNER_ID, guild.owner_id) and role >= interaction.user.top_role:
+            return "That role is the same as or above your highest role."
+        return None
+
+    @role_group.command(name="add", description="Give a role to a member.")
+    @app_commands.describe(user="The member.", role="The role to give.")
+    async def role_add_cmd(self, interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+        problem = self._role_problem(interaction, role)
+        if problem:
+            await interaction.response.send_message(embed=embed_err("Cannot Add Role", problem), ephemeral=True)
+            return
+        if role in user.roles:
+            await interaction.response.send_message(embed=embed_err("Already Has Role", f"{user.mention} already has {role.mention}."), ephemeral=True, allowed_mentions=NO_PINGS)
+            return
+        try:
+            await user.add_roles(role, reason=f"Role added by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I could not add that role."), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embed_ok("Role Added", f"Gave {role.mention} to {user.mention}."), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @role_group.command(name="remove", description="Remove a role from a member.")
+    @app_commands.describe(user="The member.", role="The role to remove.")
+    async def role_remove_cmd(self, interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+        problem = self._role_problem(interaction, role)
+        if problem:
+            await interaction.response.send_message(embed=embed_err("Cannot Remove Role", problem), ephemeral=True)
+            return
+        if role not in user.roles:
+            await interaction.response.send_message(embed=embed_err("Does Not Have Role", f"{user.mention} does not have {role.mention}."), ephemeral=True, allowed_mentions=NO_PINGS)
+            return
+        try:
+            await user.remove_roles(role, reason=f"Role removed by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I could not remove that role."), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embed_ok("Role Removed", f"Removed {role.mention} from {user.mention}."), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="say", description="Send a message as the bot.")
+    @app_commands.describe(message="What the bot should say.", channel="Channel (defaults to this one).")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def say_cmd(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 2000], channel: Optional[discord.TextChannel] = None):
+        channel = channel or interaction.channel
+        try:
+            await channel.send(message, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True))
+        except Exception as e:
+            await interaction.response.send_message(embed=embed_err("Could Not Send", f"`{e}`"), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embed_ok("Message Sent", f"Posted in {channel.mention}."), ephemeral=True)
+
+    @app_commands.command(name="embed", description="Create and send a custom embed.")
+    @app_commands.describe(channel="Channel to send the embed to (defaults to this one).")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def embed_cmd(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+        await interaction.response.send_modal(EmbedBuilderModal(channel or interaction.channel))
+
+    @app_commands.command(name="announce", description="Send an announcement embed, with an optional ping.")
+    @app_commands.describe(channel="Where to post the announcement.", ping="Optional @everyone or @here ping.", role="Optional role to ping.")
+    @app_commands.choices(ping=[
+        app_commands.Choice(name="No ping", value="none"),
+        app_commands.Choice(name="@everyone", value="everyone"),
+        app_commands.Choice(name="@here", value="here"),
+    ])
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def announce_cmd(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        ping: Optional[app_commands.Choice[str]] = None,
+        role: Optional[discord.Role] = None
+    ):
+        await interaction.response.send_modal(AnnounceModal(channel, ping.value if ping else "none", role))
+
+    # =============================================================
+    # MODERATION COMMANDS (server Administrator only)
+    # The moderator is never shown to the moderated user (DM has no moderator).
+    # =============================================================
+    def _mod_result(self, title: str, user, case: dict, dm_sent: Optional[bool], extra: Optional[dict] = None) -> discord.Embed:
+        embed = embed_ok(title, f"{user.mention} (`{user.id}`)")
+        embed.add_field(name="Case ID", value=f"`#{case['case_id']}`", inline=True)
+        for name, value in (extra or {}).items():
+            embed.add_field(name=name, value=value, inline=True)
+        embed.add_field(name="Reason", value=case["reason"][:1000], inline=False)
+        if dm_sent is not None:
+            embed.set_footer(text="User was notified by DM." if dm_sent else "Could not DM the user (DMs are closed).")
+        return embed
+
+    @app_commands.command(name="warn", description="Warn a member. They get a DM and the warning is logged.")
+    @app_commands.describe(user="The member to warn.", reason="Why they are being warned.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def warn_cmd(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, 500]):
+        problem = check_hierarchy(interaction, user)
+        if problem:
+            await interaction.response.send_message(embed=embed_err("Cannot Warn", problem), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        case = add_case(interaction.guild.id, user.id, "warn", reason, interaction.user.id)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "warn", reason, case["case_id"])
+        await interaction.followup.send(embed=self._mod_result("Member Warned", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="mute", description="Time out a member for a set duration.")
+    @app_commands.describe(user="The member to mute.", duration="e.g. 10m, 2h, 1d (max 28d).", reason="Why they are being muted.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def mute_cmd(
+        self, interaction: discord.Interaction, user: discord.Member, duration: str,
+        reason: Optional[app_commands.Range[str, 1, 500]] = "No reason provided"
+    ):
+        delta = parse_duration_strict(duration)
+        if delta is None or delta > timedelta(days=28):
+            await interaction.response.send_message(embed=embed_err("Invalid Duration", "Use a duration from `1s` to `28d`, for example `10m`, `2h` or `1d`."), ephemeral=True)
+            return
+        problem = check_hierarchy(interaction, user)
+        if problem:
+            await interaction.response.send_message(embed=embed_err("Cannot Mute", problem), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await user.timeout(delta, reason=f"{reason} | by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed_err("Missing Permission", "I need the `Moderate Members` permission."), ephemeral=True)
+            return
+
+        case = add_case(interaction.guild.id, user.id, "mute", reason, interaction.user.id, duration=format_timedelta(delta))
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "mute", reason, case["case_id"], duration=format_timedelta(delta))
+        until = int((datetime.now(timezone.utc) + delta).timestamp())
+        await interaction.followup.send(
+            embed=self._mod_result("Member Muted", user, case, dm_sent, {"Duration": f"`{format_timedelta(delta)}`", "Ends": f"<t:{until}:R>"}),
+            ephemeral=True, allowed_mentions=NO_PINGS
+        )
+
+    @app_commands.command(name="unmute", description="Remove a member's timeout.")
+    @app_commands.describe(user="The member to unmute.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def unmute_cmd(self, interaction: discord.Interaction, user: discord.Member):
+        if not user.is_timed_out():
+            await interaction.response.send_message(embed=embed_err("Not Muted", f"{user.mention} is not muted."), ephemeral=True, allowed_mentions=NO_PINGS)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await user.timeout(None, reason=f"Unmuted by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed_err("Missing Permission", "I need the `Moderate Members` permission."), ephemeral=True)
+            return
+        case = add_case(interaction.guild.id, user.id, "unmute", "Mute removed", interaction.user.id)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "unmute", "Your mute was removed.", case["case_id"])
+        await interaction.followup.send(embed=self._mod_result("Member Unmuted", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="kick", description="Kick a member. They get a DM first.")
+    @app_commands.describe(user="The member to kick.", reason="Why they are being kicked.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def kick_cmd(self, interaction: discord.Interaction, user: discord.Member, reason: Optional[app_commands.Range[str, 1, 500]] = "No reason provided"):
+        problem = check_hierarchy(interaction, user)
+        if problem:
+            await interaction.response.send_message(embed=embed_err("Cannot Kick", problem), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        case_id = None
+        # DM first: after a kick the bot may no longer be able to reach the user
+        case = add_case(interaction.guild.id, user.id, "kick", reason, interaction.user.id)
+        case_id = case["case_id"]
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "kick", reason, case_id)
+        try:
+            await user.kick(reason=f"{reason} | by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            delete_cases(interaction.guild.id, user.id, "kick", case_id)
+            await interaction.followup.send(embed=embed_err("Missing Permission", "I need the `Kick Members` permission."), ephemeral=True)
+            return
+        await interaction.followup.send(embed=self._mod_result("Member Kicked", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="ban", description="Ban a user. They get a DM first.")
+    @app_commands.describe(user="The user to ban.", reason="Why they are being banned.", delete_days="Delete their messages from the last 0-7 days.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def ban_cmd(
+        self, interaction: discord.Interaction, user: discord.User,
+        reason: Optional[app_commands.Range[str, 1, 500]] = "No reason provided",
+        delete_days: Optional[app_commands.Range[int, 0, 7]] = 0
+    ):
+        member = interaction.guild.get_member(user.id)
+        if member:
+            problem = check_hierarchy(interaction, member)
+            if problem:
+                await interaction.response.send_message(embed=embed_err("Cannot Ban", problem), ephemeral=True)
+                return
+        elif user.id in (interaction.user.id, interaction.guild.me.id):
+            await interaction.response.send_message(embed=embed_err("Cannot Ban", "You cannot use this on that user."), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        case = add_case(interaction.guild.id, user.id, "ban", reason, interaction.user.id)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "ban", reason, case["case_id"]) if member else None
+        try:
+            await interaction.guild.ban(
+                user, reason=f"{reason} | by {interaction.user} ({interaction.user.id})",
+                delete_message_seconds=int(delete_days or 0) * 86400
+            )
+        except discord.Forbidden:
+            delete_cases(interaction.guild.id, user.id, "ban", case["case_id"])
+            await interaction.followup.send(embed=embed_err("Missing Permission", "I need the `Ban Members` permission."), ephemeral=True)
+            return
+        await interaction.followup.send(embed=self._mod_result("User Banned", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="unban", description="Unban a user by ID or username.")
+    @app_commands.describe(user="The user ID (best) or username of the banned user.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def unban_cmd(self, interaction: discord.Interaction, user: str):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        wanted = user.strip().lower().lstrip("@")
+        target = None
+        try:
+            async for entry in guild.bans(limit=None):
+                u = entry.user
+                if str(u.id) == wanted or u.name.lower() == wanted or str(u).lower() == wanted:
+                    target = u
+                    break
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed_err("Missing Permission", "I need the `Ban Members` permission to read the ban list."), ephemeral=True)
+            return
+
+        if target is None:
+            await interaction.followup.send(embed=embed_err("Not Banned", f"No banned user matches `{user[:50]}`."), ephemeral=True)
+            return
+
+        try:
+            await guild.unban(target, reason=f"Unbanned by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed_err("Missing Permission", "I could not unban that user."), ephemeral=True)
+            return
+        case = add_case(guild.id, target.id, "unban", "Ban removed", interaction.user.id)
+        await interaction.followup.send(embed=self._mod_result("User Unbanned", target, case, None), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="clear", description="Clear a member's warnings, mute, kick or ban records.")
+    @app_commands.describe(user="The user.", action="Which record type to clear.", case_id="Optional case ID. Leave empty to clear all of that type.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Warnings", value="warn"),
+        app_commands.Choice(name="Mute", value="mute"),
+        app_commands.Choice(name="Kick", value="kick"),
+        app_commands.Choice(name="Ban", value="ban"),
+    ])
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def clear_cmd(self, interaction: discord.Interaction, user: discord.User, action: app_commands.Choice[str], case_id: Optional[int] = None):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        notes = []
+
+        if case_id is not None:
+            match = next((c for c in get_cases(guild.id, user.id) if c["case_id"] == case_id and c["action"] == action.value), None)
+            if not match:
+                await interaction.followup.send(
+                    embed=embed_err("Case Not Found", f"{user.mention} has no `{action.name}` case with ID `#{case_id}`."),
+                    ephemeral=True, allowed_mentions=NO_PINGS
+                )
+                return
+
+        removed = delete_cases(guild.id, user.id, action.value, case_id)
+
+        # Clearing everything of a type also lifts a mute / ban that is still active
+        if case_id is None and action.value == "mute":
+            member = guild.get_member(user.id)
+            if member and member.is_timed_out():
+                try:
+                    await member.timeout(None, reason=f"Mute cleared by {interaction.user} ({interaction.user.id})")
+                    notes.append("Active mute removed.")
+                except Exception as e:
+                    notes.append(f"Could not remove the active mute: `{e}`")
+        if case_id is None and action.value == "ban":
+            try:
+                await guild.fetch_ban(user)
+                await guild.unban(user, reason=f"Ban cleared by {interaction.user} ({interaction.user.id})")
+                notes.append("Active ban removed.")
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                notes.append(f"Could not remove the active ban: `{e}`")
+
+        if removed == 0 and not notes:
+            await interaction.followup.send(embed=embed_err("Nothing To Clear", f"{user.mention} has no `{action.name}` records."), ephemeral=True, allowed_mentions=NO_PINGS)
+            return
+
+        embed = embed_ok("Records Cleared", f"{user.mention}\nType: **{action.name}**\nRecords removed: `{removed}`" + (f"\nCase: `#{case_id}`" if case_id is not None else ""))
+        if notes:
+            embed.add_field(name="Notes", value="\n".join(notes), inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="purge", description="Delete recent messages in this channel (old messages too, but slower).")
+    @app_commands.describe(amount="How many messages to delete (1-1000).", user="Only delete messages from this user.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def purge_cmd(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1, 1000], user: Optional[discord.User] = None):
+        channel = interaction.channel
+        if not hasattr(channel, "purge"):
+            await interaction.response.send_message(embed=embed_err("Wrong Channel", "I cannot purge messages in this channel."), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        def should_delete(m: discord.Message) -> bool:
+            if m.pinned:
+                return False
+            return user is None or m.author.id == user.id
+
+        try:
+            # Messages older than 14 days cannot be bulk deleted. discord.py deletes those one by one (slow).
+            deleted = await channel.purge(limit=amount, check=should_delete, bulk=True, reason=f"Purge by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.followup.send(embed=embed_err("Missing Permission", "I need `Manage Messages` and `Read Message History` in this channel."), ephemeral=True)
+            return
+
+        embed = embed_ok("Messages Purged", f"Deleted `{len(deleted)}` message(s) in {channel.mention}.")
+        embed.set_footer(text="Pinned messages are skipped.")
+        try:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception:
+            pass  # the interaction can expire during a very long purge
+
+    @app_commands.command(name="lock", description="Stop @everyone from sending messages in a channel.")
+    @app_commands.describe(channel="Channel to lock (defaults to this one).")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def lock_cmd(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+        channel = channel or interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(embed=embed_err("Wrong Channel", "Only text channels can be locked."), ephemeral=True)
+            return
+        overwrite = channel.overwrites_for(interaction.guild.default_role)
+        if overwrite.send_messages is False:
+            await interaction.response.send_message(embed=embed_err("Already Locked", f"{channel.mention} is already locked."), ephemeral=True)
+            return
+        overwrite.send_messages = False
+        overwrite.send_messages_in_threads = False
+        try:
+            await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=f"Locked by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I need `Manage Channels` or `Manage Roles` there."), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embed_ok("Channel Locked", f"{channel.mention} is now locked."), ephemeral=True)
+        if channel.id != interaction.channel_id:
+            try:
+                await channel.send(embed=embed_err("Channel Locked", "This channel has been locked by the moderators."))
+            except Exception:
+                pass
+
+    @app_commands.command(name="unlock", description="Let @everyone send messages in a channel again.")
+    @app_commands.describe(channel="Channel to unlock (defaults to this one).")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def unlock_cmd(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+        channel = channel or interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(embed=embed_err("Wrong Channel", "Only text channels can be unlocked."), ephemeral=True)
+            return
+        overwrite = channel.overwrites_for(interaction.guild.default_role)
+        if overwrite.send_messages is not False:
+            await interaction.response.send_message(embed=embed_err("Not Locked", f"{channel.mention} is not locked."), ephemeral=True)
+            return
+        overwrite.send_messages = None
+        overwrite.send_messages_in_threads = None
+        try:
+            await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite, reason=f"Unlocked by {interaction.user} ({interaction.user.id})")
+        except discord.Forbidden:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I need `Manage Channels` or `Manage Roles` there."), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embed_ok("Channel Unlocked", f"{channel.mention} is now unlocked."), ephemeral=True)
+        if channel.id != interaction.channel_id:
+            try:
+                await channel.send(embed=embed_ok("Channel Unlocked", "This channel has been unlocked."))
+            except Exception:
+                pass
+
+    @app_commands.command(name="modlog", description="Show all moderation logs for a user (10 per page).")
+    @app_commands.describe(user="The user to look up.")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def modlog_cmd(self, interaction: discord.Interaction, user: discord.User):
+        cases = get_cases(interaction.guild.id, user.id)
+        entries = []
+        for c in cases:
+            label = MOD_ACTION_LABELS.get(c["action"], c["action"].title())
+            head = f"**#{c['case_id']} | {label}** | <t:{int(c['created_at'])}:R>"
+            if c.get("duration"):
+                head += f" | `{c['duration']}`"
+            entries.append(f"{head}\nReason: {str(c['reason'])[:200]}\nModerator: <@{c['moderator_id']}>\n")
+
+        pages = build_pages(
+            f"Moderation Log | {user.name}", entries, per_page=10,
+            header=f"{user.mention} (`{user.id}`)\nTotal records: `{len(entries)}`\n\n"
+        )
+        if not entries:
+            pages = [embed_info(f"Moderation Log | {user.name}", f"{user.mention} has no moderation records.")]
+        await send_pages(interaction, pages, ephemeral=True)
+
+    # =============================================================
+    # GIVEAWAYS
+    # =============================================================
+    giveaway_group = app_commands.Group(
+        name="giveaway", description="Create and manage giveaways.", guild_only=True,
+        default_permissions=discord.Permissions(administrator=True)
+    )
+
+    def _find_giveaway(self, interaction: discord.Interaction, message_id: str) -> Optional[dict]:
+        numbers = re.findall(r"\d+", message_id or "")
+        if not numbers:
+            return None
+        gw = GIVEAWAYS.get(numbers[-1])
+        if gw and gw["guild_id"] == str(interaction.guild_id):
+            return gw
+        return None
+
+    async def _giveaway_choices(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+        choices = []
+        for gw in GIVEAWAYS.values():
+            if gw["guild_id"] != str(interaction.guild_id):
+                continue
+            state = "ended" if gw.get("ended") else "active"
+            label = f"{gw['prize'][:55]} ({state}) {gw['message_id']}"
+            if current.lower() in label.lower():
+                choices.append(app_commands.Choice(name=label[:100], value=gw["message_id"]))
+        return choices[:25]
+
+    @giveaway_group.command(name="create", description="Start a giveaway.")
+    @app_commands.describe(prize="What is being given away.", duration="How long it runs, e.g. 30m, 2h, 1d, 1w.",
+                           winners="Number of winners (default 1).", channel="Where to post it (defaults to this channel).")
+    async def giveaway_create_cmd(
+        self, interaction: discord.Interaction, prize: app_commands.Range[str, 1, 200], duration: str,
+        winners: Optional[app_commands.Range[int, 1, 25]] = 1, channel: Optional[discord.TextChannel] = None
+    ):
+        delta = parse_duration_strict(duration)
+        if delta is None or delta < timedelta(seconds=30) or delta > timedelta(days=365):
+            await interaction.response.send_message(embed=embed_err("Invalid Duration", "Use a duration between `30s` and `1y`, for example `30m`, `2h`, `1d` or `1w`."), ephemeral=True)
+            return
+        channel = channel or interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(embed=embed_err("Wrong Channel", "Giveaways can only be posted in text channels."), ephemeral=True)
+            return
+        perms = channel.permissions_for(interaction.guild.me)
+        if not (perms.send_messages and perms.embed_links):
+            await interaction.response.send_message(embed=embed_err("Missing Permission", f"I need `Send Messages` and `Embed Links` in {channel.mention}."), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        gw = {
+            "message_id": "",
+            "channel_id": str(channel.id),
+            "guild_id": str(interaction.guild.id),
+            "host_id": str(interaction.user.id),
+            "prize": prize,
+            "winners": int(winners or 1),
+            "end_ts": datetime.now(timezone.utc).timestamp() + delta.total_seconds(),
+            "entries": [],
+            "ended": False,
+            "winner_ids": [],
+        }
+        try:
+            msg = await channel.send(embed=build_giveaway_embed(gw), view=GiveawayView())
+        except Exception as e:
+            await interaction.followup.send(embed=embed_err("Could Not Post Giveaway", f"`{e}`"), ephemeral=True)
+            return
+        gw["message_id"] = str(msg.id)
+        save_giveaway(gw)
+        embed = embed_ok("Giveaway Created", f"Posted in {channel.mention}.\n[Jump to giveaway]({msg.jump_url})")
+        embed.add_field(name="Message ID", value=f"`{msg.id}`", inline=True)
+        embed.add_field(name="Ends", value=f"<t:{int(gw['end_ts'])}:R>", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @giveaway_group.command(name="edit", description="Change the prize, winners or time left of a running giveaway.")
+    @app_commands.describe(message_id="The giveaway to edit.", prize="New prize.", winners="New number of winners.",
+                           duration="New time left from now, e.g. 1h, 2d.")
+    async def giveaway_edit_cmd(
+        self, interaction: discord.Interaction, message_id: str, prize: Optional[app_commands.Range[str, 1, 200]] = None,
+        winners: Optional[app_commands.Range[int, 1, 25]] = None, duration: Optional[str] = None
+    ):
+        gw = self._find_giveaway(interaction, message_id)
+        if not gw:
+            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "No giveaway in this server matches that message ID."), ephemeral=True)
+            return
+        if gw.get("ended"):
+            await interaction.response.send_message(embed=embed_err("Giveaway Ended", "Ended giveaways cannot be edited. Use `/giveaway reroll` instead."), ephemeral=True)
+            return
+        if prize is None and winners is None and duration is None:
+            await interaction.response.send_message(embed=embed_err("Nothing To Change", "Give at least one of: `prize`, `winners`, `duration`."), ephemeral=True)
+            return
+
+        if duration is not None:
+            delta = parse_duration_strict(duration)
+            if delta is None or delta < timedelta(seconds=30) or delta > timedelta(days=365):
+                await interaction.response.send_message(embed=embed_err("Invalid Duration", "Use a duration between `30s` and `1y`."), ephemeral=True)
+                return
+            gw["end_ts"] = datetime.now(timezone.utc).timestamp() + delta.total_seconds()
+        if prize is not None:
+            gw["prize"] = prize
+        if winners is not None:
+            gw["winners"] = int(winners)
+
+        await interaction.response.defer(ephemeral=True)
+        save_giveaway(gw)
+        message = await get_giveaway_message(self.bot, gw)
+        if message:
+            try:
+                await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView())
+            except Exception as e:
+                await interaction.followup.send(embed=embed_err("Saved, But Could Not Update Message", f"`{e}`"), ephemeral=True)
+                return
+        embed = embed_ok("Giveaway Updated", f"**{gw['prize']}**")
+        embed.add_field(name="Winners", value=f"`{gw['winners']}`", inline=True)
+        embed.add_field(name="Ends", value=f"<t:{int(gw['end_ts'])}:R>", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @giveaway_group.command(name="end", description="End a giveaway now and pick the winners.")
+    @app_commands.describe(message_id="The giveaway to end.")
+    async def giveaway_end_cmd(self, interaction: discord.Interaction, message_id: str):
+        gw = self._find_giveaway(interaction, message_id)
+        if not gw:
+            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "No giveaway in this server matches that message ID."), ephemeral=True)
+            return
+        if gw.get("ended"):
+            await interaction.response.send_message(embed=embed_err("Already Ended", "That giveaway has already ended."), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        winners = await finish_giveaway(self.bot, gw, ended_early=True)
+        text = ", ".join(f"<@{w}>" for w in winners) if winners else "No valid entries"
+        await interaction.followup.send(embed=embed_ok("Giveaway Ended", f"**{gw['prize']}**\nWinners: {text}"), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @giveaway_group.command(name="reroll", description="Pick new winner(s) for an ended giveaway.")
+    @app_commands.describe(message_id="The ended giveaway.", winners="How many new winners (defaults to the original number).")
+    async def giveaway_reroll_cmd(self, interaction: discord.Interaction, message_id: str, winners: Optional[app_commands.Range[int, 1, 25]] = None):
+        gw = self._find_giveaway(interaction, message_id)
+        if not gw:
+            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "No giveaway in this server matches that message ID."), ephemeral=True)
+            return
+        if not gw.get("ended"):
+            await interaction.response.send_message(embed=embed_err("Still Running", "That giveaway has not ended yet. Use `/giveaway end` first."), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        new_winners = await reroll_giveaway(self.bot, gw, winners)
+        if not new_winners:
+            await interaction.followup.send(embed=embed_err("No One Left To Pick", "There are no other valid entries."), ephemeral=True)
+            return
+        text = ", ".join(f"<@{w}>" for w in new_winners)
+        await interaction.followup.send(embed=embed_ok("Giveaway Rerolled", f"**{gw['prize']}**\nNew winner(s): {text}"), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @giveaway_group.command(name="delete", description="Delete a giveaway and its message.")
+    @app_commands.describe(message_id="The giveaway to delete.")
+    async def giveaway_delete_cmd(self, interaction: discord.Interaction, message_id: str):
+        gw = self._find_giveaway(interaction, message_id)
+        if not gw:
+            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "No giveaway in this server matches that message ID."), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        message = await get_giveaway_message(self.bot, gw)
+        if message:
+            try:
+                await message.delete()
+            except Exception as e:
+                print(f"[Giveaway Delete Message Error] {e}")
+        delete_giveaway_record(gw["message_id"])
+        await interaction.followup.send(embed=embed_ok("Giveaway Deleted", f"**{gw['prize']}** was deleted."), ephemeral=True)
+
+    # Autocomplete: shows the server's giveaways when typing message_id
+    @giveaway_edit_cmd.autocomplete("message_id")
+    async def _ac_edit(self, interaction: discord.Interaction, current: str):
+        return await self._giveaway_choices(interaction, current)
+
+    @giveaway_end_cmd.autocomplete("message_id")
+    async def _ac_end(self, interaction: discord.Interaction, current: str):
+        return await self._giveaway_choices(interaction, current)
+
+    @giveaway_reroll_cmd.autocomplete("message_id")
+    async def _ac_reroll(self, interaction: discord.Interaction, current: str):
+        return await self._giveaway_choices(interaction, current)
+
+    @giveaway_delete_cmd.autocomplete("message_id")
+    async def _ac_delete(self, interaction: discord.Interaction, current: str):
+        return await self._giveaway_choices(interaction, current)
 
 
 async def setup(bot: commands.Bot):

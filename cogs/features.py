@@ -8,8 +8,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 
 import discord
-from discord.ext import commands
-from pymongo import MongoClient
+from discord.ext import commands, tasks
+from pymongo import MongoClient, ReturnDocument
 
 # -------------------------------------------------------------
 # GLOBAL CONSTANTS & LOGGING CHANNELS
@@ -27,6 +27,11 @@ MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
 db_build_auth = None
 db_users = None
+db_cases = None
+db_counters = None
+db_afk = None
+db_reminders = None
+db_giveaways = None
 
 if MONGO_URI:
     try:
@@ -38,6 +43,11 @@ if MONGO_URI:
         db_premium = db["premium_users"]
         db_build_auth = db["build_authorized_users"]
         db_users = db["persistent_users"]
+        db_cases = db["mod_cases"]
+        db_counters = db["counters"]
+        db_afk = db["afk_users"]
+        db_reminders = db["reminders"]
+        db_giveaways = db["giveaways"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -198,6 +208,508 @@ def format_channel_name(name: str) -> str:
     if not clean:
         clean = str(name).strip()
     return clean.lower().replace(" ", "-")
+
+
+# -------------------------------------------------------------
+# SHARED EMBED HELPERS
+# -------------------------------------------------------------
+COLOR_PURPLE = 0x8B5CF6
+COLOR_GREEN = 0x2ECC71
+COLOR_RED = 0xF43F5E
+COLOR_GOLD = 0xF1C40F
+COLOR_GRAY = 0x95A5A6
+
+
+def embed_ok(title: str, description: Optional[str] = None) -> discord.Embed:
+    return discord.Embed(title=title, description=description, color=COLOR_GREEN)
+
+
+def embed_err(title: str, description: Optional[str] = None) -> discord.Embed:
+    return discord.Embed(title=title, description=description, color=COLOR_RED)
+
+
+def embed_info(title: str, description: Optional[str] = None, color: int = COLOR_PURPLE) -> discord.Embed:
+    return discord.Embed(title=title, description=description, color=color)
+
+
+# -------------------------------------------------------------
+# DURATION HELPERS (strict: invalid text returns None)
+# -------------------------------------------------------------
+DURATION_FULL_RE = re.compile(r'^(?:\d+[smhdwy])+$')
+DURATION_PART_RE = re.compile(r'(\d+)([smhdwy])')
+DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+
+
+def parse_duration_strict(text: Optional[str]) -> Optional[timedelta]:
+    """Parses '10m', '2h30m', '1d', '1w' ... Returns None if the text is not a valid duration."""
+    if not text:
+        return None
+    cleaned = re.sub(r'\s+', '', text.lower())
+    if not DURATION_FULL_RE.match(cleaned):
+        return None
+    try:
+        total = sum(int(n) * DURATION_UNITS[u] for n, u in DURATION_PART_RE.findall(cleaned))
+    except Exception:
+        return None
+    if total <= 0 or total > 100 * DURATION_UNITS["y"]:
+        return None
+    return timedelta(seconds=total)
+
+
+def format_timedelta(td: timedelta) -> str:
+    secs = int(td.total_seconds())
+    parts = []
+    for label, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
+        if secs >= size:
+            value, secs = divmod(secs, size)
+            parts.append(f"{value}{label}")
+    return " ".join(parts) or "0s"
+
+
+# -------------------------------------------------------------
+# PAGINATION (used by modlog, rolelist and giveaway entries)
+# -------------------------------------------------------------
+class PaginatorView(discord.ui.View):
+    def __init__(self, pages: List[discord.Embed], timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.pages = pages
+        self.index = 0
+        self._refresh()
+
+    def _refresh(self):
+        self.prev_btn.disabled = self.index <= 0
+        self.next_btn.disabled = self.index >= len(self.pages) - 1
+        self.counter_btn.label = f"{self.index + 1}/{len(self.pages)}"
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = max(0, self.index - 1)
+        self._refresh()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def counter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = min(len(self.pages) - 1, self.index + 1)
+        self._refresh()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+
+def build_pages(title: str, lines: List[str], per_page: int = 20, color: int = COLOR_PURPLE, header: str = "") -> List[discord.Embed]:
+    """Splits lines into embed pages (one line per row)."""
+    if not lines:
+        return [discord.Embed(title=title, description=(header + "Nothing to show.").strip(), color=color)]
+    chunks = [lines[i:i + per_page] for i in range(0, len(lines), per_page)]
+    pages = []
+    for idx, chunk in enumerate(chunks, start=1):
+        embed = discord.Embed(title=title, description=header + "\n".join(chunk), color=color)
+        embed.set_footer(text=f"Page {idx}/{len(chunks)}")
+        pages.append(embed)
+    return pages
+
+
+async def send_pages(interaction: discord.Interaction, pages: List[discord.Embed], ephemeral: bool = True):
+    kwargs = {"view": PaginatorView(pages)} if len(pages) > 1 else {}
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=pages[0], ephemeral=ephemeral, **kwargs)
+    else:
+        await interaction.response.send_message(embed=pages[0], ephemeral=ephemeral, **kwargs)
+
+
+# -------------------------------------------------------------
+# MODERATION CASE LOG
+# -------------------------------------------------------------
+MOD_ACTION_LABELS = {
+    "warn": "Warn",
+    "mute": "Mute (Timeout)",
+    "unmute": "Unmute",
+    "kick": "Kick",
+    "ban": "Ban",
+    "unban": "Unban",
+}
+
+LOCAL_CASES: List[dict] = []
+LOCAL_CASE_COUNTERS: Dict[str, int] = {}
+
+
+def next_case_id(guild_id) -> int:
+    gid = str(guild_id)
+    if db_counters is not None:
+        try:
+            doc = db_counters.find_one_and_update(
+                {"_id": f"cases:{gid}"},
+                {"$inc": {"value": 1}},
+                upsert=True,
+                return_document=ReturnDocument.AFTER
+            )
+            return int(doc["value"])
+        except Exception as e:
+            print(f"[Case Counter Error] {e}")
+    LOCAL_CASE_COUNTERS[gid] = LOCAL_CASE_COUNTERS.get(gid, 0) + 1
+    return LOCAL_CASE_COUNTERS[gid]
+
+
+def add_case(guild_id, user_id, action: str, reason: str, moderator_id, duration: Optional[str] = None) -> dict:
+    case = {
+        "guild_id": str(guild_id),
+        "case_id": next_case_id(guild_id),
+        "user_id": str(user_id),
+        "action": action,
+        "reason": reason,
+        "moderator_id": str(moderator_id),
+        "duration": duration,
+        "created_at": datetime.now(timezone.utc).timestamp(),
+    }
+    if db_cases is not None:
+        try:
+            db_cases.insert_one(dict(case))
+            return case
+        except Exception as e:
+            print(f"[Case Insert Error] {e}")
+    LOCAL_CASES.append(case)
+    return case
+
+
+def get_cases(guild_id, user_id) -> List[dict]:
+    gid, uid = str(guild_id), str(user_id)
+    if db_cases is not None:
+        try:
+            return list(db_cases.find({"guild_id": gid, "user_id": uid}, {"_id": 0}).sort("case_id", -1))
+        except Exception as e:
+            print(f"[Case Fetch Error] {e}")
+    found = [c for c in LOCAL_CASES if c["guild_id"] == gid and c["user_id"] == uid]
+    found.sort(key=lambda c: c["case_id"], reverse=True)
+    return found
+
+
+def delete_cases(guild_id, user_id, action: str, case_id: Optional[int] = None) -> int:
+    """Removes records from the mod log. Returns how many were removed."""
+    gid, uid = str(guild_id), str(user_id)
+    query = {"guild_id": gid, "user_id": uid, "action": action}
+    if case_id is not None:
+        query["case_id"] = int(case_id)
+    removed = 0
+    if db_cases is not None:
+        try:
+            removed += db_cases.delete_many(query).deleted_count
+        except Exception as e:
+            print(f"[Case Delete Error] {e}")
+    before = len(LOCAL_CASES)
+    LOCAL_CASES[:] = [
+        c for c in LOCAL_CASES
+        if not all(c.get(k) == v for k, v in query.items())
+    ]
+    removed += before - len(LOCAL_CASES)
+    return removed
+
+
+async def dm_moderation_notice(user, guild: discord.Guild, action: str, reason: str,
+                               case_id: Optional[int] = None, duration: Optional[str] = None) -> bool:
+    """DMs the moderated user. The moderator is never included (privacy). Returns True if delivered."""
+    titles = {
+        "warn": "You were warned",
+        "mute": "You were muted",
+        "unmute": "Your mute was removed",
+        "kick": "You were kicked",
+        "ban": "You were banned",
+    }
+    embed = discord.Embed(title=f"{titles.get(action, 'Moderation notice')} in {guild.name}", color=COLOR_RED)
+    embed.add_field(name="Reason", value=(reason or "No reason provided")[:1000], inline=False)
+    if duration:
+        embed.add_field(name="Duration", value=f"`{duration}`", inline=True)
+    if case_id:
+        embed.add_field(name="Case ID", value=f"`#{case_id}`", inline=True)
+    try:
+        await user.send(embed=embed)
+        return True
+    except Exception:
+        return False
+
+
+# -------------------------------------------------------------
+# AFK, REMINDERS & GIVEAWAY STORAGE (memory cache + MongoDB write-through)
+# -------------------------------------------------------------
+AFK_USERS: Dict[tuple, dict] = {}
+REMINDERS: List[dict] = []
+GIVEAWAYS: Dict[str, dict] = {}
+MAX_REMINDERS_PER_USER = 25
+
+
+def load_runtime_state():
+    """Loads AFK users, reminders and giveaways from MongoDB (if configured)."""
+    if db_afk is not None:
+        try:
+            AFK_USERS.clear()
+            for d in db_afk.find({}, {"_id": 0}):
+                AFK_USERS[(d["guild_id"], d["user_id"])] = d
+        except Exception as e:
+            print(f"[Load AFK Error] {e}")
+    if db_reminders is not None:
+        try:
+            REMINDERS.clear()
+            REMINDERS.extend(db_reminders.find({}, {"_id": 0}))
+        except Exception as e:
+            print(f"[Load Reminders Error] {e}")
+    if db_giveaways is not None:
+        try:
+            GIVEAWAYS.clear()
+            for d in db_giveaways.find({}, {"_id": 0}):
+                GIVEAWAYS[d["message_id"]] = d
+        except Exception as e:
+            print(f"[Load Giveaways Error] {e}")
+
+
+def set_afk(guild_id, user_id, reason: str):
+    doc = {
+        "guild_id": str(guild_id),
+        "user_id": str(user_id),
+        "reason": reason,
+        "since": datetime.now(timezone.utc).timestamp(),
+    }
+    AFK_USERS[(doc["guild_id"], doc["user_id"])] = doc
+    if db_afk is not None:
+        try:
+            db_afk.update_one({"guild_id": doc["guild_id"], "user_id": doc["user_id"]}, {"$set": doc}, upsert=True)
+        except Exception as e:
+            print(f"[Set AFK Error] {e}")
+
+
+def get_afk(guild_id, user_id) -> Optional[dict]:
+    return AFK_USERS.get((str(guild_id), str(user_id)))
+
+
+def clear_afk(guild_id, user_id):
+    AFK_USERS.pop((str(guild_id), str(user_id)), None)
+    if db_afk is not None:
+        try:
+            db_afk.delete_one({"guild_id": str(guild_id), "user_id": str(user_id)})
+        except Exception as e:
+            print(f"[Clear AFK Error] {e}")
+
+
+def count_user_reminders(user_id) -> int:
+    return sum(1 for r in REMINDERS if r["user_id"] == str(user_id))
+
+
+def add_reminder(user_id, channel_id, message: str, due_ts: float) -> dict:
+    doc = {
+        "id": os.urandom(4).hex(),
+        "user_id": str(user_id),
+        "channel_id": str(channel_id),
+        "message": message,
+        "created_ts": datetime.now(timezone.utc).timestamp(),
+        "due_ts": due_ts,
+    }
+    REMINDERS.append(doc)
+    if db_reminders is not None:
+        try:
+            db_reminders.insert_one(dict(doc))
+        except Exception as e:
+            print(f"[Add Reminder Error] {e}")
+    return doc
+
+
+def remove_reminder(reminder_id: str):
+    REMINDERS[:] = [r for r in REMINDERS if r["id"] != reminder_id]
+    if db_reminders is not None:
+        try:
+            db_reminders.delete_one({"id": reminder_id})
+        except Exception as e:
+            print(f"[Remove Reminder Error] {e}")
+
+
+def save_giveaway(gw: dict):
+    GIVEAWAYS[gw["message_id"]] = gw
+    if db_giveaways is not None:
+        try:
+            db_giveaways.replace_one({"message_id": gw["message_id"]}, dict(gw), upsert=True)
+        except Exception as e:
+            print(f"[Save Giveaway Error] {e}")
+
+
+def delete_giveaway_record(message_id: str):
+    GIVEAWAYS.pop(str(message_id), None)
+    if db_giveaways is not None:
+        try:
+            db_giveaways.delete_one({"message_id": str(message_id)})
+        except Exception as e:
+            print(f"[Delete Giveaway Error] {e}")
+
+
+# -------------------------------------------------------------
+# GIVEAWAY ENGINE
+# -------------------------------------------------------------
+def build_giveaway_embed(gw: dict) -> discord.Embed:
+    end_ts = int(gw["end_ts"])
+    host = f"<@{gw['host_id']}>"
+    if gw.get("ended"):
+        winner_ids = gw.get("winner_ids", [])
+        winners_text = "\n".join(f"<@{w}>" for w in winner_ids) if winner_ids else "No valid entries"
+        embed = discord.Embed(
+            title=gw["prize"],
+            description=f"**Ended:** <t:{end_ts}:R>\n**Hosted by:** {host}\n**Winners:** {winners_text}",
+            color=COLOR_GRAY
+        )
+        embed.set_footer(text=f"{len(gw['entries'])} entries | Giveaway ended")
+    else:
+        embed = discord.Embed(
+            title=gw["prize"],
+            description=f"Click **Enter** to join the giveaway!\n\n**Ends:** <t:{end_ts}:R>\n**Hosted by:** {host}\n**Winners:** `{int(gw['winners'])}`",
+            color=COLOR_PURPLE
+        )
+    return embed
+
+
+class GiveawayView(discord.ui.View):
+    """Persistent Enter / Entries buttons. The giveaway is found by the message the button is on."""
+
+    def __init__(self, ended: bool = False):
+        super().__init__(timeout=None)
+        if ended:
+            self.enter_btn.disabled = True
+
+    @discord.ui.button(label="Enter", style=discord.ButtonStyle.success, custom_id="giveaway_enter")
+    async def enter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gw = GIVEAWAYS.get(str(interaction.message.id))
+        if not gw:
+            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "This giveaway is no longer tracked."), ephemeral=True)
+            return
+        if gw.get("ended") or gw["end_ts"] <= datetime.now(timezone.utc).timestamp():
+            await interaction.response.send_message(embed=embed_err("Giveaway Ended", "This giveaway has already ended."), ephemeral=True)
+            return
+
+        uid = str(interaction.user.id)
+        if uid in gw["entries"]:
+            gw["entries"].remove(uid)
+            save_giveaway(gw)
+            embed = embed_info("Entry Removed", f"You left the giveaway for **{gw['prize']}**.\nClick **Enter** again to rejoin.", COLOR_GOLD)
+        else:
+            gw["entries"].append(uid)
+            save_giveaway(gw)
+            embed = embed_ok("You Are In!", f"You entered the giveaway for **{gw['prize']}**.\nTotal entries: `{len(gw['entries'])}`\nClick **Enter** again to leave.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Entries", style=discord.ButtonStyle.secondary, custom_id="giveaway_entries")
+    async def entries_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gw = GIVEAWAYS.get(str(interaction.message.id))
+        if not gw:
+            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "This giveaway is no longer tracked."), ephemeral=True)
+            return
+        lines = [f"<@{uid}>" for uid in gw["entries"]]
+        pages = build_pages(
+            "Giveaway Entries", lines, per_page=20,
+            header=f"**{gw['prize']}**\nTotal entries: `{len(lines)}`\n\n"
+        )
+        await send_pages(interaction, pages, ephemeral=True)
+
+
+async def _resolve_member(guild: Optional[discord.Guild], uid: str):
+    if guild is None:
+        return None
+    member = guild.get_member(int(uid))
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(int(uid))
+    except Exception:
+        return None
+
+
+async def valid_giveaway_entries(bot: commands.Bot, gw: dict, exclude: tuple = ()) -> List[str]:
+    """Entries whose user is still in the server and is not a bot."""
+    guild = bot.get_guild(int(gw["guild_id"]))
+    valid = []
+    for uid in gw["entries"]:
+        if uid in exclude:
+            continue
+        if guild is None:
+            valid.append(uid)
+            continue
+        member = await _resolve_member(guild, uid)
+        if member and not member.bot:
+            valid.append(uid)
+    return valid
+
+
+async def get_giveaway_message(bot: commands.Bot, gw: dict) -> Optional[discord.Message]:
+    channel = bot.get_channel(int(gw["channel_id"]))
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(int(gw["channel_id"]))
+        except Exception:
+            return None
+    try:
+        return await channel.fetch_message(int(gw["message_id"]))
+    except Exception:
+        return None
+
+
+async def announce_giveaway_winners(message: discord.Message, gw: dict, winners: List[str], rerolled: bool = False):
+    if winners:
+        mentions = ", ".join(f"<@{w}>" for w in winners)
+        title = "New Winner" if rerolled else "Giveaway Winner"
+        if len(winners) > 1:
+            title += "s"
+        embed = embed_ok(title, f"Congratulations {mentions}! You won **{gw['prize']}**.\n\n[Jump to giveaway]({message.jump_url})")
+        content = mentions
+    else:
+        embed = embed_err("No Winners", f"There were no valid entries for **{gw['prize']}**.\n\n[Jump to giveaway]({message.jump_url})")
+        content = None
+    try:
+        await message.reply(
+            content=content,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False, replied_user=False)
+        )
+    except Exception as e:
+        print(f"[Giveaway Announce Error] {e}")
+
+
+async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False) -> List[str]:
+    if gw.get("ended"):
+        return gw.get("winner_ids", [])
+
+    valid = await valid_giveaway_entries(bot, gw)
+    winners = random.sample(valid, min(int(gw["winners"]), len(valid))) if valid else []
+
+    gw["ended"] = True
+    gw["winner_ids"] = winners
+    if ended_early:
+        gw["end_ts"] = datetime.now(timezone.utc).timestamp()
+    save_giveaway(gw)
+
+    message = await get_giveaway_message(bot, gw)
+    if message:
+        try:
+            await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
+        except Exception as e:
+            print(f"[Giveaway Edit Error] {e}")
+        await announce_giveaway_winners(message, gw, winners)
+    return winners
+
+
+async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = None) -> Optional[List[str]]:
+    """Picks new winners (previous winners are skipped). Returns None if nobody else can win."""
+    previous = tuple(gw.get("winner_ids", []))
+    valid = await valid_giveaway_entries(bot, gw, exclude=previous)
+    if not valid:
+        return None
+    pick = int(count or gw["winners"])
+    winners = random.sample(valid, min(pick, len(valid)))
+    gw["winner_ids"] = winners
+    save_giveaway(gw)
+
+    message = await get_giveaway_message(bot, gw)
+    if message:
+        try:
+            await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
+        except Exception as e:
+            print(f"[Giveaway Edit Error] {e}")
+        await announce_giveaway_winners(message, gw, winners, rerolled=True)
+    return winners
 
 
 # -------------------------------------------------------------
@@ -604,6 +1116,97 @@ class FeaturesCog(commands.Cog):
         self.bot = bot
 
     # -------------------------------------------------------------
+    # BACKGROUND SCHEDULER: reminders and giveaway endings
+    # -------------------------------------------------------------
+    async def cog_load(self):
+        load_runtime_state()
+        self.scheduler_loop.start()
+
+    async def cog_unload(self):
+        self.scheduler_loop.cancel()
+
+    @tasks.loop(seconds=10)
+    async def scheduler_loop(self):
+        try:
+            await self.process_reminders()
+        except Exception as e:
+            print(f"[Reminder Loop Error] {e}")
+        try:
+            await self.process_giveaways()
+        except Exception as e:
+            print(f"[Giveaway Loop Error] {e}")
+
+    @scheduler_loop.before_loop
+    async def before_scheduler_loop(self):
+        await self.bot.wait_until_ready()
+
+    async def process_reminders(self):
+        now = datetime.now(timezone.utc).timestamp()
+        for reminder in [r for r in REMINDERS if r["due_ts"] <= now]:
+            remove_reminder(reminder["id"])
+            embed = embed_info("Reminder", reminder["message"])
+            embed.add_field(name="Set", value=f"<t:{int(reminder['created_ts'])}:R>", inline=False)
+
+            delivered = False
+            try:
+                user = await self.bot.fetch_user(int(reminder["user_id"]))
+                await user.send(embed=embed)
+                delivered = True
+            except Exception:
+                pass
+
+            if not delivered:
+                channel = self.bot.get_channel(int(reminder["channel_id"]))
+                if channel:
+                    try:
+                        await channel.send(
+                            content=f"<@{reminder['user_id']}>",
+                            embed=embed,
+                            allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=int(reminder["user_id"]))])
+                        )
+                    except Exception as e:
+                        print(f"[Reminder Delivery Error] {e}")
+
+    async def process_giveaways(self):
+        now = datetime.now(timezone.utc).timestamp()
+        for gw in [g for g in GIVEAWAYS.values() if not g.get("ended") and g["end_ts"] <= now]:
+            await finish_giveaway(self.bot, gw)
+
+    # -------------------------------------------------------------
+    # AFK SYSTEM: remove AFK when the user talks, tell people who ping an AFK user
+    # -------------------------------------------------------------
+    async def handle_afk(self, message: discord.Message):
+        gid = message.guild.id
+        no_pings = discord.AllowedMentions.none()
+
+        if get_afk(gid, message.author.id):
+            entry = get_afk(gid, message.author.id)
+            clear_afk(gid, message.author.id)
+            try:
+                await message.reply(
+                    embed=embed_ok("Welcome Back", f"Your AFK was removed. You were away since <t:{int(entry['since'])}:R>."),
+                    allowed_mentions=no_pings,
+                    delete_after=10
+                )
+            except Exception:
+                pass
+
+        lines = []
+        seen = set()
+        for member in message.mentions:
+            if member.bot or member.id == message.author.id or member.id in seen:
+                continue
+            seen.add(member.id)
+            entry = get_afk(gid, member.id)
+            if entry:
+                lines.append(f"**{member.display_name}** is AFK: {entry['reason']} (since <t:{int(entry['since'])}:R>)")
+        if lines:
+            try:
+                await message.reply(embed=embed_info("User Is AFK", "\n".join(lines)), allowed_mentions=no_pings)
+            except Exception:
+                pass
+
+    # -------------------------------------------------------------
     # EVENT LISTENER: WELCOME BONUS (20 POINTS)
     # -------------------------------------------------------------
     @commands.Cog.listener()
@@ -659,6 +1262,13 @@ class FeaturesCog(commands.Cog):
                             user_track["last_time"] = now_ts
                             user_track["msg_count"] = 0
                         user_track["last_content"] = content_clean
+
+        # AFK SYSTEM
+        if not message.author.bot and message.guild:
+            try:
+                await self.handle_afk(message)
+            except Exception as afk_err:
+                print(f"[AFK Error] {afk_err}")
 
         # AUTO-BUILD / NON-PREMIUM DM LISTENER
         if not is_design_channel:
@@ -909,4 +1519,5 @@ async def setup(bot: commands.Bot):
     bot.add_view(RobloxVerificationView())
     bot.add_view(RobloxUnsyncView())
     bot.add_view(PremiumMissingBotView())
+    bot.add_view(GiveawayView())
     await bot.add_cog(FeaturesCog(bot))
