@@ -38,13 +38,15 @@ bot = commands.Bot(
 @bot.event
 async def setup_hook():
     try:
-        if "cogs.bot" not in bot.extensions:
-            await bot.load_extension("cogs.bot")
-            print("[Setup Hook] Loaded extension: cogs.bot")
-        else:
-            await bot.reload_extension("cogs.bot")
-            print("[Setup Hook] Reloaded extension: cogs.bot")
-            
+        # features must load first: commands.py imports helpers from it
+        for ext in ("cogs.features", "cogs.commands"):
+            if ext not in bot.extensions:
+                await bot.load_extension(ext)
+                print(f"[Setup Hook] Loaded extension: {ext}")
+            else:
+                await bot.reload_extension(ext)
+                print(f"[Setup Hook] Reloaded extension: {ext}")
+
         synced = await bot.tree.sync()
         print(f"[Setup Hook] Successfully registered {len(synced)} slash commands globally!")
     except Exception as e:
