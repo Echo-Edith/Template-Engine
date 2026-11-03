@@ -987,7 +987,7 @@ class CommandsCog(commands.Cog):
         await interaction.response.send_message(embed=embed, allowed_mentions=NO_PINGS)
 
     @app_commands.command(name="timestamp", description="Get Discord timestamp codes you can copy.")
-    @app_commands.describe(time="Optional. A duration from now (2h, 1d), a date like 2026-12-25 18:00 (UTC), or a unix time. Empty = now.")
+    @app_commands.describe(time="Optional: 2h, 1d, a UTC date like 2026-12-25 18:00, or a unix time. Empty = now.")
     async def timestamp_cmd(self, interaction: discord.Interaction, time: Optional[str] = None):
         now = datetime.now(timezone.utc)
         target = now
