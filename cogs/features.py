@@ -5,7 +5,7 @@ import random
 import asyncio
 import aiohttp
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import discord
 from discord.ext import commands, tasks
@@ -853,6 +853,61 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
 
 
 # -------------------------------------------------------------
+# BUILD SAFETY CHECK
+# A build deletes every channel and role in the target server, so only the
+# server owner (or an Administrator of that server) may start one.
+# The bot owner is always allowed.
+# -------------------------------------------------------------
+BUILD_ALLOW_ADMINS = True  # set to False to allow the server owner only
+
+
+async def fetch_target_guild(bot, guild_id: int) -> Optional[discord.Guild]:
+    if not guild_id:
+        return None
+    guild = bot.get_guild(guild_id)
+    if guild:
+        return guild
+    try:
+        return await bot.fetch_guild(guild_id)
+    except Exception:
+        return None
+
+
+async def can_build_in_guild(guild: discord.Guild, user_id) -> Tuple[bool, str]:
+    """Returns (allowed, reason). The reason is shown to the user when not allowed."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return False, "The submitting user could not be identified."
+
+    if uid == BOT_OWNER_ID or guild.owner_id == uid:
+        return True, ""
+
+    member = guild.get_member(uid)
+    if member is None:
+        try:
+            member = await guild.fetch_member(uid)
+        except Exception:
+            member = None
+    if member is None:
+        print(f"[Build Blocked] User {uid} is not a member of {guild.name} ({guild.id}).")
+        return False, "You are not a member of the target server."
+
+    if BUILD_ALLOW_ADMINS and member.guild_permissions.administrator:
+        return True, ""
+
+    print(f"[Build Blocked] User {uid} is not the owner or an administrator of {guild.name} ({guild.id}).")
+    who = "the server owner or an Administrator" if BUILD_ALLOW_ADMINS else "the server owner"
+    return False, f"Only {who} of that server can build a layout there. Ask them to submit the design."
+
+
+def build_denied_embed(guild_name: str, reason: str) -> discord.Embed:
+    embed = embed_err("Build Not Allowed", f"{reason}\n\nTarget server: **{guild_name}**")
+    embed.set_footer(text="Nothing was changed in the server.")
+    return embed
+
+
+# -------------------------------------------------------------
 # ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
 # -------------------------------------------------------------
 class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
@@ -1047,6 +1102,11 @@ class PremiumMissingBotView(discord.ui.View):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
+        allowed, reason = await can_build_in_guild(guild, interaction.user.id)
+        if not allowed:
+            await interaction.followup.send(embed=build_denied_embed(guild.name, reason), ephemeral=True)
+            return
+
         embed = discord.Embed(
             title="Bot Detected! Deploying Layout...",
             description=f"Successfully joined **{guild.name}**!\nNow wiping existing channels/roles and deploying your blueprint...",
@@ -1085,6 +1145,17 @@ class NonPremiumDeploymentView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
+
+        # Safety check first, so a blocked user never uses up a purchase
+        early_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
+        early_guild = await fetch_target_guild(self.bot or interaction.client, early_gid)
+        if not early_guild:
+            await interaction.followup.send("Error: The bot is no longer in the target server.", ephemeral=True)
+            return
+        allowed, reason = await can_build_in_guild(early_guild, interaction.user.id)
+        if not allowed:
+            await interaction.followup.send(embed=build_denied_embed(early_guild.name, reason), ephemeral=True)
+            return
 
         roblox_id = None
         if db_users is not None:
@@ -1201,6 +1272,18 @@ class NonPremiumDeploymentView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
+
+        # Safety check first, so a blocked user never loses points
+        early_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
+        early_guild = await fetch_target_guild(self.bot or interaction.client, early_gid)
+        if not early_guild:
+            await interaction.followup.send("Error: Bot is missing from target server.", ephemeral=True)
+            return
+        allowed, reason = await can_build_in_guild(early_guild, interaction.user.id)
+        if not allowed:
+            await interaction.followup.send(embed=build_denied_embed(early_guild.name, reason), ephemeral=True)
+            return
+
         current_pts = get_user_points(user_id)
 
         if current_pts < 100:
@@ -1423,6 +1506,11 @@ class FeaturesCog(commands.Cog):
         if not json_attachment:
             return
 
+        # The website posts submissions with the bot's own token. Anyone else could fake the submitting user.
+        if message.author.id not in (self.bot.user.id, BOT_OWNER_ID):
+            print(f"[Auto-Build Blocked] Ignored a design file posted by {message.author} ({message.author.id}).")
+            return
+
         try:
             attachment_bytes = await json_attachment.read()
             payload = json.loads(attachment_bytes.decode("utf-8"))
@@ -1450,6 +1538,11 @@ class FeaturesCog(commands.Cog):
 
         if not guild:
             await self.notify_missing_bot(submitting_user_id, target_guild_id, layout)
+            return
+
+        allowed, reason = await can_build_in_guild(guild, submitting_user_id)
+        if not allowed:
+            await self.notify_build_denied(submitting_user_id, guild.name, reason)
             return
 
         if not is_premium_submission and str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
@@ -1546,6 +1639,13 @@ class FeaturesCog(commands.Cog):
                 print(f"[Fallback Success] Posted deployment embed in submission channel #{fallback_channel.name}")
             except Exception as chan_err:
                 print(f"[Fallback Channel Send Error] Could not post to submission channel: {chan_err}")
+
+    async def notify_build_denied(self, user_id: str, guild_name: str, reason: str):
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+            await user.send(embed=build_denied_embed(guild_name, reason))
+        except Exception as e:
+            print(f"[DM Warning] Failed sending build denied notice to {user_id}: {e}")
 
     async def notify_missing_bot(self, user_id: str, target_guild_id: str, layout: dict = None):
         try:
