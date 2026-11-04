@@ -211,6 +211,119 @@ def format_channel_name(name: str) -> str:
 
 
 # -------------------------------------------------------------
+# AUTO-BUILD PERMISSION HELPERS
+# The website saves permissions in two shapes:
+#   per role : {"Member": {"view": True, "send": False, ...}, "@everyone": {...}}
+#   flat     : {"view": True, "send": False, ...}   (from the AI, describes @everyone)
+# -------------------------------------------------------------
+ROLE_PERMISSION_ALIASES = {"manage_server": "manage_guild"}
+
+# website permission id -> Discord channel overwrite field
+CHANNEL_PERMISSION_MAP = {
+    "view": "view_channel",
+    "send": "send_messages",
+    "embed": "embed_links",
+    "attach": "attach_files",
+    "history": "read_message_history",
+    "connect": "connect",
+    "speak": "speak",
+    "manage": "manage_channels",
+}
+
+# For these, an unchecked box means "deny". For the others, unchecked means "leave the default".
+DENY_WHEN_UNCHECKED = {"view", "send", "connect", "speak"}
+
+
+def build_role_permissions(perm_dict) -> Optional[discord.Permissions]:
+    """Turns the website's role permission toggles into a Permissions object (None = keep Discord's default)."""
+    if not isinstance(perm_dict, dict) or not perm_dict:
+        return None
+    flags = {}
+    for key, value in perm_dict.items():
+        name = ROLE_PERMISSION_ALIASES.get(str(key), str(key))
+        if name == "permissions":
+            continue
+        try:
+            discord.Permissions(**{name: True})  # raises TypeError for unknown permission names
+        except TypeError:
+            print(f"[Auto-Build Permission Warning] Unknown role permission ignored: {key}")
+            continue
+        flags[name] = bool(value)
+    return discord.Permissions(**flags) if flags else None
+
+
+def resolve_layout_role(name: str, created_roles: dict, guild: discord.Guild) -> Optional[discord.Role]:
+    """Finds the Discord role for a role name used in the layout (@everyone or one we just created)."""
+    raw = str(name or "").strip()
+    if raw.lower() in ("@everyone", "everyone"):
+        return guild.default_role
+    if raw in created_roles:
+        return created_roles[raw]
+    cleaned = strip_emojis(raw)
+    if cleaned in created_roles:
+        return created_roles[cleaned]
+    lowered = (cleaned or raw).lower()
+    for key, role in created_roles.items():
+        if key.lower() == lowered:
+            return role
+    return None
+
+
+def _copy_overwrites(base: Optional[dict]) -> dict:
+    copied = {}
+    for target, overwrite in (base or {}).items():
+        copied[target] = discord.PermissionOverwrite(**{k: v for k, v in overwrite if v is not None})
+    return copied
+
+
+def collect_overwrites(guild: discord.Guild, created_roles: dict, permissions, read_only: bool = False,
+                       base: Optional[dict] = None) -> dict:
+    """Builds {role: PermissionOverwrite} for a category or channel. `base` (the category) is merged in first."""
+    overwrites = _copy_overwrites(base)
+
+    if isinstance(permissions, dict):
+        for key, value in permissions.items():
+            if isinstance(value, dict):
+                role = resolve_layout_role(key, created_roles, guild)
+                if role is None:
+                    print(f"[Auto-Build Permission Warning] Role not found for permissions: {key}")
+                    continue
+                overwrite = overwrites.get(role) or discord.PermissionOverwrite()
+                for perm_id, field in CHANNEL_PERMISSION_MAP.items():
+                    if perm_id not in value:
+                        continue
+                    if value[perm_id]:
+                        setattr(overwrite, field, True)
+                    elif perm_id in DENY_WHEN_UNCHECKED:
+                        setattr(overwrite, field, False)
+                overwrites[role] = overwrite
+            elif isinstance(value, bool) and key in CHANNEL_PERMISSION_MAP and value is False:
+                # Flat format (from the AI) describes @everyone. Only "False" changes anything.
+                overwrite = overwrites.get(guild.default_role) or discord.PermissionOverwrite()
+                setattr(overwrite, CHANNEL_PERMISSION_MAP[key], False)
+                overwrites[guild.default_role] = overwrite
+
+    if read_only:
+        overwrite = overwrites.get(guild.default_role) or discord.PermissionOverwrite()
+        overwrite.send_messages = False
+        overwrites[guild.default_role] = overwrite
+
+    return overwrites
+
+
+async def create_with_overwrite_fallback(create_fn, label: str, **kwargs):
+    """Creates a channel or category. If Discord rejects the permission overwrites, retries without them."""
+    try:
+        return await create_fn(**kwargs)
+    except discord.HTTPException as e:
+        if not kwargs.get("overwrites"):
+            raise
+        print(f"[Auto-Build Permission Warning] {label}: {e}. Retrying without permission overwrites.")
+        kwargs.pop("overwrites")
+        return await create_fn(**kwargs)
+
+
+# -------------------------------------------------------------
 # SHARED EMBED HELPERS
 # -------------------------------------------------------------
 COLOR_PURPLE = 0x8B5CF6
@@ -1487,12 +1600,24 @@ class FeaturesCog(commands.Cog):
                 except ValueError:
                     color_int = 0x8b5cf6
 
+                create_kwargs = {
+                    "name": role_name,
+                    "color": discord.Color(color_int),
+                    "reason": "Template Engine Auto-Build",
+                }
+                role_perms = build_role_permissions(r_info.get("permissions"))
+                if role_perms is not None:
+                    create_kwargs["permissions"] = role_perms
+
                 try:
-                    role = await guild.create_role(
-                        name=role_name,
-                        color=discord.Color(color_int),
-                        reason="Template Engine Auto-Build"
-                    )
+                    try:
+                        role = await guild.create_role(**create_kwargs)
+                    except discord.HTTPException as perm_err:
+                        if "permissions" not in create_kwargs:
+                            raise
+                        print(f"[Auto-Build Role Permission Warning] {role_name}: {perm_err}. Retrying without permissions.")
+                        create_kwargs.pop("permissions")
+                        role = await guild.create_role(**create_kwargs)
                     created_roles[role_name] = role
                     await asyncio.sleep(0.2)
                 except Exception as e:
@@ -1504,41 +1629,45 @@ class FeaturesCog(commands.Cog):
                 cat_clean_name = strip_emojis(cat_raw_name) or cat_raw_name
 
                 try:
-                    category = await guild.create_category(
-                        name=cat_clean_name,
-                        reason="Template Engine Auto-Build"
-                    )
+                    category_overwrites = collect_overwrites(guild, created_roles, cat_data.get("permissions"))
+                    cat_kwargs = {"name": cat_clean_name, "reason": "Template Engine Auto-Build"}
+                    if category_overwrites:
+                        cat_kwargs["overwrites"] = category_overwrites
+                    category = await create_with_overwrite_fallback(guild.create_category, cat_clean_name, **cat_kwargs)
                     await asyncio.sleep(0.2)
+                except Exception as e:
+                    print(f"[Auto-Build Cat Error] {cat_clean_name}: {e}")
+                    continue
 
-                    for chan in cat_data.get("channels", []):
-                        chan_raw_name = chan.get("name") or chan.get("clean_name") or "channel"
-                        chan_clean_name = format_channel_name(chan_raw_name)
+                for chan in cat_data.get("channels", []):
+                    chan_label = str(chan.get("name") or chan.get("clean_name") or "channel")
+                    try:
+                        chan_clean_name = format_channel_name(chan_label)
                         chan_type = chan.get("type", "text")
                         chan_topic = chan.get("topic", "")
 
+                        # Category permissions first, then this channel's own permissions on top
+                        overwrites = collect_overwrites(
+                            guild, created_roles, chan.get("permissions"),
+                            read_only=bool(chan.get("read_only")), base=category_overwrites
+                        )
+                        kwargs = {"name": chan_clean_name, "reason": "Template Engine Auto-Build"}
+                        if overwrites:
+                            kwargs["overwrites"] = overwrites
+
                         if chan_type == "voice":
-                            await category.create_voice_channel(
-                                name=chan_clean_name,
-                                reason="Template Engine Auto-Build"
-                            )
+                            await create_with_overwrite_fallback(category.create_voice_channel, chan_clean_name, **kwargs)
                         elif chan_type in ["forum", "stage"]:
-                            await category.create_text_channel(
-                                name=chan_clean_name,
-                                topic=f"[{chan_type.upper()}] {chan_topic}",
-                                reason="Template Engine Auto-Build"
-                            )
+                            kwargs["topic"] = f"[{chan_type.upper()}] {chan_topic}"
+                            await create_with_overwrite_fallback(category.create_text_channel, chan_clean_name, **kwargs)
                         else:
-                            await category.create_text_channel(
-                                name=chan_clean_name,
-                                topic=chan_topic,
-                                reason="Template Engine Auto-Build"
-                            )
+                            kwargs["topic"] = chan_topic
+                            await create_with_overwrite_fallback(category.create_text_channel, chan_clean_name, **kwargs)
                         await asyncio.sleep(0.2)
-                except Exception as e:
-                    print(f"[Auto-Build Cat Error] {cat_clean_name}: {e}")
+                    except Exception as e:
+                        print(f"[Auto-Build Channel Error] {chan_label}: {e}")
         except Exception as top_err:
             print(f"[Auto-Build Execution Error] {top_err}")
-
 
 
 async def setup(bot: commands.Bot):

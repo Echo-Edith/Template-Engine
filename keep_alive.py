@@ -72,7 +72,7 @@ def index():
         roblox_user=roblox_user,
         is_premium=is_premium,
         discord_client_id=DISCORD_CLIENT_ID,
-        roblox_store_url="https://www.roblox.com/games/refer?PlaceId=123456789"
+        roblox_store_url=os.environ.get("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
     )
 
 
@@ -245,11 +245,14 @@ def submit_design_endpoint():
 
     json_bytes = json.dumps(attachment_data, indent=2).encode("utf-8")
 
+    delivered = False
+    delivery_error = "The bot token is not configured on the server."
+
     if DISCORD_BOT_TOKEN:
         try:
             url = f"https://discord.com/api/v10/channels/{target_channel_id}/messages"
             headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
-            
+
             payload_json = {
                 "embeds": [embed_payload]
             }
@@ -259,11 +262,21 @@ def submit_design_endpoint():
                 "files[0]": ("blueprint.json", json_bytes, "application/json")
             }
 
-            res = requests.post(url, headers=headers, files=files)
-            if res.status_code not in (200, 201):
+            res = requests.post(url, headers=headers, files=files, timeout=20)
+            if res.status_code in (200, 201):
+                delivered = True
+            else:
+                delivery_error = f"Discord rejected the submission (HTTP {res.status_code})."
                 print(f"[Discord API Log Drop] Status {res.status_code}: {res.text}")
         except Exception as e:
+            delivery_error = "Could not reach Discord."
             print(f"[Discord Log Exception] {e}")
+
+    if not delivered:
+        return jsonify({
+            "success": False,
+            "error": f"Your design was not sent. {delivery_error} Please try again later."
+        }), 502
 
     return jsonify({
         "success": True,

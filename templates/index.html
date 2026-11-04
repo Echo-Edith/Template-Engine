@@ -999,10 +999,20 @@ function stripEmoji(str) {
     return (str || '').replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '').trim();
 }
 
+function escapeHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function formatDiscordChannelName(name) {
+    // Keeps letters and numbers from any language (for example Japanese), plus - and _
     return stripEmoji(name)
         .toLowerCase()
-        .replace(/[^a-z0-9\s-_]/g, '')
+        .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, '')
         .replace(/\s+/g, '-');
 }
 
@@ -1063,7 +1073,7 @@ function renderSidebar() {
         const catDiv = document.createElement('div');
         catDiv.className = 'discord-category';
         catDiv.dataset.catIdx = cIdx;
-        const cleanCatName = stripEmoji(cat.name || 'CATEGORY');
+        const cleanCatName = escapeHtml(stripEmoji(cat.name || 'CATEGORY'));
 
         const headerDiv = document.createElement('div');
         headerDiv.className = 'discord-category-title';
@@ -1165,6 +1175,10 @@ function updateActiveChannel() {
     chan.type = document.getElementById('edit-chan-type').value;
     chan.topic = document.getElementById('edit-chan-topic').value;
     chan.read_only = document.getElementById('edit-chan-readonly').checked;
+    // Keep the AI's "send" permission in step with the Read-Only switch
+    if (chan.permissions && typeof chan.permissions.send === 'boolean') {
+        chan.permissions.send = !chan.read_only;
+    }
     renderSidebar();
 }
 
@@ -1207,7 +1221,7 @@ function initPermissionsPage() {
     const roleSelector = document.getElementById('perm-role-selector');
     roleSelector.innerHTML = `<option value="@everyone">@everyone</option>`;
     (currentLayout.roles || []).forEach(r => {
-        roleSelector.innerHTML += `<option value="${r.name}">${r.name}</option>`;
+        roleSelector.innerHTML += `<option value="${escapeHtml(r.name)}">${escapeHtml(r.name)}</option>`;
     });
     populateMultiSelectChannelList();
     renderInlinePermissionsGrid();
@@ -1218,7 +1232,7 @@ function populateMultiSelectChannelList() {
     syncContainer.innerHTML = '';
     (currentLayout.categories || []).forEach((cat, cIdx) => {
         const catKey = `cat-${cIdx}`;
-        const catName = stripEmoji(cat.name || `Category ${cIdx + 1}`);
+        const catName = escapeHtml(stripEmoji(cat.name || `Category ${cIdx + 1}`));
         syncContainer.innerHTML += `<label class="sync-item"> <input type="checkbox" value="${catKey}" class="target-perm-cb"> <span style="font-weight:700; color:#fff;">📁 CATEGORY: ${catName}</span> </label>`;
         (cat.channels || []).forEach((chan, chIdx) => {
             const chanKey = `chan-${cIdx}-${chIdx}`;
@@ -1302,8 +1316,8 @@ function initRolesEditorPage() {
         card.innerHTML = `
             <div class="role-card-header">
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <input type="color" value="${role.color || '#8b5cf6'}" style="width:28px; height:28px; border:none; background:none; cursor:pointer;" onchange="updateRoleColor(${idx}, this.value)">
-                    <input type="text" class="form-control" value="${role.name}" style="padding:6px 10px; font-weight:700;" oninput="updateRoleName(${idx}, this.value)">
+                    <input type="color" value="${escapeHtml(role.color || '#8b5cf6')}" style="width:28px; height:28px; border:none; background:none; cursor:pointer;" onchange="updateRoleColor(${idx}, this.value)">
+                    <input type="text" class="form-control" value="${escapeHtml(role.name)}" style="padding:6px 10px; font-weight:700;" oninput="updateRoleName(${idx}, this.value)">
                 </div>
                 <i class="fa-solid fa-trash" style="color:var(--accent-red); cursor:pointer;" onclick="deleteRole(${idx})"></i>
             </div>
@@ -1410,28 +1424,41 @@ async function handleSubmitDesign() {
         layout: currentLayout
     };
 
+    let succeeded = false;
     try {
         const response = await fetch('/api/submit-design', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        const resData = await response.json();
-        const heading = document.getElementById('final-title-heading');
-        const desc = document.getElementById('final-desc-text');
-        if (resData.is_premium) {
-            if (heading) heading.innerText = "TE Premium Design Dispatched!";
-            if (desc) desc.innerText = "Your layout blueprint has been sent directly to the bot for auto-deployment!";
+        let resData = {};
+        try { resData = await response.json(); } catch (parseErr) { resData = {}; }
+
+        if (response.ok && resData.success) {
+            succeeded = true;
+            const heading = document.getElementById('final-title-heading');
+            const desc = document.getElementById('final-desc-text');
+            if (resData.is_premium) {
+                if (heading) heading.innerText = "TE Premium Design Dispatched!";
+                if (desc) desc.innerText = "Your layout blueprint has been sent directly to the bot for auto-deployment!";
+            } else {
+                if (heading) heading.innerText = "Blueprint Submitted to Staff!";
+                if (desc) desc.innerText = "Your blueprint has been sent to staff for deployment review.";
+            }
+        } else if (response.status === 401) {
+            alert('Your login has expired. Please log in with Discord again, then submit.');
         } else {
-            if (heading) heading.innerText = "Blueprint Submitted to Staff!";
-            if (desc) desc.innerText = "Your blueprint has been sent to staff for deployment review.";
+            alert(resData.error || 'Submission failed. Your design was not sent. Please try again.');
         }
     } catch (err) {
         console.error('Submission error:', err);
+        alert('Could not reach the server. Your design was not sent. Please check your connection and try again.');
     } finally {
         btn.disabled = false;
         applyPremiumTheme();
-        navigateTo('page-final');
+        if (succeeded) {
+            navigateTo('page-final');
+        }
     }
 }
 
