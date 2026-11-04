@@ -42,4 +42,4 @@ app.get('/api/user-points/:discord_id', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`[Render Express API] Running on port ${PORT}`);
-});p
+});

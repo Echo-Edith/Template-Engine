@@ -1,4 +1,5 @@
 import os
+import secrets
 import json
 import asyncio
 import requests
@@ -9,7 +10,11 @@ from pymongo import MongoClient
 import ai_brain
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SESSION_SECRET", "te_premium_secret_key_1337").strip()
+app.secret_key = os.environ.get("SESSION_SECRET", "").strip()
+if not app.secret_key:
+    # No hard-coded secret (anyone could forge logins with it). Set SESSION_SECRET in production.
+    print("[Warning] SESSION_SECRET is not set. Using a random key: logins reset on every restart.")
+    app.secret_key = secrets.token_hex(32)
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "").strip()
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
@@ -166,7 +171,9 @@ def generate_blueprint_endpoint():
         if not prompt:
             return jsonify({"success": False, "error": "Prompt is required."}), 400
 
-        user = session.get("user") or {"id": "0", "username": "Anonymous"}
+        user = session.get("user")
+        if not user:
+            return jsonify({"success": False, "error": "Unauthorized. Please log in with Discord."}), 401
 
         # Call ai_brain.generate_server_layout directly via asyncio
         loop = asyncio.new_event_loop()
@@ -303,4 +310,4 @@ def submit_design_endpoint():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=os.environ.get("FLASK_DEBUG") == "1")
