@@ -32,6 +32,8 @@ db_counters = None
 db_afk = None
 db_reminders = None
 db_giveaways = None
+db_settings = None
+db_promos = None
 
 if MONGO_URI:
     try:
@@ -48,6 +50,8 @@ if MONGO_URI:
         db_afk = db["afk_users"]
         db_reminders = db["reminders"]
         db_giveaways = db["giveaways"]
+        db_settings = db["settings"]
+        db_promos = db["promo_codes"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -682,6 +686,12 @@ def delete_giveaway_record(message_id: str):
 # -------------------------------------------------------------
 # GIVEAWAY ENGINE
 # -------------------------------------------------------------
+GIVEAWAY_BANNER_URL = os.getenv(
+    "GIVEAWAY_BANNER_URL",
+    "https://cdn.discordapp.com/attachments/1564516558926123018/1567425359517978645/F3364D80-B8EA-45D9-9AC8-AF9C21B59C3F.png?ex=6aec221f&is=6aead09f&hm=26c665bf4404913fee1bd3ec6156dbc0721d0a09e34311ad788a91eac0fc22bb&"
+).strip()
+
+
 def build_giveaway_embed(gw: dict) -> discord.Embed:
     end_ts = int(gw["end_ts"])
     host = f"<@{gw['host_id']}>"
@@ -700,6 +710,8 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
             description=f"Click **Enter** to join the giveaway!\n\n**Ends:** <t:{end_ts}:R>\n**Hosted by:** {host}\n**Winners:** `{int(gw['winners'])}`",
             color=COLOR_PURPLE
         )
+    if GIVEAWAY_BANNER_URL:
+        embed.set_image(url=GIVEAWAY_BANNER_URL)
     return embed
 
 
@@ -905,6 +917,243 @@ def build_denied_embed(guild_name: str, reason: str) -> discord.Embed:
     embed = embed_err("Build Not Allowed", f"{reason}\n\nTarget server: **{guild_name}**")
     embed.set_footer(text="Nothing was changed in the server.")
     return embed
+
+
+# -------------------------------------------------------------
+# PRICES (shared with the website through MongoDB: settings / "prices")
+# -------------------------------------------------------------
+DEFAULT_PRICES = {"subscription_robux": 299, "points_cost": 100, "dev_product_robux": None}
+LOCAL_PRICES: Dict[str, int] = {}
+
+
+def get_prices() -> dict:
+    """Current prices. dev_product_robux stays None until it is known (set by /change-price)."""
+    prices = dict(DEFAULT_PRICES)
+    prices.update({k: v for k, v in LOCAL_PRICES.items() if k in prices})
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "prices"}) or {}
+            for key in prices:
+                value = doc.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    prices[key] = value
+        except Exception as e:
+            print(f"[Prices Read Error] {e}")
+    return prices
+
+
+def set_price(key: str, value: int) -> bool:
+    """Saves one price. Returns False if it could not be saved to the database."""
+    if key not in DEFAULT_PRICES:
+        return False
+    LOCAL_PRICES[key] = int(value)
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": "prices"}, {"$set": {key: int(value)}}, upsert=True)
+        except Exception as e:
+            print(f"[Prices Save Error] {e}")
+            return False
+    return True
+
+
+# -------------------------------------------------------------
+# PROMO CODES
+# A code looks like:
+#   {"code", "points", "created_by", "created_at", "expires_at" (None = never),
+#    "max_uses" (None = unlimited), "uses", "redeemed_by": [user ids]}
+# -------------------------------------------------------------
+PROMO_LOG_CHANNEL_ID = int(os.getenv("PROMO_LOG_CHANNEL_ID", "1567516050218811495"))
+PROMO_CODE_RE = re.compile(r"^[A-Z0-9_-]{3,32}$")
+LOCAL_PROMOS: Dict[str, dict] = {}
+
+
+def normalize_promo_code(code) -> str:
+    return re.sub(r"\s+", "", str(code or "")).upper()
+
+
+def promo_is_expired(promo: dict, now: Optional[float] = None) -> bool:
+    expires = promo.get("expires_at")
+    if expires is None:
+        return False
+    return expires <= (now if now is not None else datetime.now(timezone.utc).timestamp())
+
+
+def promo_is_used_up(promo: dict) -> bool:
+    limit = promo.get("max_uses")
+    return limit is not None and int(promo.get("uses", 0)) >= int(limit)
+
+
+def promo_is_active(promo: dict) -> bool:
+    return not promo_is_expired(promo) and not promo_is_used_up(promo)
+
+
+def create_promo(code: str, points: int, created_by, expires_at: Optional[float] = None,
+                 max_uses: Optional[int] = None) -> Optional[dict]:
+    """Creates a code. Returns None if the code already exists."""
+    code = normalize_promo_code(code)
+    doc = {
+        "code": code,
+        "points": int(points),
+        "created_by": str(created_by),
+        "created_at": datetime.now(timezone.utc).timestamp(),
+        "expires_at": expires_at,
+        "max_uses": max_uses,
+        "uses": 0,
+        "redeemed_by": [],
+    }
+    if db_promos is not None:
+        try:
+            result = db_promos.update_one({"code": code}, {"$setOnInsert": doc}, upsert=True)
+            return doc if result.upserted_id is not None else None
+        except Exception as e:
+            print(f"[Promo Create Error] {e}")
+    if code in LOCAL_PROMOS:
+        return None
+    LOCAL_PROMOS[code] = doc
+    return dict(doc)
+
+
+def get_promo(code: str) -> Optional[dict]:
+    code = normalize_promo_code(code)
+    if db_promos is not None:
+        try:
+            return db_promos.find_one({"code": code}, {"_id": 0})
+        except Exception as e:
+            print(f"[Promo Fetch Error] {e}")
+    promo = LOCAL_PROMOS.get(code)
+    return dict(promo) if promo else None
+
+
+def list_promos(active_only: bool = True) -> List[dict]:
+    promos: List[dict] = []
+    loaded = False
+    if db_promos is not None:
+        try:
+            promos = list(db_promos.find({}, {"_id": 0}))
+            loaded = True
+        except Exception as e:
+            print(f"[Promo List Error] {e}")
+    if not loaded:
+        promos = [dict(p) for p in LOCAL_PROMOS.values()]
+    if active_only:
+        promos = [p for p in promos if promo_is_active(p)]
+    promos.sort(key=lambda p: p.get("created_at", 0), reverse=True)
+    return promos
+
+
+def _promo_failure_reason(promo: Optional[dict], uid: str) -> str:
+    if not promo:
+        return "not_found"
+    if uid in promo.get("redeemed_by", []):
+        return "already_redeemed"
+    if promo_is_expired(promo):
+        return "expired"
+    if promo_is_used_up(promo):
+        return "used_up"
+    return "error"
+
+
+def redeem_promo(code: str, user_id) -> Tuple[str, Optional[dict]]:
+    """Claims a code for a user. Returns (status, promo).
+    status: ok | not_found | already_redeemed | expired | used_up | error.
+    The claim is one atomic step, so two people cannot take the last use at the same time."""
+    code = normalize_promo_code(code)
+    uid = str(user_id)
+    now = datetime.now(timezone.utc).timestamp()
+
+    if db_promos is not None:
+        try:
+            promo = db_promos.find_one_and_update(
+                {
+                    "code": code,
+                    "redeemed_by": {"$ne": uid},
+                    "$and": [
+                        {"$or": [{"expires_at": None}, {"expires_at": {"$gt": now}}]},
+                        {"$or": [{"max_uses": None}, {"$expr": {"$lt": ["$uses", "$max_uses"]}}]},
+                    ],
+                },
+                {"$inc": {"uses": 1}, "$push": {"redeemed_by": uid}},
+                return_document=ReturnDocument.AFTER,
+                projection={"_id": 0},
+            )
+            if promo:
+                return "ok", promo
+            current = db_promos.find_one({"code": code}, {"_id": 0})
+            return _promo_failure_reason(current, uid), current
+        except Exception as e:
+            print(f"[Promo Redeem Error] {e}")
+
+    promo = LOCAL_PROMOS.get(code)
+    if promo is None or uid in promo["redeemed_by"] or promo_is_expired(promo, now) or promo_is_used_up(promo):
+        return _promo_failure_reason(promo, uid), (dict(promo) if promo else None)
+    promo["uses"] += 1
+    promo["redeemed_by"].append(uid)
+    return "ok", dict(promo)
+
+
+def update_promo(code: str, updates: dict) -> Optional[dict]:
+    """Edits points / expires_at / max_uses. Returns the updated code, or None if it does not exist."""
+    code = normalize_promo_code(code)
+    updates = {k: v for k, v in updates.items() if k in ("points", "expires_at", "max_uses")}
+    if not updates:
+        return get_promo(code)
+    if db_promos is not None:
+        try:
+            return db_promos.find_one_and_update(
+                {"code": code}, {"$set": updates}, return_document=ReturnDocument.AFTER, projection={"_id": 0}
+            )
+        except Exception as e:
+            print(f"[Promo Update Error] {e}")
+    promo = LOCAL_PROMOS.get(code)
+    if not promo:
+        return None
+    promo.update(updates)
+    return dict(promo)
+
+
+def delete_promo(code: str) -> bool:
+    code = normalize_promo_code(code)
+    if db_promos is not None:
+        try:
+            return db_promos.delete_one({"code": code}).deleted_count > 0
+        except Exception as e:
+            print(f"[Promo Delete Error] {e}")
+    return LOCAL_PROMOS.pop(code, None) is not None
+
+
+async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, new_points: int, where: str):
+    """Posts every redeem to the promo log channel."""
+    channel = bot.get_channel(PROMO_LOG_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(PROMO_LOG_CHANNEL_ID)
+        except Exception as e:
+            print(f"[Promo Log Error] Could not open log channel {PROMO_LOG_CHANNEL_ID}: {e}")
+            return
+
+    limit = promo.get("max_uses")
+    uses = f"{promo.get('uses', 0)}/{limit}" if limit is not None else f"{promo.get('uses', 0)}/unlimited"
+    expires = promo.get("expires_at")
+
+    embed = discord.Embed(
+        title="Promo Code Redeemed",
+        description=f"{user.mention} redeemed a promo code.",
+        color=COLOR_GREEN,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="User", value=f"`{user}`\n`{user.id}`", inline=True)
+    embed.add_field(name="Code", value=f"`{promo['code']}`", inline=True)
+    embed.add_field(name="Reward", value=f"`+{int(promo['points']):,} pts`", inline=True)
+    embed.add_field(name="Previous Balance", value=f"`{old_points:,} pts`", inline=True)
+    embed.add_field(name="New Balance", value=f"`{new_points:,} pts`", inline=True)
+    embed.add_field(name="Code Uses", value=f"`{uses}`", inline=True)
+    embed.add_field(name="Code Expires", value=f"<t:{int(expires)}:R>" if expires else "`Never`", inline=True)
+    embed.add_field(name="Redeemed In", value=f"`{where}`", inline=True)
+    embed.set_thumbnail(url=user.display_avatar.url)
+    try:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except Exception as e:
+        print(f"[Promo Log Error] {e}")
 
 
 # -------------------------------------------------------------
@@ -1130,9 +1379,12 @@ class PremiumMissingBotView(discord.ui.View):
 # INTERACTIVE UI FOR NON-PREMIUM VERIFICATION & POINTS PURCHASE
 # -------------------------------------------------------------
 class NonPremiumDeploymentView(discord.ui.View):
-    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, dev_product_url: str = ""):
+    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, dev_product_url: str = "", points_cost: int = 100):
         super().__init__(timeout=None)
         self.bot = bot
+        # The price shown in the DM is the price charged, even if /change-price runs later
+        self.points_cost = int(points_cost)
+        self.use_points_btn.label = f"Use Points ({self.points_cost:,} Pts)"
         self.submitting_user_id = str(submitting_user_id)
         self.target_guild_id = str(target_guild_id)
         self.layout = layout or {}
@@ -1286,16 +1538,17 @@ class NonPremiumDeploymentView(discord.ui.View):
 
         current_pts = get_user_points(user_id)
 
-        if current_pts < 100:
+        cost = self.points_cost
+        if current_pts < cost:
             embed = discord.Embed(
                 title="Insufficient Points",
-                description=f"You need at least 100 points to deploy this layout.\n\nYour Balance: {current_pts} pts\nMissing: {100 - current_pts} pts",
+                description=f"You need at least {cost:,} points to deploy this layout.\n\nYour Balance: {current_pts:,} pts\nMissing: {cost - current_pts:,} pts",
                 color=0xF43F5E
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        new_total = add_user_points(user_id, -100)
+        new_total = add_user_points(user_id, -cost)
 
         bot_inst = self.bot or interaction.client
         target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
@@ -1313,7 +1566,7 @@ class NonPremiumDeploymentView(discord.ui.View):
 
         embed = discord.Embed(
             title="Points Redeemed! Deploying Layout...",
-            description=f"Deducted 100 points!\n\nUpdated Balance: {new_total:,} pts\nNow nuking and building {guild.name}...",
+            description=f"Deducted {cost:,} points!\n\nUpdated Balance: {new_total:,} pts\nNow nuking and building {guild.name}...",
             color=0x8B5CF6
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1555,6 +1808,9 @@ class FeaturesCog(commands.Cog):
     async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None):
         dev_product_url = os.getenv("ROBLOX_DEV_PRODUCT_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
         user_pts = get_user_points(user_id)
+        prices = get_prices()
+        points_cost = prices["points_cost"]
+        dev_price = prices["dev_product_robux"]
 
         embed = discord.Embed(
             title="Server Deployment Options",
@@ -1563,12 +1819,15 @@ class FeaturesCog(commands.Cog):
         )
         embed.add_field(
             name="Option 1: Buy Dev Product",
-            value="Purchase the single-use Roblox Developer Product, then click **Verify Purchase**.",
+            value=(
+                f"Purchase the single-use Roblox Developer Product (**{dev_price:,} Robux**), then click **Verify Purchase**."
+                if dev_price else "Purchase the single-use Roblox Developer Product, then click **Verify Purchase**."
+            ),
             inline=False
         )
         embed.add_field(
             name="Option 2: Redeem Points",
-            value=f"Use **100 server points** to deploy immediately.\nYour Points: {user_pts:,} pts",
+            value=f"Use **{points_cost:,} server points** to deploy immediately.\nYour Points: {user_pts:,} pts",
             inline=False
         )
 
@@ -1577,7 +1836,8 @@ class FeaturesCog(commands.Cog):
             submitting_user_id=user_id,
             target_guild_id=target_guild_id,
             layout=layout,
-            dev_product_url=dev_product_url
+            dev_product_url=dev_product_url,
+            points_cost=points_cost
         )
 
         dm_sent = False

@@ -731,13 +731,6 @@ background: var(--accent-purple-glow) !important;
 
 <!-- AUTHENTICATION & PREMIUM ACTIONS GRID -->
 <div class="auth-actions-grid">
-<!-- ADD BOT BUTTON AT THE VERY START (TOP) FOR ALL USERS -->
-{% if discord_client_id %}
-<a id="landing-bot-invite-btn-top" href="https://discord.com/api/oauth2/authorize?client_id={{ discord_client_id }}&permissions=8&scope=bot%20applications.commands" target="_blank" class="btn-glass btn-discord">
-<i class="fa-brands fa-discord fa-lg"></i> Add Bot to Server
-</a>
-{% endif %}
-
 {% if not user %}
 <a href="/login" class="btn-glass btn-discord">
 <i class="fa-brands fa-discord fa-lg"></i> Log In with Discord
@@ -746,7 +739,7 @@ background: var(--accent-purple-glow) !important;
 
 {% if roblox_store_url and not is_premium %}
 <a href="{{ roblox_store_url }}" target="_blank" class="btn-glass btn-premium">
-<i class="fa-solid fa-crown"></i> Get TE Premium (299 Robux)
+<i class="fa-solid fa-crown"></i> Get TE Premium ({{ subscription_price }} Robux)
 </a>
 {% endif %}
 </div>
@@ -890,6 +883,26 @@ Start New Layout
 
 </div>
 
+<!-- ADD BOT NOTICE POPUP (premium and non-premium) -->
+<div id="bot-notice-modal" class="modal-backdrop">
+<div class="modal-card" style="text-align: center;">
+<h3 style="font-size:1.1rem; font-weight:700; color: #f1c40f; margin-bottom:12px;">
+<i class="fa-solid fa-robot"></i> Did you add the bot?
+</h3>
+<p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
+The bot must be in your server before it can build your design. If you have not added it yet, add it now. If it is already there, you can continue.
+</p>
+<div style="display:flex; flex-direction:column; gap:10px;">
+<a id="bot-notice-add-btn" href="#" target="_blank" rel="noopener" class="btn-glass btn-discord">
+<i class="fa-brands fa-discord fa-lg"></i> Add Bot to Server
+</a>
+<button id="bot-notice-close-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" disabled onclick="closeBotNoticeModal()">
+Continue in 5s
+</button>
+</div>
+</div>
+</div>
+
 <!-- NON-PREMIUM ROBUX NOTICE MODAL -->
 <div id="robux-notice-modal" class="modal-backdrop">
 <div class="modal-card" style="text-align: center;">
@@ -900,7 +913,7 @@ Start New Layout
 <i class="fa-solid fa-xmark" onclick="closeRobuxNoticeModal()" style="cursor:pointer; font-size:1.2rem;"></i>
 </div>
 <div class="robux-badge">
-<strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout requires Robux unless you have an active <strong>TE Premium</strong> subscription (299 Robux/mo).
+<strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout requires Robux unless you have an active <strong>TE Premium</strong> subscription ({{ subscription_price }} Robux/mo).
 </div>
 <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
 Submitting this design will dispatch your blueprint to staff for manual deployment review.
@@ -969,7 +982,39 @@ const DISCORD_PERMISSIONS_LIST = [
     { id: "manage", label: "Manage Channel" }
 ];
 
+let botNoticeTimer = null;
+
 function proceedToGenerator() {
+    const modal = document.getElementById('bot-notice-modal');
+    if (!DISCORD_CLIENT_ID || !modal) {
+        navigateTo('page-generator');
+        return;
+    }
+    if (modal.style.display === 'flex') return; // already open (avoids double trigger)
+    updateBotInviteLink();
+    const closeBtn = document.getElementById('bot-notice-close-btn');
+    let left = 5;
+    closeBtn.disabled = true;
+    closeBtn.textContent = `Continue in ${left}s`;
+    modal.style.display = 'flex';
+    if (botNoticeTimer) clearInterval(botNoticeTimer);
+    botNoticeTimer = setInterval(() => {
+        left -= 1;
+        if (left <= 0) {
+            clearInterval(botNoticeTimer);
+            botNoticeTimer = null;
+            closeBtn.disabled = false;
+            closeBtn.textContent = 'I added the bot, continue';
+        } else {
+            closeBtn.textContent = `Continue in ${left}s`;
+        }
+    }, 1000);
+}
+
+function closeBotNoticeModal() {
+    const closeBtn = document.getElementById('bot-notice-close-btn');
+    if (closeBtn && closeBtn.disabled) return;
+    document.getElementById('bot-notice-modal').style.display = 'none';
     navigateTo('page-generator');
 }
 
@@ -1372,8 +1417,8 @@ function updateBotInviteLink() {
     const landingBtn = document.getElementById('landing-bot-invite-btn');
     if (landingBtn) landingBtn.href = inviteUrl;
 
-    const landingBtnTop = document.getElementById('landing-bot-invite-btn-top');
-    if (landingBtnTop) landingBtnTop.href = inviteUrl;
+    const noticeBtn = document.getElementById('bot-notice-add-btn');
+    if (noticeBtn) noticeBtn.href = inviteUrl;
 }
 
 function handleInitialSubmitClick() {

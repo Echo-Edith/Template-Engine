@@ -50,6 +50,19 @@ from cogs.features import (
     finish_giveaway,
     reroll_giveaway,
     get_giveaway_message,
+    COLOR_RED,
+    COLOR_GREEN,
+    get_prices,
+    set_price,
+    PROMO_CODE_RE,
+    normalize_promo_code,
+    create_promo,
+    get_promo,
+    list_promos,
+    redeem_promo,
+    update_promo,
+    delete_promo,
+    send_promo_log,
 )
 
 # -------------------------------------------------------------
@@ -60,7 +73,7 @@ from cogs.features import (
 # -------------------------------------------------------------
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox-user", "gameinfo", "timestamp", "remind",
-    "afk", "whois", "permissions", "rolelist", "channelstats",
+    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem",
 }
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
@@ -263,6 +276,353 @@ class AnnounceModal(discord.ui.Modal, title="Create Announcement"):
 
 
 # -------------------------------------------------------------
+# PRICE CHANGES (/change-price)
+# -------------------------------------------------------------
+PRICE_LABELS = {
+    "dev_product": ("Dev Product", "R$"),
+    "subscription": ("Subscription", "R$"),
+    "points": ("Points (build cost)", "pts"),
+}
+PRICE_SHOWN_IN = {
+    "dev_product": "the deployment DMs",
+    "subscription": "the website (Get TE Premium button and the build notice)",
+    "points": "the deployment DMs and the Use Points button",
+}
+PRICE_MAX = 1_000_000
+
+
+def fmt_price(kind: str, value: Optional[int]) -> str:
+    if value is None:
+        return "`Unknown`"
+    return f"`{int(value):,} {PRICE_LABELS[kind][1]}`"
+
+
+async def resolve_universe_id(session: aiohttp.ClientSession) -> Optional[str]:
+    universe_id = os.getenv("ROBLOX_UNIVERSE_ID", "").strip()
+    if universe_id:
+        return universe_id
+    place_id = os.getenv("ROBLOX_PLACE_ID", "").strip() or GAME_DEFAULT_PLACE_ID
+    status, data = await roblox_get(session, f"https://apis.roblox.com/universes/v1/places/{place_id}/universe")
+    if status == 200 and isinstance(data, dict) and data.get("universeId"):
+        return str(data["universeId"])
+    return None
+
+
+async def fetch_dev_product_price(session: aiohttp.ClientSession, api_key: str, universe_id: str, product_id: str):
+    """Returns (price, error). The API key needs the developer-product:read permission."""
+    status, data = await roblox_get(
+        session,
+        f"https://apis.roblox.com/developer-products/v2/universes/{universe_id}/developer-products/{product_id}/creator",
+        headers={"x-api-key": api_key}
+    )
+    if status == 200 and isinstance(data, dict):
+        price = (data.get("priceInformation") or {}).get("defaultPriceInRobux")
+        if isinstance(price, int):
+            return price, None
+        return None, "Roblox did not return a price for this product"
+    return None, f"HTTP {status}"
+
+
+async def update_dev_product_price(session: aiohttp.ClientSession, api_key: str, universe_id: str, product_id: str, price: int):
+    """Returns (ok, error). The API key needs the developer-product:write permission."""
+    form = aiohttp.FormData()
+    form.add_field("price", str(int(price)))
+    try:
+        async with session.patch(
+            f"https://apis.roblox.com/developer-products/v2/universes/{universe_id}/developer-products/{product_id}",
+            data=form, headers={"x-api-key": api_key}
+        ) as resp:
+            if resp.status in (200, 204):
+                return True, ""
+            body = await resp.text()
+            return False, f"HTTP {resp.status}: {body[:300]}"
+    except Exception as e:
+        return False, str(e)
+
+
+class PriceChangeConfirmView(discord.ui.View):
+    """Shows old and new price. Nothing changes until the owner presses Confirm."""
+
+    def __init__(self, owner_id: int, kind: str, old: Optional[int], new: int, api: Optional[dict] = None):
+        super().__init__(timeout=60)
+        self.owner_id = owner_id
+        self.kind = kind
+        self.old = old
+        self.new = new
+        self.api = api
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(embed=embed_err("Not Yours", "Only the person who ran the command can use these buttons."), ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.edit_original_response(view=self)
+        except Exception:
+            pass
+        embed = await self.apply()
+        await interaction.edit_original_response(embed=embed, view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=embed_info("Price Change Cancelled", "Nothing was changed."), view=None)
+        self.stop()
+
+    async def apply(self) -> discord.Embed:
+        label = PRICE_LABELS[self.kind][0]
+        saved = True
+
+        if self.kind == "dev_product":
+            async with aiohttp.ClientSession() as session:
+                ok, err = await update_dev_product_price(session, self.api["key"], self.api["universe"], self.api["product"], self.new)
+            if not ok:
+                hint = "\nCheck that the API key has the `developer-product:write` permission for this experience."
+                return embed_err("Roblox Rejected the Change", f"The dev product price was **not** changed.\n{_game_block(err, 700)}{hint}")
+            saved = set_price("dev_product_robux", self.new)
+        elif self.kind == "subscription":
+            saved = set_price("subscription_robux", self.new)
+        else:
+            saved = set_price("points_cost", self.new)
+
+        embed = embed_ok("Price Updated", f"**{label}** price changed.")
+        embed.add_field(name="Old", value=fmt_price(self.kind, self.old), inline=True)
+        embed.add_field(name="New", value=fmt_price(self.kind, self.new), inline=True)
+        embed.add_field(name="Now Shown In", value=PRICE_SHOWN_IN[self.kind], inline=False)
+        if self.kind == "dev_product":
+            embed.add_field(name="Changed On Roblox", value="`Yes`", inline=True)
+        elif self.kind == "subscription":
+            embed.add_field(
+                name="Changed On Roblox",
+                value="`No` - only the shown price changed. Change the real price in Creator Hub.",
+                inline=False
+            )
+        if not saved:
+            embed.add_field(name="Warning", value="The database could not be reached. The new price only lasts until the bot restarts.", inline=False)
+        return embed
+
+
+# -------------------------------------------------------------
+# PROMO CODE PANEL (/manage codes)
+# -------------------------------------------------------------
+def promo_uses_text(promo: dict) -> str:
+    limit = promo.get("max_uses")
+    return f"{promo.get('uses', 0)}/{limit}" if limit is not None else f"{promo.get('uses', 0)}/unlimited"
+
+
+def promo_line(promo: dict) -> str:
+    expires = promo.get("expires_at")
+    expires_text = f"<t:{int(expires)}:R>" if expires else "never"
+    return f"`{promo['code']}` | `{int(promo['points']):,}` pts | uses `{promo_uses_text(promo)}` | expires {expires_text}"
+
+
+def promo_detail_embed(promo: dict, notice: Optional[str] = None) -> discord.Embed:
+    embed = embed_info(f"Promo Code | {promo['code']}", notice)
+    embed.add_field(name="Code", value=f"`{promo['code']}`", inline=True)
+    embed.add_field(name="Reward", value=f"`{int(promo['points']):,} pts`", inline=True)
+    embed.add_field(name="Uses", value=f"`{promo_uses_text(promo)}`", inline=True)
+    expires = promo.get("expires_at")
+    embed.add_field(name="Expires", value=f"<t:{int(expires)}:F> (<t:{int(expires)}:R>)" if expires else "`Never`", inline=False)
+    embed.add_field(name="Created", value=f"<t:{int(promo.get('created_at', 0))}:R> by <@{promo.get('created_by', 0)}>", inline=False)
+    return embed
+
+
+class ManageCodesView(discord.ui.View):
+    """Pick a code from the menu, then edit its points, limits or delete it."""
+    PAGE_SIZE = 25
+
+    def __init__(self, owner_id: int, page: int = 0, selected: Optional[str] = None, confirm_delete: bool = False):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        codes = list_promos(active_only=True)
+        self.total = len(codes)
+        pages = max(1, -(-len(codes) // self.PAGE_SIZE))
+        self.page = max(0, min(page, pages - 1))
+        self.selected = selected if selected and any(c["code"] == selected for c in codes) else None
+        self.confirm_delete = bool(confirm_delete and self.selected)
+
+        chunk = codes[self.page * self.PAGE_SIZE:(self.page + 1) * self.PAGE_SIZE]
+        if chunk:
+            self.select_menu = discord.ui.Select(
+                placeholder="Choose a code to manage...",
+                options=[
+                    discord.SelectOption(
+                        label=c["code"], value=c["code"],
+                        description=f"{int(c['points']):,} pts | uses {promo_uses_text(c)}"[:100],
+                        default=(c["code"] == self.selected)
+                    ) for c in chunk
+                ],
+                row=0
+            )
+            self.select_menu.callback = self._on_select
+            self.add_item(self.select_menu)
+
+        if pages > 1:
+            prev_btn = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, disabled=self.page == 0, row=1)
+            next_btn = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, disabled=self.page >= pages - 1, row=1)
+            prev_btn.callback = self._on_prev
+            next_btn.callback = self._on_next
+            self.add_item(prev_btn)
+            self.add_item(next_btn)
+
+        if self.selected and self.confirm_delete:
+            yes_btn = discord.ui.Button(label="Confirm Delete", style=discord.ButtonStyle.danger, row=2)
+            no_btn = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, row=2)
+            yes_btn.callback = self._on_confirm_delete
+            no_btn.callback = self._on_cancel_delete
+            self.add_item(yes_btn)
+            self.add_item(no_btn)
+        elif self.selected:
+            points_btn = discord.ui.Button(label="Edit Points", style=discord.ButtonStyle.primary, row=2)
+            limits_btn = discord.ui.Button(label="Edit Limit / Expiry", style=discord.ButtonStyle.primary, row=2)
+            delete_btn = discord.ui.Button(label="Delete", style=discord.ButtonStyle.danger, row=2)
+            points_btn.callback = self._on_edit_points
+            limits_btn.callback = self._on_edit_limits
+            delete_btn.callback = self._on_delete
+            self.add_item(points_btn)
+            self.add_item(limits_btn)
+            self.add_item(delete_btn)
+
+    def build_embed(self, notice: Optional[str] = None) -> discord.Embed:
+        if self.selected:
+            promo = get_promo(self.selected)
+            if promo:
+                embed = promo_detail_embed(promo, notice)
+                if self.confirm_delete:
+                    embed.color = COLOR_RED
+                    embed.add_field(name="Delete this code?", value="This cannot be undone. Press **Confirm Delete** to remove it.", inline=False)
+                return embed
+        if self.total:
+            text = f"Active codes: `{self.total}`\nChoose a code from the menu to edit or delete it."
+        else:
+            text = "There are no active promo codes. Create one with `/set code`."
+        return embed_info("Manage Promo Codes", f"{notice}\n\n{text}" if notice else text)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(embed=embed_err("Not Yours", "Only the person who opened this panel can use it."), ephemeral=True)
+            return False
+        return True
+
+    async def _show(self, interaction: discord.Interaction, page: int, selected: Optional[str], confirm: bool = False, notice: Optional[str] = None):
+        view = ManageCodesView(self.owner_id, page, selected, confirm)
+        await interaction.response.edit_message(embed=view.build_embed(notice), view=view)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        await self._show(interaction, self.page, self.select_menu.values[0])
+
+    async def _on_prev(self, interaction: discord.Interaction):
+        await self._show(interaction, self.page - 1, None)
+
+    async def _on_next(self, interaction: discord.Interaction):
+        await self._show(interaction, self.page + 1, None)
+
+    async def _on_edit_points(self, interaction: discord.Interaction):
+        promo = get_promo(self.selected)
+        if not promo:
+            await self._show(interaction, self.page, None, notice="That code no longer exists.")
+            return
+        await interaction.response.send_modal(EditPromoPointsModal(self.owner_id, self.page, promo))
+
+    async def _on_edit_limits(self, interaction: discord.Interaction):
+        promo = get_promo(self.selected)
+        if not promo:
+            await self._show(interaction, self.page, None, notice="That code no longer exists.")
+            return
+        await interaction.response.send_modal(EditPromoLimitsModal(self.owner_id, self.page, promo))
+
+    async def _on_delete(self, interaction: discord.Interaction):
+        await self._show(interaction, self.page, self.selected, confirm=True)
+
+    async def _on_cancel_delete(self, interaction: discord.Interaction):
+        await self._show(interaction, self.page, self.selected)
+
+    async def _on_confirm_delete(self, interaction: discord.Interaction):
+        code = self.selected
+        removed = delete_promo(code)
+        notice = f"Code `{code}` was deleted." if removed else f"Code `{code}` was already gone."
+        await self._show(interaction, self.page, None, notice=notice)
+
+
+class EditPromoPointsModal(discord.ui.Modal, title="Edit Reward Points"):
+    points_input = discord.ui.TextInput(label="New reward (points)", required=True, max_length=9)
+
+    def __init__(self, owner_id: int, page: int, promo: dict):
+        super().__init__()
+        self.owner_id = owner_id
+        self.page = page
+        self.code = promo["code"]
+        self.points_input.default = str(int(promo["points"]))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.points_input.value.strip().replace(",", "")
+        if not text.isdigit() or not (1 <= int(text) <= 1_000_000):
+            await interaction.response.send_message(embed=embed_err("Invalid Points", "Enter a whole number from `1` to `1,000,000`."), ephemeral=True)
+            return
+        promo = update_promo(self.code, {"points": int(text)})
+        if not promo:
+            await interaction.response.send_message(embed=embed_err("Code Not Found", f"`{self.code}` no longer exists."), ephemeral=True)
+            return
+        view = ManageCodesView(self.owner_id, self.page, self.code)
+        await interaction.response.edit_message(embed=view.build_embed(f"Reward changed to `{int(text):,} pts`. People who already used the code keep what they got."), view=view)
+
+
+class EditPromoLimitsModal(discord.ui.Modal, title="Edit Usage Limit and Expiry"):
+    limit_input = discord.ui.TextInput(label="Usage limit (empty = unlimited)", required=False, max_length=9)
+    expires_input = discord.ui.TextInput(label="Expires in (e.g. 7d, 12h). Empty = never", required=False, max_length=30)
+
+    def __init__(self, owner_id: int, page: int, promo: dict):
+        super().__init__()
+        self.owner_id = owner_id
+        self.page = page
+        self.code = promo["code"]
+        if promo.get("max_uses") is not None:
+            self.limit_input.default = str(int(promo["max_uses"]))
+        expires = promo.get("expires_at")
+        if expires:
+            remaining = int(expires - datetime.now(timezone.utc).timestamp())
+            if remaining > 0:
+                self.expires_input.default = format_timedelta(timedelta(seconds=remaining))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        limit_text = self.limit_input.value.strip().lower().replace(",", "")
+        if limit_text in ("", "none", "unlimited", "0"):
+            max_uses = None
+        elif limit_text.isdigit() and 1 <= int(limit_text) <= 1_000_000:
+            max_uses = int(limit_text)
+        else:
+            await interaction.response.send_message(embed=embed_err("Invalid Usage Limit", "Enter a whole number from `1` to `1,000,000`, or leave it empty for unlimited."), ephemeral=True)
+            return
+
+        expires_text = self.expires_input.value.strip().lower()
+        if expires_text in ("", "none", "never"):
+            expires_at = None
+        else:
+            delta = parse_duration_strict(expires_text)
+            if delta is None:
+                await interaction.response.send_message(embed=embed_err("Invalid Expiry", "Use a time like `12h`, `7d` or `2w`, or leave it empty for no expiry."), ephemeral=True)
+                return
+            expires_at = datetime.now(timezone.utc).timestamp() + delta.total_seconds()
+
+        promo = update_promo(self.code, {"max_uses": max_uses, "expires_at": expires_at})
+        if not promo:
+            await interaction.response.send_message(embed=embed_err("Code Not Found", f"`{self.code}` no longer exists."), ephemeral=True)
+            return
+
+        view = ManageCodesView(self.owner_id, self.page, self.code)
+        notice = "Limit and expiry updated."
+        if not view.selected:
+            notice = f"Limit and expiry updated. `{self.code}` is no longer active (used up or expired), so it left this list."
+        await interaction.response.edit_message(embed=view.build_embed(notice), view=view)
+
+
+# -------------------------------------------------------------
 # COMMANDS COG: all slash commands
 # -------------------------------------------------------------
 class CommandsCog(commands.Cog):
@@ -310,6 +670,13 @@ class CommandsCog(commands.Cog):
         # The owner check already replied to the user, so ignore that failure quietly.
         if isinstance(error, app_commands.CheckFailure):
             return
+        if isinstance(error, app_commands.CommandOnCooldown):
+            cooldown_embed = embed_err("Slow Down", f"Try again in `{error.retry_after:.1f}s`.")
+            try:
+                await interaction.response.send_message(embed=cooldown_embed, ephemeral=True)
+            except Exception:
+                pass
+            return
         print(f"[App Command Error] {error}")
         # Tell the user instead of leaving them with "application did not respond"
         embed = embed_err("Command Failed", f"Something went wrong:\n`{str(error)[:500]}`")
@@ -324,7 +691,9 @@ class CommandsCog(commands.Cog):
     # -------------------------------------------------------------
     # SLASH COMMAND: SET VERIFICATION OR UNSYNC INTERACTIVE PANELS
     # -------------------------------------------------------------
-    @app_commands.command(name="set", description="Deploy verification or un-sync interactive embed panels into a channel.")
+    set_group = app_commands.Group(name="set", description="Owner setup tools: panels and promo codes.")
+
+    @set_group.command(name="panel", description="Deploy verification or un-sync interactive embed panels into a channel.")
     @app_commands.describe(
         action="Select whether to deploy the verification or un-sync panel.",
         channel="The target channel to send the embed panel into.",
@@ -1733,6 +2102,214 @@ class CommandsCog(commands.Cog):
     @giveaway_delete_cmd.autocomplete("message_id")
     async def _ac_delete(self, interaction: discord.Interaction, current: str):
         return await self._giveaway_choices(interaction, current)
+
+
+    # =============================================================
+    # PRICES: /change-price
+    # =============================================================
+    @app_commands.command(name="change-price", description="Change a price: dev product, subscription display, or points (owner only).")
+    @app_commands.describe(
+        type="Which price to change.",
+        amount="Set the price to exactly this number.",
+        percentage="Change the current price by this percent. -20 = 20% cheaper, 15 = 15% more."
+    )
+    @app_commands.choices(type=[
+        app_commands.Choice(name="Dev Product (Robux)", value="dev_product"),
+        app_commands.Choice(name="Subscription (Robux)", value="subscription"),
+        app_commands.Choice(name="Points (build cost)", value="points"),
+    ])
+    async def change_price_cmd(
+        self,
+        interaction: discord.Interaction,
+        type: app_commands.Choice[str],
+        amount: Optional[app_commands.Range[int, 1, 1000000]] = None,
+        percentage: Optional[app_commands.Range[float, -99.0, 1000.0]] = None
+    ):
+        if (amount is None) == (percentage is None):
+            await interaction.response.send_message(
+                embed=embed_err("Choose One", "Give either `amount` (exact price) or `percentage` (change by percent). Not both, and not neither."),
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        kind = type.value
+        prices = get_prices()
+        api = None
+        note = None
+
+        if kind == "points":
+            current = prices["points_cost"]
+        elif kind == "subscription":
+            current = prices["subscription_robux"]
+        else:
+            api_key = os.getenv("ROBLOX_OPEN_CLOUD_KEY", "").strip()
+            product_id = os.getenv("ROBLOX_DEV_PRODUCT_ID", "").strip()
+            if not api_key:
+                await interaction.followup.send(embed=embed_err("Missing API Key", "`ROBLOX_OPEN_CLOUD_KEY` is not set."), ephemeral=True)
+                return
+            if not product_id:
+                await interaction.followup.send(embed=embed_err("Missing Product ID", "`ROBLOX_DEV_PRODUCT_ID` is not set."), ephemeral=True)
+                return
+            async with aiohttp.ClientSession() as session:
+                universe_id = await resolve_universe_id(session)
+                if not universe_id:
+                    await interaction.followup.send(embed=embed_err("Universe Not Found", "Set `ROBLOX_UNIVERSE_ID`, or check `ROBLOX_PLACE_ID`."), ephemeral=True)
+                    return
+                live_price, live_error = await fetch_dev_product_price(session, api_key, universe_id, product_id)
+            api = {"key": api_key, "universe": universe_id, "product": product_id}
+            current = live_price if live_price is not None else prices["dev_product_robux"]
+            if live_price is None:
+                note = f"Could not read the current price from Roblox ({live_error}). Using the saved price."
+
+        if percentage is not None:
+            if current is None:
+                await interaction.followup.send(
+                    embed=embed_err("Current Price Unknown", "I cannot work out a percentage without the current price. Use `amount` instead."),
+                    ephemeral=True
+                )
+                return
+            new_price = max(1, round(current * (1 + percentage / 100)))
+        else:
+            new_price = int(amount)
+
+        if new_price > PRICE_MAX:
+            await interaction.followup.send(embed=embed_err("Price Too High", f"The highest allowed price is `{PRICE_MAX:,}`."), ephemeral=True)
+            return
+        if current is not None and new_price == current:
+            await interaction.followup.send(embed=embed_err("No Change", f"The price is already {fmt_price(kind, current)}."), ephemeral=True)
+            return
+
+        embed = discord.Embed(title="Confirm Price Change", color=COLOR_GOLD)
+        embed.add_field(name="Type", value=f"`{PRICE_LABELS[kind][0]}`", inline=True)
+        embed.add_field(name="Current", value=fmt_price(kind, current), inline=True)
+        embed.add_field(name="New", value=fmt_price(kind, new_price), inline=True)
+        if percentage is not None:
+            embed.add_field(name="Change", value=f"`{percentage:+g}%`", inline=True)
+        embed.add_field(name="Will Show In", value=PRICE_SHOWN_IN[kind], inline=False)
+        if kind == "dev_product":
+            embed.add_field(name="Roblox", value="This changes the real dev product price on Roblox right away.", inline=False)
+        elif kind == "subscription":
+            embed.add_field(
+                name="Important",
+                value=(
+                    "Roblox does not let bots change subscription prices. This only changes the price **shown** in "
+                    "the website text. Change the real price in Creator Hub (Roblox allows one change every 60 days, "
+                    "and price increases start 30 days after players are told)."
+                ),
+                inline=False
+            )
+        if note:
+            embed.add_field(name="Note", value=note, inline=False)
+        embed.set_footer(text="Press Confirm within 60 seconds.")
+
+        view = PriceChangeConfirmView(interaction.user.id, kind, current, new_price, api)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # =============================================================
+    # PROMO CODES
+    # =============================================================
+    @app_commands.command(name="redeem", description="Redeem a promo code for points.")
+    @app_commands.describe(code="The promo code.")
+    @app_commands.checks.cooldown(1, 5.0)
+    async def redeem_cmd(self, interaction: discord.Interaction, code: app_commands.Range[str, 1, 64]):
+        normalized = normalize_promo_code(code)
+        if not PROMO_CODE_RE.match(normalized):
+            status, promo = "not_found", None
+        else:
+            status, promo = redeem_promo(normalized, interaction.user.id)
+
+        if status != "ok":
+            messages = {
+                "not_found": ("Invalid Code", "That code does not exist. Check the spelling and try again."),
+                "already_redeemed": ("Already Redeemed", "You already used this code."),
+                "expired": ("Code Expired", "This code is no longer valid."),
+                "used_up": ("Code Used Up", "This code has reached its usage limit."),
+            }
+            title, text = messages.get(status, ("Could Not Redeem", "Something went wrong. Please try again."))
+            await interaction.response.send_message(embed=embed_err(title, text), ephemeral=True)
+            return
+
+        reward = int(promo["points"])
+        new_total = add_user_points(str(interaction.user.id), reward)
+        old_total = new_total - reward
+
+        embed = embed_ok("Code Redeemed!", f"You got **{reward:,} points**.")
+        embed.add_field(name="Code", value=f"`{promo['code']}`", inline=True)
+        embed.add_field(name="Reward", value=f"`+{reward:,} pts`", inline=True)
+        embed.add_field(name="New Balance", value=f"`{new_total:,} pts`", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        try:
+            where = interaction.guild.name if interaction.guild else "Direct Message"
+            await send_promo_log(self.bot, interaction.user, promo, old_total, new_total, where)
+        except Exception as e:
+            print(f"[Promo Log Error] {e}")
+
+    @set_group.command(name="code", description="Create a promo code that gives points.")
+    @app_commands.describe(
+        code="The code people type, e.g. WELCOME100 (letters, numbers, - and _).",
+        points="How many points the code gives.",
+        duration="Optional. How long the code works, e.g. 12h, 7d, 2w.",
+        usage_limit="Optional. How many people can use it in total."
+    )
+    async def set_code_cmd(
+        self,
+        interaction: discord.Interaction,
+        code: app_commands.Range[str, 3, 32],
+        points: app_commands.Range[int, 1, 1000000],
+        duration: Optional[str] = None,
+        usage_limit: Optional[app_commands.Range[int, 1, 1000000]] = None
+    ):
+        normalized = normalize_promo_code(code)
+        if not PROMO_CODE_RE.match(normalized):
+            await interaction.response.send_message(
+                embed=embed_err("Invalid Code", "Use `3` to `32` letters, numbers, `-` or `_`. No spaces."),
+                ephemeral=True
+            )
+            return
+
+        expires_at = None
+        if duration and duration.strip():
+            delta = parse_duration_strict(duration)
+            if delta is None:
+                await interaction.response.send_message(embed=embed_err("Invalid Duration", "Use a time like `12h`, `7d` or `2w`."), ephemeral=True)
+                return
+            expires_at = datetime.now(timezone.utc).timestamp() + delta.total_seconds()
+
+        promo = create_promo(normalized, points, interaction.user.id, expires_at, usage_limit)
+        if promo is None:
+            await interaction.response.send_message(
+                embed=embed_err("Code Already Exists", f"`{normalized}` already exists. Use `/manage codes` to edit or delete it."),
+                ephemeral=True
+            )
+            return
+
+        embed = embed_ok("Promo Code Created", f"People can now use `/redeem {normalized}`.")
+        embed.add_field(name="Code", value=f"`{normalized}`", inline=True)
+        embed.add_field(name="Reward", value=f"`{points:,} pts`", inline=True)
+        embed.add_field(name="Usage Limit", value=f"`{usage_limit:,}`" if usage_limit else "`Unlimited`", inline=True)
+        embed.add_field(name="Expires", value=f"<t:{int(expires_at)}:R>" if expires_at else "`Never`", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    promo_group = app_commands.Group(name="promo", description="Promo code tools.")
+
+    @promo_group.command(name="codes", description="Show all active promo codes, one per line.")
+    async def promo_codes_cmd(self, interaction: discord.Interaction):
+        promos = list_promos(active_only=True)
+        if not promos:
+            await send_pages(interaction, [embed_info("Active Promo Codes", "There are no active promo codes. Create one with `/set code`.")], ephemeral=True)
+            return
+        lines = [promo_line(p) for p in promos]
+        pages = build_pages("Active Promo Codes", lines, per_page=15, header=f"Active codes: `{len(lines)}`\n\n")
+        await send_pages(interaction, pages, ephemeral=True)
+
+    manage_group = app_commands.Group(name="manage", description="Owner management tools.")
+
+    @manage_group.command(name="codes", description="Edit points, limits or delete active promo codes.")
+    async def manage_codes_cmd(self, interaction: discord.Interaction):
+        view = ManageCodesView(interaction.user.id)
+        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

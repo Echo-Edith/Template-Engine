@@ -22,6 +22,7 @@ DISCORD_BOT_TOKEN = (os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("BOT_
 MONGO_URI = os.getenv("MONGO_URI")
 db_premium = None
 db_users = None
+db_settings = None
 
 if MONGO_URI:
     try:
@@ -32,8 +33,23 @@ if MONGO_URI:
             db = mongo_client.get_database("static_studio_db")
         db_premium = db["premium_users"]
         db_users = db["persistent_users"]
+        db_settings = db["settings"]
     except Exception as e:
         print(f"[MongoDB Warning in Flask] {e}")
+
+
+def get_subscription_price() -> int:
+    """Price shown on the site. Set by the bot's /change-price command (same database)."""
+    price = int(os.environ.get("DEFAULT_SUBSCRIPTION_PRICE", "299") or 299)
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "prices"}) or {}
+            value = doc.get("subscription_robux")
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                price = value
+        except Exception as e:
+            print(f"[Price Read Error] {e}")
+    return price
 
 
 def is_user_premium(discord_id: str) -> bool:
@@ -72,6 +88,7 @@ def index():
         roblox_user=roblox_user,
         is_premium=is_premium,
         discord_client_id=DISCORD_CLIENT_ID,
+        subscription_price=get_subscription_price(),
         roblox_store_url=os.environ.get("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
     )
 
