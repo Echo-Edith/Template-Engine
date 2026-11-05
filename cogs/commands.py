@@ -87,6 +87,16 @@ from cogs.features import (
     list_backups,
     delete_backup,
     restore_guild,
+    list_shop_items,
+    get_shop_item,
+    add_shop_item,
+    remove_shop_item,
+    take_stock,
+    return_stock,
+    count_shop_sale,
+    shop_key,
+    SHOP_LOG_CHANNEL_ID,
+    SHOP_LOCKS,
     HARDCODED_STAFF,
     COMMAND_ADMINS,
     extend_user_premium,
@@ -104,7 +114,7 @@ STAFF_COMMANDS = {"staff", "premiums"}  # only HARDCODED_STAFF may run these
 
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox", "gameinfo", "timestamp", "remind",
-    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem", "promo",
+    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem", "promo", "shop",
 }
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
@@ -800,6 +810,179 @@ class BackupConfirmView(discord.ui.View):
     async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
         await interaction.response.edit_message(embed=embed_info("Cancelled", "Nothing was changed."), view=None)
+
+
+# -------------------------------------------------------------
+# POINTS SHOP VIEWS
+# -------------------------------------------------------------
+def shop_reward_text(item: dict) -> str:
+    if item["reward"] == "premium":
+        return f"{int(item['premium_days'])} days TE Premium"
+    if item["reward"] == "role":
+        return f"<@&{item['role_id']}> role"
+    return "Delivered by staff"
+
+
+def shop_stock_text(item: dict) -> str:
+    return "unlimited" if item.get("stock") is None else ("SOLD OUT" if item["stock"] <= 0 else f"{item['stock']} left")
+
+
+def shop_line(item: dict) -> str:
+    return f"**{item['name']}** | `{int(item['price']):,} pts` | {shop_reward_text(item)} | `{shop_stock_text(item)}`"
+
+
+class ShopView(discord.ui.View):
+    """Lists the items (1 per line). Pick an item in the menu to buy it."""
+    PER_PAGE = 10
+
+    def __init__(self, user_id: int, page: int = 0):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.items = list_shop_items()
+        self.pages = max(1, -(-len(self.items) // self.PER_PAGE))
+        self.page = max(0, min(page, self.pages - 1))
+        chunk = self.items[self.page * self.PER_PAGE:(self.page + 1) * self.PER_PAGE]
+        if chunk:
+            select = discord.ui.Select(
+                placeholder="Choose an item to buy...",
+                options=[discord.SelectOption(label=i["name"][:100], value=i["key"][:100],
+                                              description=f"{int(i['price']):,} pts | {shop_stock_text(i)}"[:100]) for i in chunk]
+            )
+            select.callback = self._on_select
+            self.add_item(select)
+        if self.pages > 1:
+            prev_btn = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, disabled=self.page == 0, row=1)
+            next_btn = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, disabled=self.page >= self.pages - 1, row=1)
+            prev_btn.callback = self._on_prev
+            next_btn.callback = self._on_next
+            self.add_item(prev_btn)
+            self.add_item(next_btn)
+
+    def build_embed(self) -> discord.Embed:
+        balance = get_user_points(str(self.user_id))
+        chunk = self.items[self.page * self.PER_PAGE:(self.page + 1) * self.PER_PAGE]
+        lines = "\n".join(shop_line(i) for i in chunk) or "The shop is empty right now."
+        embed = discord.Embed(title="Points Shop", description=f"Your balance: `{balance:,} pts`\n\n{lines}", color=COLOR_GOLD)
+        embed.set_footer(text=f"Page {self.page + 1}/{self.pages} | Choose an item below to buy it")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(embed=embed_err("Not Yours", "Run `/shop` to open your own shop."), ephemeral=True)
+            return False
+        return True
+
+    async def _on_prev(self, interaction: discord.Interaction):
+        view = ShopView(self.user_id, self.page - 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _on_next(self, interaction: discord.Interaction):
+        view = ShopView(self.user_id, self.page + 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        item = get_shop_item(interaction.data["values"][0])
+        if item is None:
+            await interaction.response.send_message(embed=embed_err("Item Not Found", "That item is no longer for sale."), ephemeral=True)
+            return
+        balance = get_user_points(str(self.user_id))
+        embed = discord.Embed(title=f"Buy {item['name']}?", color=COLOR_GOLD)
+        if item.get("description"):
+            embed.description = item["description"]
+        embed.add_field(name="Price", value=f"`{int(item['price']):,} pts`", inline=True)
+        embed.add_field(name="Your Balance", value=f"`{balance:,} pts`", inline=True)
+        embed.add_field(name="After Buying", value=f"`{balance - int(item['price']):,} pts`" if balance >= item["price"] else "`Not enough points`", inline=True)
+        embed.add_field(name="You Get", value=shop_reward_text(item), inline=False)
+        await interaction.response.send_message(embed=embed, view=ShopConfirmView(self.user_id, item["key"]), ephemeral=True)
+
+
+class ShopConfirmView(discord.ui.View):
+    def __init__(self, user_id: int, key: str):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.key = key
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(embed=embed_err("Not Yours", "Only the buyer can use these buttons."), ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success)
+    async def buy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        lock = SHOP_LOCKS.setdefault(self.user_id, asyncio.Lock())
+        async with lock:  # stops double clicks from buying twice
+            embed = await self.buy(interaction)
+        await interaction.response.edit_message(embed=embed, view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(embed=embed_info("Cancelled", "Nothing was bought."), view=None)
+
+    async def buy(self, interaction: discord.Interaction) -> discord.Embed:
+        uid = str(self.user_id)
+        item = get_shop_item(self.key)
+        if item is None:
+            return embed_err("Item Not Found", "That item is no longer for sale.")
+        price = int(item["price"])
+        balance = get_user_points(uid)
+        if balance < price:
+            return embed_err("Not Enough Points", f"You need `{price:,} pts` but you have `{balance:,} pts`.")
+        if item["reward"] == "role":
+            if not interaction.guild or interaction.guild.id != int(item["guild_id"]):
+                return embed_err("Wrong Server", "This role can only be bought in the server it belongs to.")
+            role = interaction.guild.get_role(int(item["role_id"]))
+            member = interaction.guild.get_member(self.user_id)
+            if role is None or member is None:
+                return embed_err("Role Missing", "That role does not exist anymore. Tell staff.")
+            if role in member.roles:
+                return embed_err("Already Owned", f"You already have {role.mention}.")
+            if role >= interaction.guild.me.top_role:
+                return embed_err("Cannot Give Role", "That role is higher than my role. Tell staff.")
+        if not take_stock(self.key):
+            return embed_err("Sold Out", f"**{item['name']}** is sold out.")
+
+        new_balance = add_user_points(uid, -price)
+        premium_until = None
+        try:
+            if item["reward"] == "premium":
+                premium_until = extend_user_premium(uid, int(item["premium_days"]))
+            elif item["reward"] == "role":
+                await member.add_roles(role, reason=f"Bought in the points shop: {item['name']}")
+        except Exception as e:
+            print(f"[Shop Delivery Error] {e!r}")
+            add_user_points(uid, price)  # refund
+            return_stock(self.key)
+            return embed_err("Purchase Failed", "Something went wrong, so you were **not** charged.")
+        if item.get("stock") is None:
+            count_shop_sale(self.key)
+
+        embed = embed_ok("Purchase Complete!", f"You bought **{item['name']}**.")
+        embed.add_field(name="Paid", value=f"`{price:,} pts`", inline=True)
+        embed.add_field(name="New Balance", value=f"`{new_balance:,} pts`", inline=True)
+        if premium_until is not None:
+            embed.add_field(name="TE Premium Until", value=f"<t:{int(premium_until.timestamp())}:F>", inline=False)
+        if item["reward"] == "custom":
+            embed.add_field(name="Next Step", value="Staff were told and will deliver it to you soon.", inline=False)
+
+        try:  # purchase log
+            channel = interaction.client.get_channel(SHOP_LOG_CHANNEL_ID)
+            if channel:
+                log = discord.Embed(title="Shop Purchase", color=COLOR_GOLD)
+                log.add_field(name="Buyer", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
+                log.add_field(name="Item", value=f"`{item['name']}`", inline=True)
+                log.add_field(name="Price", value=f"`{price:,} pts`", inline=True)
+                log.add_field(name="New Balance", value=f"`{new_balance:,} pts`", inline=True)
+                log.add_field(name="Reward", value=shop_reward_text(item), inline=True)
+                if item["reward"] == "custom":
+                    log.add_field(name="Action Needed", value="Deliver this item to the buyer.", inline=False)
+                log.timestamp = datetime.now(timezone.utc)
+                await channel.send(embed=log, allowed_mentions=NO_PINGS)
+        except Exception as e:
+            print(f"[Shop Log Error] {e!r}")
+        return embed
 
 
 # -------------------------------------------------------------
@@ -2869,6 +3052,87 @@ class CommandsCog(commands.Cog):
             await interaction.edit_original_response(embed=embed, view=None)
         except Exception as e:
             print(f"[Backup Restore Reply Error] {e!r}")
+
+
+    # =============================================================
+    # POINTS SHOP
+    # =============================================================
+    @app_commands.command(name="shop", description="Spend your points on rewards.")
+    async def shop_cmd(self, interaction: discord.Interaction):
+        view = ShopView(interaction.user.id)
+        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
+
+    @app_commands.command(name="sell", description="Add or remove an item in the points shop (owner only).")
+    @app_commands.describe(
+        action="Add a new item or remove one.",
+        name="The item name.",
+        price="Price in points (for Add).",
+        reward="What the buyer gets (for Add).",
+        premium_days="Days of TE Premium (for the Premium reward).",
+        role="The role to give (for the Role reward).",
+        stock="Optional. How many can be sold. Empty = unlimited.",
+        description="Optional. Shown when someone buys. Good for Custom items."
+    )
+    @app_commands.choices(
+        action=[app_commands.Choice(name="Add", value="add"), app_commands.Choice(name="Remove", value="remove")],
+        reward=[
+            app_commands.Choice(name="TE Premium", value="premium"),
+            app_commands.Choice(name="Role", value="role"),
+            app_commands.Choice(name="Custom (staff delivers)", value="custom"),
+        ]
+    )
+    async def sell_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        name: app_commands.Range[str, 1, 60],
+        price: Optional[app_commands.Range[int, 1, 10000000]] = None,
+        reward: Optional[app_commands.Choice[str]] = None,
+        premium_days: Optional[app_commands.Range[int, 1, 3650]] = None,
+        role: Optional[discord.Role] = None,
+        stock: Optional[app_commands.Range[int, 1, 1000000]] = None,
+        description: Optional[app_commands.Range[str, 1, 300]] = None
+    ):
+        if action.value == "remove":
+            if remove_shop_item(name):
+                await interaction.response.send_message(embed=embed_ok("Item Removed", f"`{name}` is no longer for sale."), ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed_err("Item Not Found", f"No item named `{name}`."), ephemeral=True)
+            return
+
+        if price is None or reward is None:
+            await interaction.response.send_message(embed=embed_err("Missing Options", "To add an item, give `price` and `reward`."), ephemeral=True)
+            return
+        if reward.value == "premium" and premium_days is None:
+            await interaction.response.send_message(embed=embed_err("Missing Options", "The TE Premium reward needs `premium_days`. Use `30` for one month."), ephemeral=True)
+            return
+        if reward.value == "role":
+            if role is None or not interaction.guild:
+                await interaction.response.send_message(embed=embed_err("Missing Options", "The Role reward needs a `role`, and you must run this in a server."), ephemeral=True)
+                return
+            if role.is_default() or role.managed:
+                await interaction.response.send_message(embed=embed_err("Cannot Use This Role", "Pick a normal role (not @everyone and not a bot role)."), ephemeral=True)
+                return
+        if reward.value == "custom" and not description:
+            await interaction.response.send_message(embed=embed_err("Missing Options", "A Custom item needs a `description` so the buyer knows what they get."), ephemeral=True)
+            return
+
+        item = {
+            "key": shop_key(name), "name": name.strip(), "price": int(price), "reward": reward.value,
+            "premium_days": int(premium_days or 0), "role_id": role.id if role else None,
+            "guild_id": interaction.guild.id if interaction.guild else None,
+            "stock": int(stock) if stock else None, "description": description or "",
+            "sold": 0, "created_at": datetime.now(timezone.utc).timestamp(),
+        }
+        if not add_shop_item(item):
+            await interaction.response.send_message(embed=embed_err("Item Exists", f"`{name}` is already in the shop. Remove it first to change it."), ephemeral=True)
+            return
+        embed = embed_ok("Item Added", "It is now in `/shop`.")
+        embed.add_field(name="Item", value=f"`{item['name']}`", inline=True)
+        embed.add_field(name="Price", value=f"`{item['price']:,} pts`", inline=True)
+        embed.add_field(name="Stock", value=f"`{shop_stock_text(item)}`", inline=True)
+        embed.add_field(name="Reward", value=shop_reward_text(item), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
 
 
 async def setup(bot: commands.Bot):

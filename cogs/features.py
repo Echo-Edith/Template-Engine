@@ -36,6 +36,7 @@ db_settings = None
 db_promos = None
 db_broadcasts = None
 db_backups = None
+db_shop = None
 
 if MONGO_URI:
     try:
@@ -56,6 +57,7 @@ if MONGO_URI:
         db_promos = db["promo_codes"]
         db_broadcasts = db["broadcasts"]
         db_backups = db["backups"]
+        db_shop = db["shop_items"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -1992,6 +1994,116 @@ async def restore_guild(guild: discord.Guild, backup: dict) -> dict:
         problems.append(f"Bot settings: {e}")
 
     return {"made": made, "problems": problems}
+
+
+# -------------------------------------------------------------
+# POINTS SHOP (/shop to buy, /sell to add items)
+# -------------------------------------------------------------
+SHOP_LOG_CHANNEL_ID = int(os.getenv("SHOP_LOG_CHANNEL_ID", "1567516050218811495"))
+LOCAL_SHOP: Dict[str, dict] = {}
+SHOP_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
+def shop_key(name: str) -> str:
+    return " ".join((name or "").lower().split())
+
+
+def list_shop_items() -> List[dict]:
+    items: List[dict] = list(LOCAL_SHOP.values())
+    if db_shop is not None:
+        try:
+            items = list(db_shop.find({}, {"_id": 0}))
+        except Exception as e:
+            print(f"[Shop List Error] {e}")
+    return sorted(items, key=lambda i: (i.get("price", 0), i.get("name", "").lower()))
+
+
+def get_shop_item(name: str) -> Optional[dict]:
+    key = shop_key(name)
+    if db_shop is not None:
+        try:
+            return db_shop.find_one({"key": key}, {"_id": 0})
+        except Exception as e:
+            print(f"[Shop Read Error] {e}")
+    return LOCAL_SHOP.get(key)
+
+
+def add_shop_item(item: dict) -> bool:
+    """False if an item with this name already exists (or the save failed)."""
+    key = item["key"]
+    if get_shop_item(key) is not None:
+        return False
+    LOCAL_SHOP[key] = item
+    if db_shop is not None:
+        try:
+            db_shop.insert_one(dict(item))
+        except Exception as e:
+            print(f"[Shop Save Error] {e}")
+            LOCAL_SHOP.pop(key, None)
+            return False
+    return True
+
+
+def remove_shop_item(name: str) -> bool:
+    key = shop_key(name)
+    existed = LOCAL_SHOP.pop(key, None) is not None
+    if db_shop is not None:
+        try:
+            return db_shop.delete_one({"key": key}).deleted_count > 0
+        except Exception as e:
+            print(f"[Shop Delete Error] {e}")
+    return existed
+
+
+def take_stock(key: str) -> bool:
+    """Takes one item from the stock. Unlimited items always work. False if sold out."""
+    item = get_shop_item(key)
+    if item is None:
+        return False
+    if item.get("stock") is None:
+        return True
+    if db_shop is not None:
+        try:
+            doc = db_shop.find_one_and_update({"key": key, "stock": {"$gt": 0}}, {"$inc": {"stock": -1, "sold": 1}})
+            return doc is not None
+        except Exception as e:
+            print(f"[Shop Stock Error] {e}")
+            return False
+    local = LOCAL_SHOP.get(key)
+    if local and local["stock"] > 0:
+        local["stock"] -= 1
+        local["sold"] = local.get("sold", 0) + 1
+        return True
+    return False
+
+
+def return_stock(key: str):
+    """Gives one item back (used when a purchase fails after the stock was taken)."""
+    item = get_shop_item(key)
+    if item is None or item.get("stock") is None:
+        return
+    if db_shop is not None:
+        try:
+            db_shop.update_one({"key": key}, {"$inc": {"stock": 1, "sold": -1}})
+        except Exception as e:
+            print(f"[Shop Stock Return Error] {e}")
+    elif key in LOCAL_SHOP:
+        LOCAL_SHOP[key]["stock"] += 1
+        LOCAL_SHOP[key]["sold"] = max(0, LOCAL_SHOP[key].get("sold", 1) - 1)
+
+
+def count_shop_sale(key: str):
+    """Counts a sale for unlimited items (limited items are counted in take_stock)."""
+    item = get_shop_item(key)
+    if item is None or item.get("stock") is not None:
+        return
+    if db_shop is not None:
+        try:
+            db_shop.update_one({"key": key}, {"$inc": {"sold": 1}})
+        except Exception as e:
+            print(f"[Shop Sold Count Error] {e}")
+    elif key in LOCAL_SHOP:
+        LOCAL_SHOP[key]["sold"] = LOCAL_SHOP[key].get("sold", 0) + 1
 
 
 # -------------------------------------------------------------
