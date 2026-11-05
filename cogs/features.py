@@ -688,6 +688,7 @@ def load_runtime_state():
             GIVEAWAYS.clear()
             for d in db_giveaways.find({}, {"_id": 0}):
                 GIVEAWAYS[d["message_id"]] = d
+            print(f"[Giveaways] Loaded {len(GIVEAWAYS)} from the database.")
         except Exception as e:
             print(f"[Load Giveaways Error] {e}")
 
@@ -784,9 +785,10 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
     if gw.get("ended"):
         winner_ids = gw.get("winner_ids", [])
         winners_text = "\n".join(f"<@{w}>" for w in winner_ids) if winner_ids else "No valid entries"
+        label = "Winner" if len(winner_ids) == 1 else "Winners"
         embed = discord.Embed(
             title=gw["prize"],
-            description=f"**Ended:** <t:{end_ts}:R>\n**Hosted by:** {host}\n**Winners:** {winners_text}",
+            description=f"**Hosted by:** {host}\n**{label}:** {winners_text}",
             color=COLOR_GRAY
         )
         embed.set_footer(text=f"{len(gw['entries'])} entries | Giveaway ended")
@@ -808,6 +810,7 @@ class GiveawayView(discord.ui.View):
         super().__init__(timeout=None)
         if ended:
             self.enter_btn.disabled = True
+            self.entries_btn.disabled = True
 
     @discord.ui.button(label="Enter", style=discord.ButtonStyle.success, custom_id="giveaway_enter")
     async def enter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -835,6 +838,9 @@ class GiveawayView(discord.ui.View):
         gw = GIVEAWAYS.get(str(interaction.message.id))
         if not gw:
             await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "This giveaway is no longer tracked."), ephemeral=True)
+            return
+        if gw.get("ended"):
+            await interaction.response.send_message(embed=embed_err("Giveaway Ended", "This giveaway has already ended."), ephemeral=True)
             return
         lines = [f"<@{uid}>" for uid in gw["entries"]]
         pages = build_pages(
@@ -936,12 +942,15 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
         gw["end_ts"] = datetime.now(timezone.utc).timestamp()
     save_giveaway(gw)
 
+    print(f"[Giveaway] Ended {gw['message_id']} ({gw['prize']}): {len(gw['entries'])} entries, winners: {winners}")
     message = await get_giveaway_message(bot, gw)
-    if message:
+    if message is None:
+        print(f"[Giveaway Warning] Message {gw['message_id']} not found in channel {gw['channel_id']}. Announcing in the channel only.")
+    else:
         try:
             await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
         except Exception as e:
-            print(f"[Giveaway Edit Error] {e}")
+            print(f"[Giveaway Edit Error] {gw['message_id']}: {e!r}")
     await announce_giveaway_winners(bot, gw, winners, message=message)
     return winners
 
@@ -1752,7 +1761,9 @@ class FeaturesCog(commands.Cog):
             try:
                 await finish_giveaway(self.bot, gw)
             except Exception as e:
-                print(f"[Giveaway Finish Error] {gw.get('message_id')}: {e}")
+                import traceback
+                print(f"[Giveaway Finish Error] {gw.get('message_id')}: {e!r}")
+                traceback.print_exc()
 
     # -------------------------------------------------------------
     # AFK SYSTEM: remove AFK when the user talks, tell people who ping an AFK user
