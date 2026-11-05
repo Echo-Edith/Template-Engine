@@ -665,6 +665,7 @@ async def dm_moderation_notice(user, guild: discord.Guild, action: str, reason: 
 AFK_USERS: Dict[tuple, dict] = {}
 REMINDERS: List[dict] = []
 GIVEAWAYS: Dict[str, dict] = {}
+GIVEAWAY_DEBUG: Dict[str, Any] = {"last_error": None, "last_tick": 0.0}  # shown by /giveaway status
 MAX_REMINDERS_PER_USER = 25
 
 
@@ -926,6 +927,7 @@ async def announce_giveaway_winners(bot: commands.Bot, gw: dict, winners: List[s
         return True
     except Exception as e:
         print(f"[Giveaway Announce Error] Could not send in channel {gw['channel_id']}: {e}")
+        GIVEAWAY_DEBUG["last_error"] = f"Could not post in channel {gw['channel_id']}: {e!r}"
         return False
 
 
@@ -951,6 +953,7 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
             await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
         except Exception as e:
             print(f"[Giveaway Edit Error] {gw['message_id']}: {e!r}")
+            GIVEAWAY_DEBUG["last_error"] = f"Edit failed: {e!r}"
     await announce_and_record(bot, gw, winners, message=message)
     return winners
 
@@ -962,6 +965,7 @@ async def announce_and_record(bot: commands.Bot, gw: dict, winners: List[str], r
         ok = await announce_giveaway_winners(bot, gw, winners, rerolled=rerolled, message=message)
     except Exception as e:
         print(f"[Giveaway Announce Crash] {e!r}")
+        GIVEAWAY_DEBUG["last_error"] = f"Announce crashed: {e!r}"
         ok = False
     gw["announced"] = bool(ok)
     gw["last_try"] = datetime.now(timezone.utc).timestamp()
@@ -1742,6 +1746,7 @@ class FeaturesCog(commands.Cog):
 
     @tasks.loop(seconds=10)
     async def scheduler_loop(self):
+        GIVEAWAY_DEBUG["last_tick"] = datetime.now(timezone.utc).timestamp()
         try:
             await self.process_reminders()
         except Exception as e:
@@ -1750,6 +1755,16 @@ class FeaturesCog(commands.Cog):
             await self.process_giveaways()
         except Exception as e:
             print(f"[Giveaway Loop Error] {e}")
+
+    @scheduler_loop.error
+    async def scheduler_loop_error(self, error):
+        # Without this a crash would stop the loop for good. Log it and start it again.
+        print(f"[Scheduler Crashed] {error!r}")
+        GIVEAWAY_DEBUG["last_error"] = f"Scheduler crashed: {error!r}"
+        try:
+            self.scheduler_loop.restart()
+        except Exception as e:
+            print(f"[Scheduler Restart Error] {e!r}")
 
     @scheduler_loop.before_loop
     async def before_scheduler_loop(self):
@@ -1800,6 +1815,7 @@ class FeaturesCog(commands.Cog):
             except Exception as e:
                 import traceback
                 print(f"[Giveaway Finish Error] {gw.get('message_id')}: {e!r}")
+                GIVEAWAY_DEBUG["last_error"] = f"Finish failed: {e!r}"
                 traceback.print_exc()
 
     # -------------------------------------------------------------

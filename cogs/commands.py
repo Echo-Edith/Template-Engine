@@ -17,6 +17,7 @@ from cogs.features import (
     RobloxUnsyncView,
     GiveawayView,
     GIVEAWAYS,
+    GIVEAWAY_DEBUG,
     MOD_ACTION_LABELS,
     MAX_REMINDERS_PER_USER,
     COLOR_PURPLE,
@@ -2126,6 +2127,29 @@ class CommandsCog(commands.Cog):
         embed.add_field(name="Winners", value=f"`{gw['winners']}`", inline=True)
         embed.add_field(name="Ends", value=f"<t:{int(gw['end_ts'])}:R>", inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @giveaway_group.command(name="status", description="Check why a giveaway is not ending (tracking, timer, errors).")
+    @app_commands.describe(message_id="The giveaway message ID.")
+    async def giveaway_status_cmd(self, interaction: discord.Interaction, message_id: str):
+        now = datetime.now(timezone.utc).timestamp()
+        gw = GIVEAWAYS.get(message_id.strip())
+        loop = self.bot.get_cog("FeaturesCog").scheduler_loop if self.bot.get_cog("FeaturesCog") else None
+        embed = embed_info("Giveaway Status")
+        embed.add_field(name="Tracked", value=f"`{gw is not None}`", inline=True)
+        embed.add_field(name="Giveaways Tracked", value=f"`{len(GIVEAWAYS)}`", inline=True)
+        embed.add_field(name="Timer Running", value=f"`{bool(loop and loop.is_running())}`", inline=True)
+        tick = GIVEAWAY_DEBUG.get("last_tick") or 0
+        embed.add_field(name="Last Timer Tick", value=f"<t:{int(tick)}:R>" if tick else "`Never`", inline=True)
+        if gw:
+            embed.add_field(name="Ended", value=f"`{bool(gw.get('ended'))}`", inline=True)
+            embed.add_field(name="Ends", value=f"<t:{int(gw['end_ts'])}:R>", inline=True)
+            embed.add_field(name="Due Now", value=f"`{gw['end_ts'] <= now}`", inline=True)
+            embed.add_field(name="Entries", value=f"`{len(gw['entries'])}`", inline=True)
+            embed.add_field(name="Winner Message Posted", value=f"`{gw.get('announced')}`", inline=True)
+        else:
+            embed.add_field(name="Problem", value="This giveaway is not tracked. The bot forgot it (restart without the database?). Use `/giveaway delete` and create a new one.", inline=False)
+        embed.add_field(name="Last Error", value=f"```{GIVEAWAY_DEBUG.get('last_error') or 'None'}```"[:1000], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @giveaway_group.command(name="end", description="End a giveaway now and pick the winners.")
     @app_commands.describe(message_id="The giveaway to end.")
