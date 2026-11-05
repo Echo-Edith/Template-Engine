@@ -45,7 +45,7 @@ if MONGO_URI:
 
 
 def get_subscription_price() -> int:
-    """Price shown on the site. Set by the bot's /change-price command (same database)."""
+    """Price shown on the site. Set by the bot's /change price command (same database)."""
     price = int(os.environ.get("DEFAULT_SUBSCRIPTION_PRICE", "299") or 299)
     if db_settings is not None:
         try:

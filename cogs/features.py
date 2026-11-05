@@ -1342,7 +1342,7 @@ LOCAL_PRICES: Dict[str, int] = {}
 
 
 def get_prices() -> dict:
-    """Current prices. dev_product_robux stays None until it is known (set by /change-price)."""
+    """Current prices. dev_product_robux stays None until it is known (set by /change price)."""
     prices = dict(DEFAULT_PRICES)
     prices.update({k: v for k, v in LOCAL_PRICES.items() if k in prices})
     if db_settings is not None:
@@ -1635,6 +1635,74 @@ def forget_broadcast(source_id: str):
 
 
 # -------------------------------------------------------------
+# PER-SERVER SETTINGS: join / leave messages and the message log channel
+# -------------------------------------------------------------
+GUILD_CONFIG: Dict[int, dict] = {}
+DEFAULT_GREETINGS = {
+    "join": "Welcome {user} to **{server}**! You are member **#{count}**. Read the rules and enjoy your stay.",
+    "leave": "**{username}** has left **{server}**. We are now **{count}** members.",
+}
+
+
+def get_guild_config(guild_id: int) -> dict:
+    gid = int(guild_id)
+    if gid in GUILD_CONFIG:
+        return GUILD_CONFIG[gid]
+    cfg: dict = {}
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": f"guild:{gid}"})
+            if doc:
+                cfg = {k: v for k, v in doc.items() if k != "_id"}
+        except Exception as e:
+            print(f"[Mongo Guild Config Read Error] {e}")
+    GUILD_CONFIG[gid] = cfg
+    return cfg
+
+
+def save_guild_config(guild_id: int) -> bool:
+    gid = int(guild_id)
+    cfg = GUILD_CONFIG.get(gid, {})
+    if db_settings is not None:
+        try:
+            db_settings.replace_one({"_id": f"guild:{gid}"}, {"_id": f"guild:{gid}", **cfg}, upsert=True)
+        except Exception as e:
+            print(f"[Mongo Guild Config Save Error] {e}")
+            return False
+    return True
+
+
+def render_greeting(template: str, member, guild) -> str:
+    """Fills in {user} {username} {server} {count} {id} in a join/leave message."""
+    return (template
+            .replace("{user}", member.mention)
+            .replace("{username}", member.name)
+            .replace("{server}", guild.name)
+            .replace("{count}", f"{guild.member_count:,}")
+            .replace("{id}", str(member.id)))
+
+
+def build_greeting_embed(kind: str, template: str, member, guild) -> discord.Embed:
+    """Clean embed for a join or leave message."""
+    text = render_greeting(template, member, guild)[:3500]
+    if kind == "join":
+        embed = discord.Embed(title="Welcome!", description=text, color=COLOR_GREEN)
+        embed.add_field(name="Member", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="Members", value=f"`{guild.member_count:,}`", inline=True)
+        embed.add_field(name="Account Created", value=f"<t:{int(member.created_at.timestamp())}:R>", inline=True)
+    else:
+        embed = discord.Embed(title="Goodbye", description=text, color=COLOR_RED)
+        embed.add_field(name="Member", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="Members", value=f"`{guild.member_count:,}`", inline=True)
+        joined = getattr(member, "joined_at", None)
+        if joined:
+            embed.add_field(name="Joined", value=f"<t:{int(joined.timestamp())}:R>", inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text=guild.name, icon_url=guild.icon.url if guild.icon else None)
+    return embed
+
+
+# -------------------------------------------------------------
 # ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
 # -------------------------------------------------------------
 class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
@@ -1860,7 +1928,7 @@ class NonPremiumDeploymentView(discord.ui.View):
     def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, dev_product_url: str = "", points_cost: int = 100):
         super().__init__(timeout=None)
         self.bot = bot
-        # The price shown in the DM is the price charged, even if /change-price runs later
+        # The price shown in the DM is the price charged, even if /change price runs later
         self.points_cost = int(points_cost)
         self.use_points_btn.label = f"Use Points ({self.points_cost:,} Pts)"
         self.submitting_user_id = str(submitting_user_id)
@@ -2371,6 +2439,96 @@ class FeaturesCog(commands.Cog):
             return
         rec["deleted"] = True  # stops a send that is still running
         asyncio.create_task(self._broadcast_delete_dms(sid, rec))
+
+    # -------------------------------------------------------------
+    # JOIN / LEAVE MESSAGES  (set with /greeting)
+    # -------------------------------------------------------------
+    async def _send_greeting(self, kind: str, member: discord.Member):
+        cfg = get_guild_config(member.guild.id).get(kind)
+        if not cfg or not cfg.get("enabled", True) or not cfg.get("channel_id"):
+            return
+        channel = member.guild.get_channel(int(cfg["channel_id"]))
+        if channel is None:
+            return
+        try:
+            embed = build_greeting_embed(kind, cfg.get("message") or DEFAULT_GREETINGS[kind], member, member.guild)
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            print(f"[Greeting Error] {kind} in {member.guild.id}: {e!r}")
+
+    @commands.Cog.listener("on_member_join")
+    async def greeting_on_join(self, member: discord.Member):
+        await self._send_greeting("join", member)
+
+    @commands.Cog.listener("on_member_remove")
+    async def greeting_on_leave(self, member: discord.Member):
+        await self._send_greeting("leave", member)
+
+    # -------------------------------------------------------------
+    # MESSAGE LOG: edited and deleted messages  (set with /messagelog)
+    # -------------------------------------------------------------
+    def _message_log_channel(self, guild_id: Optional[int]):
+        if not guild_id:
+            return None
+        channel_id = get_guild_config(guild_id).get("message_log")
+        return self.bot.get_channel(int(channel_id)) if channel_id else None
+
+    @commands.Cog.listener("on_raw_message_edit")
+    async def msglog_on_edit(self, payload: discord.RawMessageUpdateEvent):
+        log_channel = self._message_log_channel(payload.guild_id)
+        if log_channel is None or payload.channel_id == log_channel.id:
+            return
+        data = payload.data or {}
+        if "content" not in data:
+            return  # only a link preview or embed changed
+        cached = payload.cached_message
+        author = cached.author if cached else None
+        if (author and author.bot) or (data.get("author") or {}).get("bot"):
+            return
+        before = cached.content if cached else None
+        after = data.get("content", "")
+        if before is not None and before == after:
+            return
+        author_id = author.id if author else int((data.get("author") or {}).get("id", 0) or 0)
+        jump = f"https://discord.com/channels/{payload.guild_id}/{payload.channel_id}/{payload.message_id}"
+        embed = discord.Embed(title="Message Edited", description=f"[Jump to message]({jump})", color=COLOR_GOLD)
+        embed.add_field(name="Author", value=f"<@{author_id}>\n`{author_id}`" if author_id else "`Unknown`", inline=True)
+        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=True)
+        embed.add_field(name="Before", value=f"```{before[:900]}```" if before else "`Unknown (sent before the bot started)`", inline=False)
+        embed.add_field(name="After", value=f"```{after[:900]}```" if after else "`(empty)`", inline=False)
+        embed.timestamp = datetime.now(timezone.utc)
+        try:
+            await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            print(f"[Message Log Error] {e!r}")
+
+    @commands.Cog.listener("on_raw_message_delete")
+    async def msglog_on_delete(self, payload: discord.RawMessageDeleteEvent):
+        log_channel = self._message_log_channel(payload.guild_id)
+        if log_channel is None or payload.channel_id == log_channel.id:
+            return
+        cached = payload.cached_message
+        if cached and cached.author.bot:
+            return
+        embed = discord.Embed(title="Message Deleted", color=COLOR_RED)
+        if cached:
+            embed.add_field(name="Author", value=f"{cached.author.mention}\n`{cached.author.id}`", inline=True)
+        else:
+            embed.add_field(name="Author", value="`Unknown`", inline=True)
+        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=True)
+        if cached:
+            content = cached.content
+            embed.add_field(name="Content", value=f"```{content[:900]}```" if content else "`(no text)`", inline=False)
+            if cached.attachments:
+                embed.add_field(name="Attachments", value="\n".join(f"`{a.filename}`" for a in cached.attachments)[:1000], inline=False)
+        else:
+            embed.add_field(name="Content", value="`Unknown (sent before the bot started)`", inline=False)
+        embed.add_field(name="Message ID", value=f"`{payload.message_id}`", inline=False)
+        embed.timestamp = datetime.now(timezone.utc)
+        try:
+            await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            print(f"[Message Log Error] {e!r}")
 
     # -------------------------------------------------------------
     # EVENT LISTENER: WELCOME BONUS (20 POINTS)

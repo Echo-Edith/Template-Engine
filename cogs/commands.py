@@ -71,6 +71,11 @@ from cogs.features import (
     is_staff,
     list_staff,
     list_premium_users,
+    get_guild_config,
+    save_guild_config,
+    render_greeting,
+    build_greeting_embed,
+    DEFAULT_GREETINGS,
     HARDCODED_STAFF,
     COMMAND_ADMINS,
     extend_user_premium,
@@ -82,18 +87,18 @@ from cogs.features import (
 # WHO CAN USE WHAT (edit these sets to change access)
 #   PUBLIC_COMMANDS : anyone
 #   ADMIN_COMMANDS  : server members with the Administrator permission
-#   anything else   : bot owner only (set, points-set, premium-set, game, revenue, cookie-check)
+#   anything else   : bot owner only (set, premium, change, game, revenue, cookie)
 # -------------------------------------------------------------
-STAFF_COMMANDS = {"staff", "staff-list", "premiums"}  # only HARDCODED_STAFF may run these
+STAFF_COMMANDS = {"staff", "premiums"}  # only HARDCODED_STAFF may run these
 
 PUBLIC_COMMANDS = {
-    "points", "leaderboard", "roblox-user", "gameinfo", "timestamp", "remind",
+    "points", "leaderboard", "roblox", "gameinfo", "timestamp", "remind",
     "afk", "whois", "permissions", "rolelist", "channelstats", "redeem", "promo",
 }
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
     "warn", "clear", "purge", "mute", "unmute", "kick", "ban", "unban",
-    "lock", "unlock", "modlog", "giveaway",
+    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog",
 }
 
 
@@ -291,7 +296,7 @@ class AnnounceModal(discord.ui.Modal, title="Create Announcement"):
 
 
 # -------------------------------------------------------------
-# PRICE CHANGES (/change-price)
+# PRICE CHANGES (/change price)
 # -------------------------------------------------------------
 PRICE_LABELS = {
     "dev_product": ("Dev Product", "R$"),
@@ -659,7 +664,7 @@ class EditPromoLimitsModal(discord.ui.Modal, title="Edit Usage Limit and Expiry"
 # STAFF ROLE PICKER (shown after /staff add)
 # -------------------------------------------------------------
 class StaffListView(discord.ui.View):
-    """/staff-list: staff members (paged) + a role picker. The chosen role is saved and given by /staff add."""
+    """/staff list: staff members (paged) + a role picker. The chosen role is saved and given by /staff add."""
     PER_PAGE = 15
 
     def __init__(self, owner_id: int, page: int = 0):
@@ -911,7 +916,7 @@ class CommandsCog(commands.Cog):
     # -------------------------------------------------------------
     # SLASH COMMAND: SET / MODIFY USER POINTS
     # -------------------------------------------------------------
-    @app_commands.command(name="points-set", description="Add or deduct points for a specified user.")
+    @set_group.command(name="points", description="Add or deduct points for a specified user.")
     @app_commands.describe(
         user="The target user to modify points for.",
         action="Select whether to add or deduct points.",
@@ -956,11 +961,14 @@ class CommandsCog(commands.Cog):
     # -------------------------------------------------------------
     # SLASH COMMAND: SET / REMOVE PREMIUM STATUS
     # -------------------------------------------------------------
-    @app_commands.command(name="premium-set", description="Grant or revoke TE Premium subscription status for a user.")
+    premium_group = app_commands.Group(name="premium", description="Owner tools for TE Premium.")
+
+    @premium_group.command(name="set", description="Grant or revoke TE Premium subscription status for a user.")
     @app_commands.describe(
         user="Target user to modify premium status for.",
         action="Select whether to grant or revoke premium.",
-        duration="Duration format e.g. 1d, 7d, 30d, 1y, inf (Defaults to 30d)."
+        duration="Duration format e.g. 1d, 7d, 30d, 1y (Defaults to 30d).",
+        permanent="Give premium that never runs out (ignores duration)."
     )
     @app_commands.choices(action=[
         app_commands.Choice(name="Grant Premium", value="add"),
@@ -971,22 +979,26 @@ class CommandsCog(commands.Cog):
         interaction: discord.Interaction,
         user: discord.User,
         action: app_commands.Choice[str],
-        duration: Optional[str] = "30d"
+        duration: Optional[str] = "30d",
+        permanent: Optional[bool] = False
     ):
         await interaction.response.defer(ephemeral=True)
 
         try:
             if action.value == "add":
-                duration_td = parse_duration_to_timedelta(duration or "30d")
+                if permanent:
+                    duration_td = timedelta(days=36500)  # about 100 years
+                else:
+                    duration_td = parse_duration_to_timedelta(duration or "30d")
                 set_user_premium(str(user.id), duration_td)
                 exp_date = datetime.now(timezone.utc) + duration_td
                 exp_ts = int(exp_date.timestamp())
 
-                embed = discord.Embed(
-                    title="TE Premium Granted",
-                    description=f"Successfully granted TE Premium to {user.mention}!\n\nDuration: {duration}\nExpires: <t:{exp_ts}:F> (<t:{exp_ts}:R>)",
-                    color=0xF1C40F
-                )
+                if permanent:
+                    text = f"Successfully granted **permanent** TE Premium to {user.mention}!\n\nDuration: `Permanent`\nExpires: `Never`"
+                else:
+                    text = f"Successfully granted TE Premium to {user.mention}!\n\nDuration: `{duration}`\nExpires: <t:{exp_ts}:F> (<t:{exp_ts}:R>)"
+                embed = discord.Embed(title="TE Premium Granted", description=text, color=0xF1C40F)
             else:
                 remove_user_premium(str(user.id))
                 embed = discord.Embed(
@@ -1229,7 +1241,9 @@ class CommandsCog(commands.Cog):
         embed.add_field(name="Group ID", value=f"`{group_id}`", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="roblox-user", description="Look up a Roblox account by username.")
+    roblox_group = app_commands.Group(name="roblox", description="Roblox lookups.")
+
+    @roblox_group.command(name="user", description="Look up a Roblox account by username.")
     @app_commands.describe(username="The Roblox username to look up.")
     async def roblox_user_cmd(self, interaction: discord.Interaction, username: str):
         await interaction.response.defer()
@@ -1285,7 +1299,9 @@ class CommandsCog(commands.Cog):
             pass
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="cookie-check", description="Check if the saved Roblox cookie is still valid (owner only).")
+    cookie_group = app_commands.Group(name="cookie", description="Roblox cookie tools (owner only).")
+
+    @cookie_group.command(name="check", description="Check if the saved Roblox cookie is still valid (owner only).")
     async def cookie_check_cmd(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -2260,9 +2276,11 @@ class CommandsCog(commands.Cog):
 
 
     # =============================================================
-    # PRICES: /change-price
+    # PRICES: /change price
     # =============================================================
-    @app_commands.command(name="change-price", description="Change a price: dev product, subscription display, or points (owner only).")
+    change_group = app_commands.Group(name="change", description="Owner change tools.")
+
+    @change_group.command(name="price", description="Change a price: dev product, subscription display, or points (owner only).")
     @app_commands.describe(
         type="Which price to change.",
         amount="Set the price to exactly this number.",
@@ -2496,14 +2514,20 @@ class CommandsCog(commands.Cog):
     # =============================================================
     # STAFF (gets TE Premium automatically)
     # =============================================================
-    @app_commands.command(name="staff", description="Add or remove a staff member. Staff get TE Premium automatically.")
-    @app_commands.describe(action="Add or remove.", user="The staff member.")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Add", value="add"),
-        app_commands.Choice(name="Remove", value="remove"),
-    ])
-    async def staff_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str], user: discord.User):
-        if action.value == "add":
+    staff_group = app_commands.Group(name="staff", description="Staff tools. Staff get TE Premium automatically.")
+
+    @staff_group.command(name="add", description="Add a staff member. They get TE Premium and the saved staff role.")
+    @app_commands.describe(user="The new staff member.")
+    async def staff_add_cmd(self, interaction: discord.Interaction, user: discord.User):
+        await self._staff_action(interaction, "add", user)
+
+    @staff_group.command(name="remove", description="Remove a staff member and their TE Premium.")
+    @app_commands.describe(user="The staff member to remove.")
+    async def staff_remove_cmd(self, interaction: discord.Interaction, user: discord.User):
+        await self._staff_action(interaction, "remove", user)
+
+    async def _staff_action(self, interaction: discord.Interaction, action: str, user: discord.User):
+        if action == "add":
             if is_staff(user.id):
                 await interaction.response.send_message(embed=embed_err("Already Staff", f"{user.mention} (`{user.id}`) is already staff."), ephemeral=True, allowed_mentions=NO_PINGS)
                 return
@@ -2529,7 +2553,7 @@ class CommandsCog(commands.Cog):
                 else:
                     embed.add_field(name="Role", value="Not given (the user is not in this server, or the role was deleted).", inline=False)
             elif not role_info:
-                embed.add_field(name="Role", value="No staff role is set. Pick one in `/staff-list`.", inline=False)
+                embed.add_field(name="Role", value="No staff role is set. Pick one in `/staff list`.", inline=False)
             await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
             return
         else:
@@ -2562,10 +2586,100 @@ class CommandsCog(commands.Cog):
         pages = build_pages("TE Premium Users", lines, per_page=10, header=f"Premium users: `{len(lines)}`\n\n")
         await send_pages(interaction, pages, ephemeral=True)
 
-    @app_commands.command(name="staff-list", description="Show staff (one per line) and choose the role new staff get.")
+    @staff_group.command(name="list", description="Show staff (one per line) and choose the role new staff get.")
     async def staff_list_cmd(self, interaction: discord.Interaction):
         view = StaffListView(interaction.user.id)
         await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True, allowed_mentions=NO_PINGS)
+
+
+    # =============================================================
+    # SERVER SETTINGS: join / leave messages and message log
+    # =============================================================
+    @app_commands.command(name="greeting", description="Set the join or leave message and the channel it is sent in.")
+    @app_commands.describe(
+        action="Which message to set.",
+        channel="Where to send it. Keeps the old channel if empty.",
+        message="Use {user} {username} {server} {count} {id}. Empty keeps the old or default message.",
+        enabled="Turn this message on or off (default on)."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Join (new member)", value="join"),
+        app_commands.Choice(name="Leave (member left)", value="leave"),
+    ])
+    @app_commands.guild_only()
+    async def greeting_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        channel: Optional[discord.TextChannel] = None,
+        message: Optional[app_commands.Range[str, 1, 1500]] = None,
+        enabled: Optional[bool] = True
+    ):
+        kind = action.value
+        cfg = get_guild_config(interaction.guild.id)
+        entry = dict(cfg.get(kind) or {})
+
+        if channel is not None:
+            perms = channel.permissions_for(interaction.guild.me)
+            if not (perms.view_channel and perms.send_messages and perms.embed_links):
+                await interaction.response.send_message(
+                    embed=embed_err("Missing Permission", f"I need `View Channel`, `Send Messages` and `Embed Links` in {channel.mention}."), ephemeral=True)
+                return
+            entry["channel_id"] = channel.id
+        if not entry.get("channel_id"):
+            await interaction.response.send_message(
+                embed=embed_err("Channel Needed", "Choose a `channel` the first time you set this message."), ephemeral=True)
+            return
+        if message is not None:
+            entry["message"] = message
+        entry.setdefault("message", DEFAULT_GREETINGS[kind])
+        entry["enabled"] = bool(enabled)
+
+        cfg[kind] = entry
+        saved = save_guild_config(interaction.guild.id)
+
+        label = "Join" if kind == "join" else "Leave"
+        status = "`On`" if entry["enabled"] else "`Off`"
+        embed = embed_ok(f"{label} Message Saved", f"Channel: <#{entry['channel_id']}>\nStatus: {status}")
+        embed.add_field(name="Your Message", value=f"```{entry['message'][:900]}```", inline=False)
+        embed.add_field(name="Placeholders", value="`{user}` `{username}` `{server}` `{count}` `{id}`", inline=False)
+        if not saved:
+            embed.add_field(name="Warning", value="The database could not be reached. This only lasts until the bot restarts.", inline=False)
+        preview = build_greeting_embed(kind, entry["message"], interaction.user, interaction.guild)
+        preview.set_author(name="Preview (this is how it will look)")
+        await interaction.response.send_message(embeds=[embed, preview], ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="messagelog", description="Set the channel that logs edited and deleted messages.")
+    @app_commands.describe(
+        channel="The log channel.",
+        enabled="Turn the message log on or off (default on)."
+    )
+    @app_commands.guild_only()
+    async def messagelog_cmd(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        enabled: Optional[bool] = True
+    ):
+        cfg = get_guild_config(interaction.guild.id)
+        if not enabled:
+            cfg.pop("message_log", None)
+            saved = save_guild_config(interaction.guild.id)
+            embed = embed_ok("Message Log Off", "Edited and deleted messages are no longer logged.")
+        else:
+            perms = channel.permissions_for(interaction.guild.me)
+            if not (perms.view_channel and perms.send_messages and perms.embed_links):
+                await interaction.response.send_message(
+                    embed=embed_err("Missing Permission", f"I need `View Channel`, `Send Messages` and `Embed Links` in {channel.mention}."), ephemeral=True)
+                return
+            cfg["message_log"] = channel.id
+            saved = save_guild_config(interaction.guild.id)
+            embed = embed_ok("Message Log On", f"Edited and deleted messages will be logged in {channel.mention}.")
+            embed.add_field(name="Logged", value="`Edited messages`\n`Deleted messages`", inline=False)
+            embed.add_field(name="Note", value="Messages sent before the bot started may show as `Unknown`.", inline=False)
+        if not saved:
+            embed.add_field(name="Warning", value="The database could not be reached. This only lasts until the bot restarts.", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
