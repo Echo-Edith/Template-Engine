@@ -951,8 +951,35 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
             await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
         except Exception as e:
             print(f"[Giveaway Edit Error] {gw['message_id']}: {e!r}")
-    await announce_giveaway_winners(bot, gw, winners, message=message)
+    await announce_and_record(bot, gw, winners, message=message)
     return winners
+
+
+async def announce_and_record(bot: commands.Bot, gw: dict, winners: List[str], rerolled: bool = False,
+                              message: Optional[discord.Message] = None) -> bool:
+    """Posts the winner message and remembers if it worked. If it fails, the host gets a DM with the reason."""
+    try:
+        ok = await announce_giveaway_winners(bot, gw, winners, rerolled=rerolled, message=message)
+    except Exception as e:
+        print(f"[Giveaway Announce Crash] {e!r}")
+        ok = False
+    gw["announced"] = bool(ok)
+    gw["last_try"] = datetime.now(timezone.utc).timestamp()
+    gw["announce_tries"] = int(gw.get("announce_tries", 0)) + 1
+    save_giveaway(gw)
+    if not ok and gw["announce_tries"] == 1:
+        try:
+            host = await bot.fetch_user(int(gw["host_id"]))
+            names = ", ".join(f"<@{w}>" for w in winners) or "nobody"
+            await host.send(embed=embed_err(
+                "Could Not Post Giveaway Winners",
+                f"I could not post the winners for **{gw['prize']}** in <#{gw['channel_id']}>.\n"
+                f"Winners: {names}\n"
+                "Check that I can `View Channel`, `Send Messages` and `Embed Links` there. I will try again in a minute."
+            ))
+        except Exception as e:
+            print(f"[Giveaway Host DM Error] {e!r}")
+    return ok
 
 
 async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = None) -> Optional[List[str]]:
@@ -972,7 +999,7 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
             await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
         except Exception as e:
             print(f"[Giveaway Edit Error] {e}")
-    await announce_giveaway_winners(bot, gw, winners, rerolled=True, message=message)
+    await announce_and_record(bot, gw, winners, rerolled=True, message=message)
     return winners
 
 
@@ -1757,6 +1784,16 @@ class FeaturesCog(commands.Cog):
 
     async def process_giveaways(self):
         now = datetime.now(timezone.utc).timestamp()
+        # Retry winner messages that failed to post (up to 5 tries, within a day of ending)
+        for gw in [g for g in GIVEAWAYS.values()
+                   if g.get("ended") and g.get("announced") is False
+                   and int(g.get("announce_tries", 0)) < 5 and now - g["end_ts"] < 86400
+                   and now - g.get("last_try", 0) >= 60]:
+            try:
+                message = await get_giveaway_message(self.bot, gw)
+                await announce_and_record(self.bot, gw, gw.get("winner_ids", []), message=message)
+            except Exception as e:
+                print(f"[Giveaway Retry Error] {gw.get('message_id')}: {e!r}")
         for gw in [g for g in GIVEAWAYS.values() if not g.get("ended") and g["end_ts"] <= now]:
             try:
                 await finish_giveaway(self.bot, gw)
