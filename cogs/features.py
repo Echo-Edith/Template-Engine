@@ -188,6 +188,60 @@ def set_user_premium(user_id: str, duration_td: timedelta):
     LOCAL_PREMIUM_USERS[str(user_id)] = iso_exp
 
 
+LOCAL_STAFF: set = set()
+STAFF_PREMIUM_DAYS = 36500  # about 100 years: staff premium does not run out
+
+
+def add_staff(user_id: str) -> bool:
+    """Makes the user staff and gives them TE Premium. Returns False if the database save failed."""
+    uid = str(user_id)
+    LOCAL_STAFF.add(uid)
+    exp = (datetime.now(timezone.utc) + timedelta(days=STAFF_PREMIUM_DAYS)).isoformat()
+    LOCAL_PREMIUM_USERS[uid] = exp
+    if db_premium is not None:
+        try:
+            db_premium.update_one(
+                {"discord_id": uid},
+                {"$set": {"discord_id": uid, "expires_at": exp, "staff": True,
+                          "updated_at": datetime.now(timezone.utc).isoformat()}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo Add Staff Error] {e}")
+            return False
+    return True
+
+
+def is_staff(user_id: str) -> bool:
+    uid = str(user_id)
+    if db_premium is not None:
+        try:
+            return bool(db_premium.find_one({"discord_id": uid, "staff": True}))
+        except Exception as e:
+            print(f"[Mongo Staff Check Error] {e}")
+    return uid in LOCAL_STAFF
+
+
+def remove_staff(user_id: str) -> bool:
+    """Removes staff AND the premium that came with it. Returns False if the user was not staff."""
+    uid = str(user_id)
+    if not is_staff(uid):
+        return False
+    LOCAL_STAFF.discard(uid)
+    remove_user_premium(uid)
+    return True
+
+
+def list_staff() -> List[str]:
+    ids = set(LOCAL_STAFF)
+    if db_premium is not None:
+        try:
+            ids = {str(d["discord_id"]) for d in db_premium.find({"staff": True})}
+        except Exception as e:
+            print(f"[Mongo Staff List Error] {e}")
+    return sorted(ids)
+
+
 def remove_user_premium(user_id: str):
     """Removes premium status from MongoDB or local storage."""
     if db_premium is not None:
@@ -799,25 +853,42 @@ async def get_giveaway_message(bot: commands.Bot, gw: dict) -> Optional[discord.
         return None
 
 
-async def announce_giveaway_winners(message: discord.Message, gw: dict, winners: List[str], rerolled: bool = False):
+async def announce_giveaway_winners(bot: commands.Bot, gw: dict, winners: List[str], rerolled: bool = False,
+                                    message: Optional[discord.Message] = None) -> bool:
+    """Posts the winner announcement in the giveaway channel. Works even if the giveaway message is gone."""
+    channel = message.channel if message else bot.get_channel(int(gw["channel_id"]))
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(int(gw["channel_id"]))
+        except Exception as e:
+            print(f"[Giveaway Announce Error] Channel {gw['channel_id']} not found: {e}")
+            return False
+
+    jump = f"\n\n[Jump to giveaway]({message.jump_url})" if message else ""
     if winners:
         mentions = ", ".join(f"<@{w}>" for w in winners)
         title = "New Winner" if rerolled else "Giveaway Winner"
         if len(winners) > 1:
             title += "s"
-        embed = embed_ok(title, f"Congratulations {mentions}! You won **{gw['prize']}**.\n\n[Jump to giveaway]({message.jump_url})")
+        embed = embed_ok(title, f"Congratulations {mentions}! You won **{gw['prize']}**.{jump}")
         content = mentions
     else:
-        embed = embed_err("No Winners", f"There were no valid entries for **{gw['prize']}**.\n\n[Jump to giveaway]({message.jump_url})")
+        embed = embed_err("No Winners", f"There were no valid entries for **{gw['prize']}**.{jump}")
         content = None
+
+    allowed = discord.AllowedMentions(users=True, roles=False, everyone=False, replied_user=False)
+    if message:
+        try:
+            await message.reply(content=content, embed=embed, allowed_mentions=allowed)
+            return True
+        except Exception as e:
+            print(f"[Giveaway Announce Reply Error] {e}. Trying a normal message.")
     try:
-        await message.reply(
-            content=content,
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False, replied_user=False)
-        )
+        await channel.send(content=content, embed=embed, allowed_mentions=allowed)
+        return True
     except Exception as e:
-        print(f"[Giveaway Announce Error] {e}")
+        print(f"[Giveaway Announce Error] Could not send in channel {gw['channel_id']}: {e}")
+        return False
 
 
 async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False) -> List[str]:
@@ -839,7 +910,7 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
             await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
         except Exception as e:
             print(f"[Giveaway Edit Error] {e}")
-        await announce_giveaway_winners(message, gw, winners)
+    await announce_giveaway_winners(bot, gw, winners, message=message)
     return winners
 
 
@@ -860,7 +931,7 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
             await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
         except Exception as e:
             print(f"[Giveaway Edit Error] {e}")
-        await announce_giveaway_winners(message, gw, winners, rerolled=True)
+    await announce_giveaway_winners(bot, gw, winners, rerolled=True, message=message)
     return winners
 
 
@@ -1646,7 +1717,10 @@ class FeaturesCog(commands.Cog):
     async def process_giveaways(self):
         now = datetime.now(timezone.utc).timestamp()
         for gw in [g for g in GIVEAWAYS.values() if not g.get("ended") and g["end_ts"] <= now]:
-            await finish_giveaway(self.bot, gw)
+            try:
+                await finish_giveaway(self.bot, gw)
+            except Exception as e:
+                print(f"[Giveaway Finish Error] {gw.get('message_id')}: {e}")
 
     # -------------------------------------------------------------
     # AFK SYSTEM: remove AFK when the user talks, tell people who ping an AFK user
@@ -1927,21 +2001,52 @@ class FeaturesCog(commands.Cog):
             print(f"[DM Warning] Failed sending missing bot notification to {user_id}: {e}")
 
     async def nuke_guild_structure(self, guild: discord.Guild):
-        """Deletes existing channels, categories, and custom roles prior to auto-building."""
-        for channel in guild.channels:
-            try:
-                await channel.delete(reason="Template Engine Nuke Before Auto-Build")
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                print(f"[Nuke Channel Warning] Failed to delete {channel.name}: {e}")
+        """Deletes ALL channels, categories and every role the bot is allowed to delete, before building."""
+        reason = "Template Engine Nuke Before Auto-Build"
 
-        for role in guild.roles:
-            if not role.is_default() and not role.managed and role.position < guild.me.top_role.position:
+        # Community servers cannot delete their rules/updates channels, so turn Community off first.
+        if "COMMUNITY" in guild.features:
+            try:
+                await guild.edit(community=False, reason=reason)
+            except Exception as e:
+                print(f"[Nuke Community Warning] Could not turn off Community: {e}")
+
+        failed = 0
+        for attempt in range(2):  # second pass catches anything that failed the first time
+            # channels first, categories last
+            targets = [c for c in guild.channels if not isinstance(c, discord.CategoryChannel)]
+            targets += [c for c in guild.channels if isinstance(c, discord.CategoryChannel)]
+            failed = 0
+            for channel in targets:
                 try:
-                    await role.delete(reason="Template Engine Nuke Before Auto-Build")
-                    await asyncio.sleep(0.1)
+                    await channel.delete(reason=reason)
+                    await asyncio.sleep(0.2)
+                except discord.NotFound:
+                    pass
                 except Exception as e:
-                    print(f"[Nuke Role Warning] Failed to delete role {role.name}: {e}")
+                    failed += 1
+                    print(f"[Nuke Channel Warning] Failed to delete {channel.name}: {e}")
+            if not failed:
+                break
+            await asyncio.sleep(1)
+
+        role_failed = 0
+        for role in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+            if role.is_default() or role.managed:
+                continue
+            if role.position >= guild.me.top_role.position:
+                role_failed += 1
+                continue
+            try:
+                await role.delete(reason=reason)
+                await asyncio.sleep(0.2)
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                role_failed += 1
+                print(f"[Nuke Role Warning] Failed to delete role {role.name}: {e}")
+
+        print(f"[Nuke] {guild.name}: {failed} channels and {role_failed} roles could not be deleted.")
 
     async def execute_auto_build(self, guild: discord.Guild, layout: dict):
         try:

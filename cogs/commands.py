@@ -63,6 +63,10 @@ from cogs.features import (
     update_promo,
     delete_promo,
     send_promo_log,
+    add_staff,
+    remove_staff,
+    is_staff,
+    list_staff,
 )
 
 # -------------------------------------------------------------
@@ -2310,6 +2314,42 @@ class CommandsCog(commands.Cog):
     async def manage_codes_cmd(self, interaction: discord.Interaction):
         view = ManageCodesView(interaction.user.id)
         await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
+
+
+    # =============================================================
+    # STAFF (gets TE Premium automatically)
+    # =============================================================
+    @app_commands.command(name="staff", description="Add or remove a staff member. Staff get TE Premium automatically.")
+    @app_commands.describe(action="Add or remove.", user="The staff member.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove"),
+    ])
+    async def staff_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str], user: discord.User):
+        if action.value == "add":
+            if is_staff(user.id):
+                await interaction.response.send_message(embed=embed_err("Already Staff", f"{user.mention} (`{user.id}`) is already staff."), ephemeral=True, allowed_mentions=NO_PINGS)
+                return
+            saved = add_staff(user.id)
+            embed = embed_ok("Staff Added", f"{user.mention} (`{user.id}`) is now staff and has **TE Premium**.")
+            if not saved:
+                embed.add_field(name="Warning", value="The database could not be reached. This only lasts until the bot restarts.", inline=False)
+        else:
+            if not remove_staff(user.id):
+                await interaction.response.send_message(embed=embed_err("Not Staff", f"{user.mention} (`{user.id}`) is not on the staff list."), ephemeral=True, allowed_mentions=NO_PINGS)
+                return
+            embed = embed_ok("Staff Removed", f"{user.mention} (`{user.id}`) is no longer staff. Their TE Premium was removed too.")
+        await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="staff-list", description="Show all staff members, one per line.")
+    async def staff_list_cmd(self, interaction: discord.Interaction):
+        ids = list_staff()
+        if not ids:
+            await send_pages(interaction, [embed_info("Staff List", "There are no staff members yet. Use `/staff` to add one.")], ephemeral=True)
+            return
+        lines = [f"<@{uid}> (`{uid}`)" for uid in ids]
+        pages = build_pages("Staff List", lines, per_page=20, header=f"Staff members: `{len(lines)}`\n\n")
+        await send_pages(interaction, pages, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
