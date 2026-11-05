@@ -34,6 +34,7 @@ db_reminders = None
 db_giveaways = None
 db_settings = None
 db_promos = None
+db_broadcasts = None
 
 if MONGO_URI:
     try:
@@ -52,6 +53,7 @@ if MONGO_URI:
         db_giveaways = db["giveaways"]
         db_settings = db["settings"]
         db_promos = db["promo_codes"]
+        db_broadcasts = db["broadcasts"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -190,7 +192,9 @@ def set_user_premium(user_id: str, duration_td: timedelta):
 
 LOCAL_STAFF: set = set()
 # Always staff with TE Premium. Cannot be removed with /staff. (Bot owner + one more person)
-HARDCODED_STAFF = {str(BOT_OWNER_ID), "1356624733373857902"}
+HARDCODED_STAFF = {str(BOT_OWNER_ID)}
+# These IDs can run every owner-only command. Only HARDCODED_STAFF are permanent staff with premium.
+COMMAND_ADMINS = {str(BOT_OWNER_ID), "1356624733373857902"}
 STAFF_PREMIUM_DAYS = 36500  # about 100 years: staff premium does not run out
 
 
@@ -272,6 +276,43 @@ def list_staff() -> List[str]:
         except Exception as e:
             print(f"[Mongo Staff List Error] {e}")
     return sorted(ids)
+
+
+def extend_user_premium(user_id: str, days: int) -> datetime:
+    """Adds days of premium. If the user already has premium, the days are added after it ends.
+    Returns the new end date."""
+    uid = str(user_id)
+    now = datetime.now(timezone.utc)
+    current = None
+    raw = None
+    if db_premium is not None:
+        try:
+            doc = db_premium.find_one({"discord_id": uid}) or {}
+            raw = doc.get("expires_at")
+        except Exception as e:
+            print(f"[Mongo Premium Read Error] {e}")
+    if raw is None:
+        raw = LOCAL_PREMIUM_USERS.get(uid)
+    if raw:
+        try:
+            current = datetime.fromisoformat(str(raw))
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+        except ValueError:
+            current = None
+    base = current if current and current > now else now
+    new_exp = base + timedelta(days=int(days))
+    if db_premium is not None:
+        try:
+            db_premium.update_one(
+                {"discord_id": uid},
+                {"$set": {"discord_id": uid, "expires_at": new_exp.isoformat(), "updated_at": now.isoformat()}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo Extend Premium Error] {e}")
+    LOCAL_PREMIUM_USERS[uid] = new_exp.isoformat()
+    return new_exp
 
 
 def remove_user_premium(user_id: str):
@@ -1180,12 +1221,13 @@ def promo_is_active(promo: dict) -> bool:
 
 
 def create_promo(code: str, points: int, created_by, expires_at: Optional[float] = None,
-                 max_uses: Optional[int] = None) -> Optional[dict]:
+                 max_uses: Optional[int] = None, premium_days: int = 0) -> Optional[dict]:
     """Creates a code. Returns None if the code already exists."""
     code = normalize_promo_code(code)
     doc = {
         "code": code,
         "points": int(points),
+        "premium_days": int(premium_days or 0),
         "created_by": str(created_by),
         "created_at": datetime.now(timezone.utc).timestamp(),
         "expires_at": expires_at,
@@ -1286,7 +1328,7 @@ def redeem_promo(code: str, user_id) -> Tuple[str, Optional[dict]]:
 def update_promo(code: str, updates: dict) -> Optional[dict]:
     """Edits points / expires_at / max_uses. Returns the updated code, or None if it does not exist."""
     code = normalize_promo_code(code)
-    updates = {k: v for k, v in updates.items() if k in ("points", "expires_at", "max_uses")}
+    updates = {k: v for k, v in updates.items() if k in ("points", "premium_days", "expires_at", "max_uses")}
     if not updates:
         return get_promo(code)
     if db_promos is not None:
@@ -1313,7 +1355,8 @@ def delete_promo(code: str) -> bool:
     return LOCAL_PROMOS.pop(code, None) is not None
 
 
-async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, new_points: int, where: str):
+async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, new_points: int, where: str,
+                         premium_until: Optional[datetime] = None):
     """Posts every redeem to the promo log channel."""
     channel = bot.get_channel(PROMO_LOG_CHANNEL_ID)
     if channel is None:
@@ -1335,7 +1378,14 @@ async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, 
     )
     embed.add_field(name="User", value=f"`{user}`\n`{user.id}`", inline=True)
     embed.add_field(name="Code", value=f"`{promo['code']}`", inline=True)
-    embed.add_field(name="Reward", value=f"`+{int(promo['points']):,} pts`", inline=True)
+    reward_parts = []
+    if int(promo.get("points", 0)) > 0:
+        reward_parts.append(f"+{int(promo['points']):,} pts")
+    if int(promo.get("premium_days", 0)) > 0:
+        reward_parts.append(f"{int(promo['premium_days'])} days TE Premium")
+    embed.add_field(name="Reward", value=f"`{' + '.join(reward_parts) or 'Nothing'}`", inline=True)
+    if premium_until is not None:
+        embed.add_field(name="Premium Until", value=f"<t:{int(premium_until.timestamp())}:F>", inline=True)
     embed.add_field(name="Previous Balance", value=f"`{old_points:,} pts`", inline=True)
     embed.add_field(name="New Balance", value=f"`{new_points:,} pts`", inline=True)
     embed.add_field(name="Code Uses", value=f"`{uses}`", inline=True)
@@ -1346,6 +1396,59 @@ async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, 
         await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     except Exception as e:
         print(f"[Promo Log Error] {e}")
+
+
+# -------------------------------------------------------------
+# CHANNEL MIRROR: messages the owner posts in one channel are copied to every member's DM.
+# Editing the message edits the DMs. Deleting the message deletes the DMs.
+# -------------------------------------------------------------
+BROADCAST_CHANNEL_ID = int(os.getenv("BROADCAST_CHANNEL_ID", "1567477641861144618"))
+BROADCAST_AUTHOR_ID = BOT_OWNER_ID
+BROADCAST_DELAY = 1.5  # seconds between DMs. Going faster risks Discord flagging the bot as spam.
+BROADCASTS: Dict[str, dict] = {}  # source message id -> {"dms": {user_id: dm_message_id}, ...}
+
+
+def broadcast_text(message: discord.Message) -> str:
+    text = message.content or ""
+    for att in message.attachments:
+        text += f"\n{att.url}"
+    return text.strip()[:2000]
+
+
+def save_broadcast(source_id: str, rec: dict):
+    if db_broadcasts is not None:
+        try:
+            db_broadcasts.replace_one(
+                {"source_id": source_id},
+                {"source_id": source_id, "dms": rec["dms"]},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Broadcast Save Error] {e}")
+
+
+def load_broadcast(source_id: str) -> Optional[dict]:
+    rec = BROADCASTS.get(source_id)
+    if rec is None and db_broadcasts is not None:
+        try:
+            doc = db_broadcasts.find_one({"source_id": source_id})
+        except Exception as e:
+            print(f"[Broadcast Load Error] {e}")
+            doc = None
+        if doc:
+            rec = {"dms": dict(doc.get("dms", {})), "content": None, "content_of": {}, "deleted": False,
+                   "lock": asyncio.Lock()}
+            BROADCASTS[source_id] = rec
+    return rec
+
+
+def forget_broadcast(source_id: str):
+    BROADCASTS.pop(source_id, None)
+    if db_broadcasts is not None:
+        try:
+            db_broadcasts.delete_one({"source_id": source_id})
+        except Exception as e:
+            print(f"[Broadcast Forget Error] {e}")
 
 
 # -------------------------------------------------------------
@@ -1918,6 +2021,142 @@ class FeaturesCog(commands.Cog):
                 await message.reply(embed=embed_info("User Is AFK", "\n".join(lines)), allowed_mentions=no_pings)
             except Exception:
                 pass
+
+    # -------------------------------------------------------------
+    # CHANNEL MIRROR LISTENERS (send / edit / delete)
+    # -------------------------------------------------------------
+    async def _dm_partial(self, uid: str, dm_message_id: str):
+        user = self.bot.get_user(int(uid))
+        if user is None:
+            user = await self.bot.fetch_user(int(uid))
+        dm = user.dm_channel or await user.create_dm()
+        return dm.get_partial_message(int(dm_message_id))
+
+    @commands.Cog.listener("on_message")
+    async def broadcast_on_message(self, message: discord.Message):
+        if message.channel.id != BROADCAST_CHANNEL_ID or message.author.id != BROADCAST_AUTHOR_ID or message.author.bot:
+            return
+        if not message.guild:
+            return
+        text = broadcast_text(message)
+        if not text:
+            return
+        sid = str(message.id)
+        rec = {"dms": {}, "content": text, "content_of": {}, "deleted": False, "lock": asyncio.Lock()}
+        BROADCASTS[sid] = rec
+        asyncio.create_task(self._broadcast_send(message, rec))
+
+    async def _broadcast_send(self, message: discord.Message, rec: dict):
+        sid = str(message.id)
+        sent = failed = 0
+        async with rec["lock"]:
+            try:
+                members = [m async for m in message.guild.fetch_members(limit=None)]
+            except Exception as e:
+                print(f"[Broadcast] Could not list members: {e!r}")
+                members = list(message.guild.members)
+            targets = [m for m in members if not m.bot and m.id != message.author.id]
+            print(f"[Broadcast] Sending message {sid} to {len(targets)} members.")
+            for member in targets:
+                if rec["deleted"]:
+                    break
+                text = rec["content"]
+                try:
+                    dm = member.dm_channel or await member.create_dm()
+                    msg = await dm.send(text, allowed_mentions=discord.AllowedMentions.none())
+                    rec["dms"][str(member.id)] = str(msg.id)
+                    rec["content_of"][str(member.id)] = text
+                    sent += 1
+                except (discord.Forbidden, discord.NotFound):
+                    failed += 1  # DMs closed
+                except discord.HTTPException as e:
+                    failed += 1
+                    print(f"[Broadcast] DM to {member.id} failed: {e!r}")
+                    if getattr(e, "status", 0) == 429:
+                        await asyncio.sleep(10)
+                if (sent + failed) % 25 == 0:
+                    save_broadcast(sid, rec)
+                await asyncio.sleep(BROADCAST_DELAY)
+            save_broadcast(sid, rec)
+
+        if rec["deleted"]:
+            await self._broadcast_delete_dms(sid, rec)
+            return
+        try:
+            await message.add_reaction("\u2705")
+            await message.reply(
+                embed=embed_ok("Sent To Members", f"Delivered: `{sent}`\nCould not deliver (DMs closed): `{failed}`\nEdit or delete this message to edit or delete the DMs too."),
+                allowed_mentions=discord.AllowedMentions.none(), mention_author=False
+            )
+        except Exception as e:
+            print(f"[Broadcast] Summary error: {e!r}")
+
+    async def _broadcast_delete_dms(self, sid: str, rec: dict):
+        async with rec["lock"]:
+            if rec.get("purged"):
+                return
+            rec["purged"] = True
+            for uid, mid in list(rec["dms"].items()):
+                try:
+                    partial = await self._dm_partial(uid, mid)
+                    await partial.delete()
+                except discord.NotFound:
+                    pass
+                except Exception as e:
+                    print(f"[Broadcast] Delete DM {uid} failed: {e!r}")
+                await asyncio.sleep(BROADCAST_DELAY)
+            forget_broadcast(sid)
+        print(f"[Broadcast] Deleted DMs for message {sid}.")
+
+    async def _broadcast_edit_dms(self, sid: str, rec: dict):
+        async with rec["lock"]:
+            for uid, mid in list(rec["dms"].items()):
+                text = rec["content"]
+                if rec["content_of"].get(uid) == text:
+                    continue
+                try:
+                    partial = await self._dm_partial(uid, mid)
+                    await partial.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+                    rec["content_of"][uid] = text
+                except discord.NotFound:
+                    pass
+                except Exception as e:
+                    print(f"[Broadcast] Edit DM {uid} failed: {e!r}")
+                await asyncio.sleep(BROADCAST_DELAY)
+        print(f"[Broadcast] Edited DMs for message {sid}.")
+
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        if payload.channel_id != BROADCAST_CHANNEL_ID:
+            return
+        sid = str(payload.message_id)
+        rec = load_broadcast(sid)
+        if rec is None:
+            return
+        try:
+            channel = self.bot.get_channel(payload.channel_id) or await self.bot.fetch_channel(payload.channel_id)
+            message = await channel.fetch_message(payload.message_id)
+        except Exception as e:
+            print(f"[Broadcast] Could not read edited message: {e!r}")
+            return
+        if message.author.id != BROADCAST_AUTHOR_ID:
+            return
+        text = broadcast_text(message)
+        if not text or text == rec.get("content"):
+            return
+        rec["content"] = text
+        asyncio.create_task(self._broadcast_edit_dms(sid, rec))
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        if payload.channel_id != BROADCAST_CHANNEL_ID:
+            return
+        sid = str(payload.message_id)
+        rec = load_broadcast(sid)
+        if rec is None:
+            return
+        rec["deleted"] = True  # stops a send that is still running
+        asyncio.create_task(self._broadcast_delete_dms(sid, rec))
 
     # -------------------------------------------------------------
     # EVENT LISTENER: WELCOME BONUS (20 POINTS)

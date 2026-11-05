@@ -1,5 +1,6 @@
 import os
 import secrets
+from datetime import datetime, timezone
 import json
 import asyncio
 import requests
@@ -58,7 +59,7 @@ def get_subscription_price() -> int:
 
 
 # Permanent staff always have premium (same list as the bot's HARDCODED_STAFF)
-HARDCODED_STAFF = {"1219266886143967245", "1356624733373857902"}
+HARDCODED_STAFF = {"1219266886143967245"}
 
 
 def is_user_premium(discord_id: str) -> bool:
@@ -70,6 +71,16 @@ def is_user_premium(discord_id: str) -> bool:
         try:
             doc = db_premium.find_one({"discord_id": str(discord_id)})
             if doc:
+                raw = doc.get("expires_at")
+                if raw:
+                    try:
+                        exp = datetime.fromisoformat(str(raw))
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=timezone.utc)
+                        if exp <= datetime.now(timezone.utc):
+                            return False  # premium ran out
+                    except ValueError:
+                        pass
                 return True
         except Exception as e:
             print(f"[Mongo Premium Check Error] {e}")

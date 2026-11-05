@@ -69,6 +69,8 @@ from cogs.features import (
     is_staff,
     list_staff,
     HARDCODED_STAFF,
+    COMMAND_ADMINS,
+    extend_user_premium,
     set_staff_role,
     get_staff_role,
 )
@@ -426,16 +428,25 @@ def promo_uses_text(promo: dict) -> str:
     return f"{promo.get('uses', 0)}/{limit}" if limit is not None else f"{promo.get('uses', 0)}/unlimited"
 
 
+def promo_reward_text(promo: dict) -> str:
+    parts = []
+    if int(promo.get("points", 0)) > 0:
+        parts.append(f"{int(promo['points']):,} pts")
+    if int(promo.get("premium_days", 0)) > 0:
+        parts.append(f"{int(promo['premium_days'])}d TE Premium")
+    return " + ".join(parts) or "nothing"
+
+
 def promo_line(promo: dict) -> str:
     expires = promo.get("expires_at")
     expires_text = f"<t:{int(expires)}:R>" if expires else "never"
-    return f"`{promo['code']}` | `{int(promo['points']):,}` pts | uses `{promo_uses_text(promo)}` | expires {expires_text}"
+    return f"`{promo['code']}` | `{promo_reward_text(promo)}` | uses `{promo_uses_text(promo)}` | expires {expires_text}"
 
 
 def promo_detail_embed(promo: dict, notice: Optional[str] = None) -> discord.Embed:
     embed = embed_info(f"Promo Code | {promo['code']}", notice)
     embed.add_field(name="Code", value=f"`{promo['code']}`", inline=True)
-    embed.add_field(name="Reward", value=f"`{int(promo['points']):,} pts`", inline=True)
+    embed.add_field(name="Reward", value=f"`{promo_reward_text(promo)}`", inline=True)
     embed.add_field(name="Uses", value=f"`{promo_uses_text(promo)}`", inline=True)
     expires = promo.get("expires_at")
     embed.add_field(name="Expires", value=f"<t:{int(expires)}:F> (<t:{int(expires)}:R>)" if expires else "`Never`", inline=False)
@@ -560,27 +571,36 @@ class ManageCodesView(discord.ui.View):
         await self._show(interaction, self.page, None, notice=notice)
 
 
-class EditPromoPointsModal(discord.ui.Modal, title="Edit Reward Points"):
-    points_input = discord.ui.TextInput(label="New reward (points)", required=True, max_length=9)
+class EditPromoPointsModal(discord.ui.Modal, title="Edit Reward"):
+    points_input = discord.ui.TextInput(label="Reward points (0 = none)", required=True, max_length=9)
+    premium_input = discord.ui.TextInput(label="TE Premium days (0 = none, 30 = one month)", required=True, max_length=4)
 
     def __init__(self, owner_id: int, page: int, promo: dict):
         super().__init__()
         self.owner_id = owner_id
         self.page = page
         self.code = promo["code"]
-        self.points_input.default = str(int(promo["points"]))
+        self.points_input.default = str(int(promo.get("points", 0)))
+        self.premium_input.default = str(int(promo.get("premium_days", 0)))
 
     async def on_submit(self, interaction: discord.Interaction):
-        text = self.points_input.value.strip().replace(",", "")
-        if not text.isdigit() or not (1 <= int(text) <= 1_000_000):
-            await interaction.response.send_message(embed=embed_err("Invalid Points", "Enter a whole number from `1` to `1,000,000`."), ephemeral=True)
+        points_text = self.points_input.value.strip().replace(",", "")
+        days_text = self.premium_input.value.strip()
+        if (not points_text.isdigit() or int(points_text) > 1_000_000
+                or not days_text.isdigit() or int(days_text) > 3650):
+            await interaction.response.send_message(
+                embed=embed_err("Invalid Reward", "Points must be `0` to `1,000,000`. Premium days must be `0` to `3,650`."), ephemeral=True)
             return
-        promo = update_promo(self.code, {"points": int(text)})
+        points, days = int(points_text), int(days_text)
+        if points == 0 and days == 0:
+            await interaction.response.send_message(embed=embed_err("Invalid Reward", "A code must give points or premium (or both)."), ephemeral=True)
+            return
+        promo = update_promo(self.code, {"points": points, "premium_days": days})
         if not promo:
             await interaction.response.send_message(embed=embed_err("Code Not Found", f"`{self.code}` no longer exists."), ephemeral=True)
             return
         view = ManageCodesView(self.owner_id, self.page, self.code)
-        await interaction.response.edit_message(embed=view.build_embed(f"Reward changed to `{int(text):,} pts`. People who already used the code keep what they got."), view=view)
+        await interaction.response.edit_message(embed=view.build_embed(f"Reward changed to `{promo_reward_text(promo)}`. People who already used the code keep what they got."), view=view)
 
 
 class EditPromoLimitsModal(discord.ui.Modal, title="Edit Usage Limit and Expiry"):
@@ -715,7 +735,7 @@ class CommandsCog(commands.Cog):
 
         # Staff commands: ONLY the hard-coded staff IDs (checked before anything else)
         if root_name in STAFF_COMMANDS:
-            if str(interaction.user.id) in HARDCODED_STAFF:
+            if str(interaction.user.id) in COMMAND_ADMINS:
                 return True
             denied = embed_err("Permission Denied", "Only the main staff can use this command.")
             try:
@@ -728,7 +748,7 @@ class CommandsCog(commands.Cog):
             return False
 
         # Main staff (the two hard-coded IDs) can use every command
-        if interaction.user.id == BOT_OWNER_ID or str(interaction.user.id) in HARDCODED_STAFF:
+        if interaction.user.id == BOT_OWNER_ID or str(interaction.user.id) in COMMAND_ADMINS:
             return True
 
         # Public commands: anyone can use these
@@ -2346,26 +2366,45 @@ class CommandsCog(commands.Cog):
             await interaction.response.send_message(embed=embed_err(title, text), ephemeral=True)
             return
 
-        reward = int(promo["points"])
-        new_total = add_user_points(str(interaction.user.id), reward)
+        reward = int(promo.get("points", 0))
+        premium_days = int(promo.get("premium_days", 0))
+        new_total = add_user_points(str(interaction.user.id), reward) if reward > 0 else add_user_points(str(interaction.user.id), 0)
         old_total = new_total - reward
 
-        embed = embed_ok("Code Redeemed!", f"You got **{reward:,} points**.")
+        premium_until = None
+        if premium_days > 0:
+            try:
+                premium_until = extend_user_premium(str(interaction.user.id), premium_days)
+            except Exception as e:
+                print(f"[Promo Premium Error] {e}")
+
+        parts = []
+        if reward > 0:
+            parts.append(f"**{reward:,} points**")
+        if premium_days > 0:
+            parts.append(f"**{premium_days} days of TE Premium**")
+        embed = embed_ok("Code Redeemed!", "You got " + " and ".join(parts) + ".")
         embed.add_field(name="Code", value=f"`{promo['code']}`", inline=True)
-        embed.add_field(name="Reward", value=f"`+{reward:,} pts`", inline=True)
-        embed.add_field(name="New Balance", value=f"`{new_total:,} pts`", inline=True)
+        if reward > 0:
+            embed.add_field(name="Points", value=f"`+{reward:,} pts`", inline=True)
+            embed.add_field(name="New Balance", value=f"`{new_total:,} pts`", inline=True)
+        if premium_until is not None:
+            embed.add_field(name="TE Premium Until", value=f"<t:{int(premium_until.timestamp())}:F>", inline=False)
+        elif premium_days > 0:
+            embed.add_field(name="TE Premium", value="Could not be saved. Please contact staff.", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
         try:
             where = interaction.guild.name if interaction.guild else "Direct Message"
-            await send_promo_log(self.bot, interaction.user, promo, old_total, new_total, where)
+            await send_promo_log(self.bot, interaction.user, promo, old_total, new_total, where, premium_until)
         except Exception as e:
             print(f"[Promo Log Error] {e}")
 
-    @set_group.command(name="code", description="Create a promo code that gives points.")
+    @set_group.command(name="code", description="Create a promo code that gives points and/or TE Premium.")
     @app_commands.describe(
         code="The code people type, e.g. WELCOME100 (letters, numbers, - and _).",
-        points="How many points the code gives.",
+        points="How many points the code gives. Optional if you set premium_days.",
+        premium_days="Optional. Days of TE Premium the code gives (30 = one month).",
         duration="Optional. How long the code works, e.g. 12h, 7d, 2w.",
         usage_limit="Optional. How many people can use it in total."
     )
@@ -2373,10 +2412,17 @@ class CommandsCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         code: app_commands.Range[str, 3, 32],
-        points: app_commands.Range[int, 1, 1000000],
+        points: Optional[app_commands.Range[int, 0, 1000000]] = None,
+        premium_days: Optional[app_commands.Range[int, 1, 3650]] = None,
         duration: Optional[str] = None,
         usage_limit: Optional[app_commands.Range[int, 1, 1000000]] = None
     ):
+        points = int(points or 0)
+        premium_days = int(premium_days or 0)
+        if points == 0 and premium_days == 0:
+            await interaction.response.send_message(
+                embed=embed_err("No Reward", "Give `points`, `premium_days`, or both."), ephemeral=True)
+            return
         normalized = normalize_promo_code(code)
         if not PROMO_CODE_RE.match(normalized):
             await interaction.response.send_message(
@@ -2393,7 +2439,7 @@ class CommandsCog(commands.Cog):
                 return
             expires_at = datetime.now(timezone.utc).timestamp() + delta.total_seconds()
 
-        promo = create_promo(normalized, points, interaction.user.id, expires_at, usage_limit)
+        promo = create_promo(normalized, points, interaction.user.id, expires_at, usage_limit, premium_days)
         if promo is None:
             await interaction.response.send_message(
                 embed=embed_err("Code Already Exists", f"`{normalized}` already exists. Use `/manage codes` to edit or delete it."),
@@ -2403,7 +2449,7 @@ class CommandsCog(commands.Cog):
 
         embed = embed_ok("Promo Code Created", f"People can now use `/redeem {normalized}`.")
         embed.add_field(name="Code", value=f"`{normalized}`", inline=True)
-        embed.add_field(name="Reward", value=f"`{points:,} pts`", inline=True)
+        embed.add_field(name="Reward", value=f"`{promo_reward_text(promo)}`", inline=True)
         embed.add_field(name="Usage Limit", value=f"`{usage_limit:,}`" if usage_limit else "`Unlimited`", inline=True)
         embed.add_field(name="Expires", value=f"<t:{int(expires_at)}:R>" if expires_at else "`Never`", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
