@@ -96,6 +96,9 @@ from cogs.features import (
     count_shop_sale,
     shop_key,
     HAS_CARD_LAYOUT,
+    LIFETIME_PREMIUM_DAYS,
+    has_lifetime_premium,
+    set_user_premium,
     GIVEAWAY_DIVIDER,
     SHOP_LOG_CHANNEL_ID,
     SHOP_LOCKS,
@@ -819,7 +822,7 @@ class BackupConfirmView(discord.ui.View):
 # -------------------------------------------------------------
 def shop_reward_text(item: dict) -> str:
     if item["reward"] == "premium":
-        return f"{int(item['premium_days'])} days TE Premium"
+        return "Lifetime TE Premium" if item.get("permanent") else f"{int(item['premium_days'])} days TE Premium"
     if item["reward"] == "role":
         return f"<@&{item['role_id']}> role"
     return "Delivered by staff"
@@ -992,6 +995,8 @@ class ShopConfirmView(discord.ui.View):
         balance = get_user_points(uid)
         if balance < price:
             return embed_err("Not Enough Points", f"You need `{price:,} pts` but you have `{balance:,} pts`.")
+        if item["reward"] == "premium" and item.get("permanent") and has_lifetime_premium(uid):
+            return embed_err("Already Owned", "You already have lifetime TE Premium.")
         if item["reward"] == "role":
             if not interaction.guild or interaction.guild.id != int(item["guild_id"]):
                 return embed_err("Wrong Server", "This role can only be bought in the server it belongs to.")
@@ -1009,7 +1014,10 @@ class ShopConfirmView(discord.ui.View):
         new_balance = add_user_points(uid, -price)
         premium_until = None
         try:
-            if item["reward"] == "premium":
+            if item["reward"] == "premium" and item.get("permanent"):
+                set_user_premium(uid, timedelta(days=LIFETIME_PREMIUM_DAYS))
+                premium_until = datetime.now(timezone.utc) + timedelta(days=LIFETIME_PREMIUM_DAYS)
+            elif item["reward"] == "premium":
                 premium_until = extend_user_premium(uid, int(item["premium_days"]))
             elif item["reward"] == "role":
                 await member.add_roles(role, reason=f"Bought in the points shop: {item['name']}")
@@ -1024,7 +1032,9 @@ class ShopConfirmView(discord.ui.View):
         embed = embed_ok("Purchase Complete!", f"You bought **{item['name']}**.")
         embed.add_field(name="Paid", value=f"`{price:,} pts`", inline=True)
         embed.add_field(name="New Balance", value=f"`{new_balance:,} pts`", inline=True)
-        if premium_until is not None:
+        if item["reward"] == "premium" and item.get("permanent"):
+            embed.add_field(name="TE Premium", value="`Lifetime`", inline=False)
+        elif premium_until is not None:
             embed.add_field(name="TE Premium Until", value=f"<t:{int(premium_until.timestamp())}:F>", inline=False)
         if item["reward"] == "custom":
             embed.add_field(name="Next Step", value="Staff were told and will deliver it to you soon.", inline=False)
@@ -3134,6 +3144,7 @@ class CommandsCog(commands.Cog):
         price="Price in points (for Add).",
         reward="What the buyer gets (for Add).",
         premium_days="Days of TE Premium (for the Premium reward).",
+        permanent="Sell lifetime TE Premium that never runs out (no premium_days needed).",
         role="The role to give (for the Role reward).",
         stock="Optional. How many can be sold. Empty = unlimited.",
         description="Optional. Shown when someone buys. Good for Custom items."
@@ -3154,6 +3165,7 @@ class CommandsCog(commands.Cog):
         price: Optional[app_commands.Range[int, 1, 10000000]] = None,
         reward: Optional[app_commands.Choice[str]] = None,
         premium_days: Optional[app_commands.Range[int, 1, 3650]] = None,
+        permanent: Optional[bool] = False,
         role: Optional[discord.Role] = None,
         stock: Optional[app_commands.Range[int, 1, 1000000]] = None,
         description: Optional[app_commands.Range[str, 1, 300]] = None
@@ -3168,8 +3180,8 @@ class CommandsCog(commands.Cog):
         if price is None or reward is None:
             await interaction.response.send_message(embed=embed_err("Missing Options", "To add an item, give `price` and `reward`."), ephemeral=True)
             return
-        if reward.value == "premium" and premium_days is None:
-            await interaction.response.send_message(embed=embed_err("Missing Options", "The TE Premium reward needs `premium_days`. Use `30` for one month."), ephemeral=True)
+        if reward.value == "premium" and premium_days is None and not permanent:
+            await interaction.response.send_message(embed=embed_err("Missing Options", "The TE Premium reward needs `premium_days` (30 = one month) or `permanent: True` for lifetime."), ephemeral=True)
             return
         if reward.value == "role":
             if role is None or not interaction.guild:
@@ -3184,7 +3196,7 @@ class CommandsCog(commands.Cog):
 
         item = {
             "key": shop_key(name), "name": name.strip(), "price": int(price), "reward": reward.value,
-            "premium_days": int(premium_days or 0), "role_id": role.id if role else None,
+            "premium_days": int(premium_days or 0), "permanent": bool(permanent and reward.value == "premium"), "role_id": role.id if role else None,
             "guild_id": interaction.guild.id if interaction.guild else None,
             "stock": int(stock) if stock else None, "description": description or "",
             "sold": 0, "created_at": datetime.now(timezone.utc).timestamp(),

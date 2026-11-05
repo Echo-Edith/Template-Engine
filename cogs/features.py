@@ -319,6 +319,36 @@ def extend_user_premium(user_id: str, days: int) -> datetime:
     return new_exp
 
 
+LIFETIME_PREMIUM_DAYS = 36500  # about 100 years = lifetime
+
+
+def get_premium_expiry(user_id: str) -> Optional[datetime]:
+    """When the user's premium ends (None if they have none)."""
+    uid = str(user_id)
+    raw = None
+    if db_premium is not None:
+        try:
+            raw = (db_premium.find_one({"discord_id": uid}) or {}).get("expires_at")
+        except Exception as e:
+            print(f"[Mongo Premium Read Error] {e}")
+    if raw is None:
+        raw = LOCAL_PREMIUM_USERS.get(uid)
+    if not raw:
+        return None
+    try:
+        exp = datetime.fromisoformat(str(raw))
+        return exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def has_lifetime_premium(user_id: str) -> bool:
+    if str(user_id) in HARDCODED_STAFF:
+        return True
+    exp = get_premium_expiry(user_id)
+    return bool(exp and exp > datetime.now(timezone.utc) + timedelta(days=LIFETIME_PREMIUM_DAYS - 365))
+
+
 def list_premium_users() -> List[str]:
     """IDs of everyone with active TE Premium (permanent staff included)."""
     now = datetime.now(timezone.utc)
