@@ -846,8 +846,50 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
     return embed
 
 
+async def giveaway_enter(interaction: discord.Interaction):
+    """Enter / leave a giveaway (used by both the classic and the card layout buttons)."""
+    gw = GIVEAWAYS.get(str(interaction.message.id))
+    if not gw:
+        await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "This giveaway is no longer tracked."), ephemeral=True)
+        return
+    if gw.get("ended") or gw["end_ts"] <= datetime.now(timezone.utc).timestamp():
+        await interaction.response.send_message(embed=embed_err("Giveaway Ended", "This giveaway has already ended."), ephemeral=True)
+        return
+
+    uid = str(interaction.user.id)
+    if uid in gw["entries"]:
+        gw["entries"].remove(uid)
+        save_giveaway(gw)
+        embed = embed_info("Entry Removed", f"You left the giveaway for **{gw['prize']}**.\nClick the gift button again to rejoin.", COLOR_GOLD)
+    else:
+        gw["entries"].append(uid)
+        save_giveaway(gw)
+        embed = embed_ok("You Are In!", f"You entered the giveaway for **{gw['prize']}**.\nTotal entries: `{len(gw['entries'])}`\nClick the gift button again to leave.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    try:
+        await interaction.message.edit(**giveaway_payload(gw, interaction.message))
+    except Exception as e:
+        print(f"[Giveaway Count Update Error] {e!r}")
+
+
+async def giveaway_entries(interaction: discord.Interaction):
+    gw = GIVEAWAYS.get(str(interaction.message.id))
+    if not gw:
+        await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "This giveaway is no longer tracked."), ephemeral=True)
+        return
+    if gw.get("ended"):
+        await interaction.response.send_message(embed=embed_err("Giveaway Ended", "This giveaway has already ended."), ephemeral=True)
+        return
+    lines = [f"<@{uid}>" for uid in gw["entries"]]
+    pages = build_pages(
+        "Giveaway Entries", lines, per_page=20,
+        header=f"**{gw['prize']}**\nTotal entries: `{len(lines)}`\n\n"
+    )
+    await send_pages(interaction, pages, ephemeral=True)
+
+
 class GiveawayView(discord.ui.View):
-    """Persistent Enter / Entries buttons. The giveaway is found by the message the button is on."""
+    """Classic layout (embed + buttons under it). Used for old giveaway messages and when the card layout is not available."""
 
     def __init__(self, ended: bool = False, entries: int = 0):
         super().__init__(timeout=None)
@@ -860,50 +902,79 @@ class GiveawayView(discord.ui.View):
     def for_giveaway(cls, gw: dict) -> "GiveawayView":
         return cls(ended=bool(gw.get("ended")), entries=len(gw["entries"]))
 
-    async def refresh_message(self, interaction: discord.Interaction, gw: dict):
-        """Updates the entry count on the giveaway message (embed + Entries button)."""
-        try:
-            await interaction.message.edit(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw))
-        except Exception as e:
-            print(f"[Giveaway Count Update Error] {e!r}")
-
     @discord.ui.button(emoji="\U0001F381", style=discord.ButtonStyle.primary, custom_id="giveaway_enter")
     async def enter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gw = GIVEAWAYS.get(str(interaction.message.id))
-        if not gw:
-            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "This giveaway is no longer tracked."), ephemeral=True)
-            return
-        if gw.get("ended") or gw["end_ts"] <= datetime.now(timezone.utc).timestamp():
-            await interaction.response.send_message(embed=embed_err("Giveaway Ended", "This giveaway has already ended."), ephemeral=True)
-            return
-
-        uid = str(interaction.user.id)
-        if uid in gw["entries"]:
-            gw["entries"].remove(uid)
-            save_giveaway(gw)
-            embed = embed_info("Entry Removed", f"You left the giveaway for **{gw['prize']}**.\nClick **Enter** again to rejoin.", COLOR_GOLD)
-        else:
-            gw["entries"].append(uid)
-            save_giveaway(gw)
-            embed = embed_ok("You Are In!", f"You entered the giveaway for **{gw['prize']}**.\nTotal entries: `{len(gw['entries'])}`\nClick **Enter** again to leave.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        await self.refresh_message(interaction, gw)
+        await giveaway_enter(interaction)
 
     @discord.ui.button(label="Entries", style=discord.ButtonStyle.secondary, custom_id="giveaway_entries")
     async def entries_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gw = GIVEAWAYS.get(str(interaction.message.id))
-        if not gw:
-            await interaction.response.send_message(embed=embed_err("Giveaway Not Found", "This giveaway is no longer tracked."), ephemeral=True)
-            return
-        if gw.get("ended"):
-            await interaction.response.send_message(embed=embed_err("Giveaway Ended", "This giveaway has already ended."), ephemeral=True)
-            return
-        lines = [f"<@{uid}>" for uid in gw["entries"]]
-        pages = build_pages(
-            "Giveaway Entries", lines, per_page=20,
-            header=f"**{gw['prize']}**\nTotal entries: `{len(lines)}`\n\n"
-        )
-        await send_pages(interaction, pages, ephemeral=True)
+        await giveaway_entries(interaction)
+
+
+# Card layout: the buttons sit INSIDE the card (needs discord.py 2.6 or newer)
+HAS_CARD_LAYOUT = all(hasattr(discord.ui, n) for n in ("LayoutView", "Container", "ActionRow", "TextDisplay", "Separator"))
+
+if HAS_CARD_LAYOUT:
+    class _GiveawayEnterButton(discord.ui.Button):
+        def __init__(self, disabled: bool = False):
+            super().__init__(emoji="\U0001F381", style=discord.ButtonStyle.primary, custom_id="giveaway_enter", disabled=disabled)
+
+        async def callback(self, interaction: discord.Interaction):
+            await giveaway_enter(interaction)
+
+    class _GiveawayEntriesButton(discord.ui.Button):
+        def __init__(self, entries: int = 0, disabled: bool = False):
+            super().__init__(label=f"Entries ({entries})", style=discord.ButtonStyle.secondary, custom_id="giveaway_entries", disabled=disabled)
+
+        async def callback(self, interaction: discord.Interaction):
+            await giveaway_entries(interaction)
+
+    class GiveawayLayout(discord.ui.LayoutView):
+        """The whole giveaway as one card: prize, end time, host, entries, winners and the buttons."""
+
+        def __init__(self, gw: Optional[dict] = None):
+            super().__init__(timeout=None)
+            if gw is None:  # used only to register the buttons when the bot starts
+                gw = {"prize": "", "end_ts": 0, "host_id": 0, "entries": [], "winners": 1, "ended": False}
+            ended = bool(gw.get("ended"))
+            host = f"<@{gw['host_id']}>"
+            end_ts = int(gw["end_ts"])
+
+            container = discord.ui.Container(accent_colour=discord.Colour(COLOR_GRAY if ended else COLOR_PURPLE))
+            container.add_item(discord.ui.TextDisplay(f"### {gw['prize']}"))
+            if ended:
+                winner_ids = gw.get("winner_ids", [])
+                label = "Winner" if len(winner_ids) == 1 else "Winners"
+                winners_text = ", ".join(f"<@{w}>" for w in winner_ids) if winner_ids else "No valid entries"
+                container.add_item(discord.ui.Separator())
+                container.add_item(discord.ui.TextDisplay(f"**Hosted by:** {host}\n**{label}:** {winners_text}"))
+            else:
+                container.add_item(discord.ui.TextDisplay(f"Ends <t:{end_ts}:R> \u2022 <t:{end_ts}:F>"))
+                container.add_item(discord.ui.Separator())
+                container.add_item(discord.ui.TextDisplay(
+                    f"**Hosted by:** {host}\n**Entries:** {len(gw['entries'])}\n**Winners:** {int(gw['winners'])}"
+                ))
+            row = discord.ui.ActionRow()
+            row.add_item(_GiveawayEnterButton(disabled=ended))
+            row.add_item(_GiveawayEntriesButton(len(gw["entries"]), disabled=ended))
+            container.add_item(row)
+            self.add_item(container)
+
+
+def message_uses_card_layout(message: Optional[discord.Message]) -> bool:
+    flags = getattr(message, "flags", None)
+    return bool(getattr(flags, "components_v2", False))
+
+
+def giveaway_payload(gw: dict, message: Optional[discord.Message] = None) -> dict:
+    """Arguments for channel.send() / message.edit() that show the giveaway.
+    New giveaways use the card layout. Old giveaway messages (and bots without discord.py 2.6) use the embed layout."""
+    if HAS_CARD_LAYOUT and (message is None or message_uses_card_layout(message)):
+        return {"view": GiveawayLayout(gw)}
+    payload = {"embed": build_giveaway_embed(gw), "view": GiveawayView.for_giveaway(gw)}
+    if message is not None and message_uses_card_layout(message):
+        payload["view"] = GiveawayView.for_giveaway(gw)
+    return payload
 
 
 async def _resolve_member(guild: Optional[discord.Guild], uid: str):
@@ -1035,7 +1106,7 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
     else:
         GIVEAWAY_DEBUG["stage"] = f"{mid}: editing message"
         try:
-            await asyncio.wait_for(message.edit(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw)), timeout=20)
+            await asyncio.wait_for(message.edit(**giveaway_payload(gw, message)), timeout=20)
         except Exception as e:
             print(f"[Giveaway Edit Error] {mid}: {e!r}")
             GIVEAWAY_DEBUG["last_error"] = f"Edit failed: {e!r}"
@@ -1090,7 +1161,7 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
     message = await get_giveaway_message(bot, gw)
     if message:
         try:
-            await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw))
+            await message.edit(**giveaway_payload(gw, message))
         except Exception as e:
             print(f"[Giveaway Edit Error] {e}")
     await announce_and_record(bot, gw, winners, rerolled=True, message=message)
@@ -2543,4 +2614,9 @@ async def setup(bot: commands.Bot):
     bot.add_view(RobloxUnsyncView())
     bot.add_view(PremiumMissingBotView())
     bot.add_view(GiveawayView())
+    if HAS_CARD_LAYOUT:
+        try:
+            bot.add_view(GiveawayLayout())
+        except Exception as e:
+            print(f"[Giveaway Layout Warning] Could not register the card buttons: {e!r}")
     await bot.add_cog(FeaturesCog(bot))

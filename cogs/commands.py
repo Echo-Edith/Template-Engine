@@ -16,6 +16,7 @@ from cogs.features import (
     RobloxVerificationView,
     RobloxUnsyncView,
     GiveawayView,
+    giveaway_payload,
     GIVEAWAYS,
     GIVEAWAY_DEBUG,
     MOD_ACTION_LABELS,
@@ -2094,7 +2095,7 @@ class CommandsCog(commands.Cog):
             "winner_ids": [],
         }
         try:
-            msg = await channel.send(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw))
+            msg = await channel.send(allowed_mentions=NO_PINGS, **giveaway_payload(gw))
         except Exception as e:
             await interaction.followup.send(embed=embed_err("Could Not Post Giveaway", f"`{e}`"), ephemeral=True)
             return
@@ -2139,7 +2140,7 @@ class CommandsCog(commands.Cog):
         message = await get_giveaway_message(self.bot, gw)
         if message:
             try:
-                await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw))
+                await message.edit(**giveaway_payload(gw, message))
             except Exception as e:
                 await interaction.followup.send(embed=embed_err("Saved, But Could Not Update Message", f"`{e}`"), ephemeral=True)
                 return

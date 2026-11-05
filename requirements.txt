@@ -2,7 +2,7 @@ Flask==3.0.3
 gunicorn==22.0.0
 requests==2.32.3
 aiohttp==3.9.5
-discord.py==2.4.0
+discord.py>=2.6.0
 pymongo[srv]==4.8.0
 google-genai>=0.1.0
 python-dotenv==1.0.1
