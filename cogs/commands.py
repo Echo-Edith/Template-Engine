@@ -632,12 +632,32 @@ class EditPromoLimitsModal(discord.ui.Modal, title="Edit Usage Limit and Expiry"
 # -------------------------------------------------------------
 # STAFF ROLE PICKER (shown after /staff add)
 # -------------------------------------------------------------
-class StaffRoleView(discord.ui.View):
-    def __init__(self, owner_id: int, member: Optional[discord.Member], user: discord.User):
-        super().__init__(timeout=120)
+class StaffListView(discord.ui.View):
+    """/staff-list: staff members (paged) + a role picker. The chosen role is saved and given by /staff add."""
+    PER_PAGE = 15
+
+    def __init__(self, owner_id: int, page: int = 0):
+        super().__init__(timeout=300)
         self.owner_id = owner_id
-        self.member = member
-        self.user = user
+        self.ids = list_staff()
+        self.pages = max(1, -(-len(self.ids) // self.PER_PAGE))
+        self.page = max(0, min(page, self.pages - 1))
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= self.pages - 1
+        if self.pages == 1:
+            self.remove_item(self.prev_btn)
+            self.remove_item(self.next_btn)
+
+    def build_embed(self, notice: Optional[str] = None) -> discord.Embed:
+        chunk = self.ids[self.page * self.PER_PAGE:(self.page + 1) * self.PER_PAGE]
+        lines = "\n".join(f"<@{uid}> (`{uid}`)" for uid in chunk) or "No staff members yet. Use `/staff` to add one."
+        role_info = get_staff_role()
+        role_text = f"<@&{role_info['role_id']}>" if role_info else "`Not set`"
+        embed = embed_info("Staff List", f"{notice}\n\n" if notice else "")
+        embed.description = (embed.description or "") + f"Staff members: `{len(self.ids)}`\n**Role given by `/staff add`:** {role_text}\n\n{lines}"
+        if self.pages > 1:
+            embed.set_footer(text=f"Page {self.page + 1}/{self.pages}")
+        return embed
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -645,12 +665,22 @@ class StaffRoleView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choose the role to give...", min_values=1, max_values=1)
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = StaffListView(self.owner_id, self.page - 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view, allowed_mentions=NO_PINGS)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = StaffListView(self.owner_id, self.page + 1)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view, allowed_mentions=NO_PINGS)
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choose the role new staff get...", min_values=1, max_values=1, row=0)
     async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
         role = select.values[0]
         guild = interaction.guild
-        if self.member is None or guild is None:
-            await interaction.response.edit_message(embed=embed_err("User Not In Server", f"{self.user.mention} is not in this server, so I cannot give them a role."), view=None, allowed_mentions=NO_PINGS)
+        if guild is None:
+            await interaction.response.send_message(embed=embed_err("Server Only", "Use this inside a server."), ephemeral=True)
             return
         if role.is_default() or role.managed:
             await interaction.response.send_message(embed=embed_err("Cannot Use This Role", "Pick a normal role (not @everyone and not a bot role)."), ephemeral=True)
@@ -658,22 +688,12 @@ class StaffRoleView(discord.ui.View):
         if role >= guild.me.top_role:
             await interaction.response.send_message(embed=embed_err("Role Too High", f"{role.mention} is higher than my top role. Move my role above it first."), ephemeral=True, allowed_mentions=NO_PINGS)
             return
-        try:
-            await self.member.add_roles(role, reason=f"Staff role chosen by {interaction.user}")
-        except Exception as e:
-            await interaction.response.send_message(embed=embed_err("Could Not Give Role", f"`{e}`"), ephemeral=True)
-            return
-        set_staff_role(self.user.id, guild.id, role.id)
-        await interaction.response.edit_message(
-            embed=embed_ok("Staff Role Given", f"{self.user.mention} (`{self.user.id}`) now has {role.mention}."),
-            view=None, allowed_mentions=NO_PINGS
-        )
-        self.stop()
-
-    @discord.ui.button(label="Skip (no role)", style=discord.ButtonStyle.secondary)
-    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=embed_info("Staff Added", f"{self.user.mention} is staff. No role was given."), view=None, allowed_mentions=NO_PINGS)
-        self.stop()
+        saved = set_staff_role(guild.id, role.id)
+        notice = f"Saved. New staff will get {role.mention} and TE Premium."
+        if not saved:
+            notice += "\nThe database could not be reached, so this only lasts until the bot restarts."
+        view = StaffListView(self.owner_id, self.page)
+        await interaction.response.edit_message(embed=view.build_embed(notice), view=view, allowed_mentions=NO_PINGS)
 
 
 # -------------------------------------------------------------
@@ -2384,25 +2404,39 @@ class CommandsCog(commands.Cog):
             embed = embed_ok("Staff Added", f"{user.mention} (`{user.id}`) is now staff and has **TE Premium**.")
             if not saved:
                 embed.add_field(name="Warning", value="The database could not be reached. This only lasts until the bot restarts.", inline=False)
-            view = None
-            if interaction.guild:
+            role_info = get_staff_role()
+            if role_info and interaction.guild and interaction.guild.id == role_info["guild_id"]:
+                role = interaction.guild.get_role(role_info["role_id"])
                 member = interaction.guild.get_member(user.id)
-                embed.add_field(name="Role", value="Choose a Discord role to give them below, or press Skip.", inline=False)
-                view = StaffRoleView(interaction.user.id, member, user)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True, allowed_mentions=NO_PINGS) if view else await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
+                if member is None:
+                    try:
+                        member = await interaction.guild.fetch_member(user.id)
+                    except Exception:
+                        member = None
+                if role and member:
+                    try:
+                        await member.add_roles(role, reason=f"Staff added by {interaction.user}")
+                        embed.add_field(name="Role Given", value=role.mention, inline=False)
+                    except Exception as e:
+                        embed.add_field(name="Role", value=f"Could not give {role.mention}: `{e}`", inline=False)
+                else:
+                    embed.add_field(name="Role", value="Not given (the user is not in this server, or the role was deleted).", inline=False)
+            elif not role_info:
+                embed.add_field(name="Role", value="No staff role is set. Pick one in `/staff-list`.", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
             return
         else:
             if str(user.id) in HARDCODED_STAFF:
                 await interaction.response.send_message(embed=embed_err("Cannot Remove", f"{user.mention} (`{user.id}`) is permanent staff. This is set in the code."), ephemeral=True, allowed_mentions=NO_PINGS)
                 return
-            role_info = get_staff_role(user.id)
+            role_info = get_staff_role()
             if not remove_staff(user.id):
                 await interaction.response.send_message(embed=embed_err("Not Staff", f"{user.mention} (`{user.id}`) is not on the staff list."), ephemeral=True, allowed_mentions=NO_PINGS)
                 return
             embed = embed_ok("Staff Removed", f"{user.mention} (`{user.id}`) is no longer staff. Their TE Premium was removed too.")
             if role_info and interaction.guild and interaction.guild.id == role_info.get("guild_id"):
                 member = interaction.guild.get_member(user.id)
-                role = interaction.guild.get_role(role_info.get("role_id", 0))
+                role = interaction.guild.get_role(role_info["role_id"])
                 if member and role:
                     try:
                         await member.remove_roles(role, reason="Removed from staff")
@@ -2411,15 +2445,10 @@ class CommandsCog(commands.Cog):
                         embed.add_field(name="Role", value=f"Could not remove {role.mention}: `{e}`", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="staff-list", description="Show all staff members, one per line.")
+    @app_commands.command(name="staff-list", description="Show staff (one per line) and choose the role new staff get.")
     async def staff_list_cmd(self, interaction: discord.Interaction):
-        ids = list_staff()
-        if not ids:
-            await send_pages(interaction, [embed_info("Staff List", "There are no staff members yet. Use `/staff` to add one.")], ephemeral=True)
-            return
-        lines = [f"<@{uid}> (`{uid}`)" for uid in ids]
-        pages = build_pages("Staff List", lines, per_page=20, header=f"Staff members: `{len(lines)}`\n\n")
-        await send_pages(interaction, pages, ephemeral=True)
+        view = StaffListView(interaction.user.id)
+        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True, allowed_mentions=NO_PINGS)
 
 
 async def setup(bot: commands.Bot):

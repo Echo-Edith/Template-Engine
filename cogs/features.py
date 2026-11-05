@@ -214,30 +214,32 @@ def add_staff(user_id: str) -> bool:
     return True
 
 
-LOCAL_STAFF_ROLES: dict = {}
+LOCAL_STAFF_ROLE: dict = {}
 
 
-def set_staff_role(user_id: str, guild_id: int, role_id: int):
-    """Remembers which Discord role was given to a staff member (so /staff remove can take it back)."""
-    uid = str(user_id)
-    LOCAL_STAFF_ROLES[uid] = {"guild_id": int(guild_id), "role_id": int(role_id)}
-    if db_premium is not None:
+def set_staff_role(guild_id: int, role_id: int) -> bool:
+    """Saves the Discord role that /staff add gives. Returns False if the database save failed."""
+    LOCAL_STAFF_ROLE.clear()
+    LOCAL_STAFF_ROLE.update({"guild_id": int(guild_id), "role_id": int(role_id)})
+    if db_settings is not None:
         try:
-            db_premium.update_one({"discord_id": uid}, {"$set": {"staff_role": LOCAL_STAFF_ROLES[uid]}})
+            db_settings.update_one({"_id": "staff_role"}, {"$set": dict(LOCAL_STAFF_ROLE)}, upsert=True)
         except Exception as e:
             print(f"[Mongo Staff Role Error] {e}")
+            return False
+    return True
 
 
-def get_staff_role(user_id: str) -> Optional[dict]:
-    uid = str(user_id)
-    if db_premium is not None:
+def get_staff_role() -> Optional[dict]:
+    if db_settings is not None:
         try:
-            doc = db_premium.find_one({"discord_id": uid}) or {}
-            if doc.get("staff_role"):
-                return doc["staff_role"]
+            doc = db_settings.find_one({"_id": "staff_role"})
+            if doc and doc.get("role_id"):
+                return {"guild_id": int(doc["guild_id"]), "role_id": int(doc["role_id"])}
+            return None
         except Exception as e:
             print(f"[Mongo Staff Role Read Error] {e}")
-    return LOCAL_STAFF_ROLES.get(uid)
+    return dict(LOCAL_STAFF_ROLE) or None
 
 
 def is_staff(user_id: str) -> bool:
