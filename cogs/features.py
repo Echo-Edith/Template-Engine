@@ -774,6 +774,9 @@ def delete_giveaway_record(message_id: str):
 # -------------------------------------------------------------
 # GIVEAWAY ENGINE
 # -------------------------------------------------------------
+GIVEAWAY_DIVIDER = "\u2500" * 28
+
+
 def build_giveaway_embed(gw: dict) -> discord.Embed:
     end_ts = int(gw["end_ts"])
     host = f"<@{gw['host_id']}>"
@@ -790,7 +793,13 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
     else:
         embed = discord.Embed(
             title=gw["prize"],
-            description=f"Click **Enter** to join the giveaway!\n\n**Ends:** <t:{end_ts}:R>\n**Hosted by:** {host}\n**Winners:** `{int(gw['winners'])}`",
+            description=(
+                f"Ends <t:{end_ts}:R> \u2022 <t:{end_ts}:F>\n"
+                f"{GIVEAWAY_DIVIDER}\n"
+                f"**Hosted by:** {host}\n"
+                f"**Entries:** {len(gw['entries'])}\n"
+                f"**Winners:** {int(gw['winners'])}"
+            ),
             color=COLOR_PURPLE
         )
     return embed
@@ -799,13 +808,25 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
 class GiveawayView(discord.ui.View):
     """Persistent Enter / Entries buttons. The giveaway is found by the message the button is on."""
 
-    def __init__(self, ended: bool = False):
+    def __init__(self, ended: bool = False, entries: int = 0):
         super().__init__(timeout=None)
+        self.entries_btn.label = f"Entries ({entries})"
         if ended:
             self.enter_btn.disabled = True
             self.entries_btn.disabled = True
 
-    @discord.ui.button(label="Enter", style=discord.ButtonStyle.success, custom_id="giveaway_enter")
+    @classmethod
+    def for_giveaway(cls, gw: dict) -> "GiveawayView":
+        return cls(ended=bool(gw.get("ended")), entries=len(gw["entries"]))
+
+    async def refresh_message(self, interaction: discord.Interaction, gw: dict):
+        """Updates the entry count on the giveaway message (embed + Entries button)."""
+        try:
+            await interaction.message.edit(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw))
+        except Exception as e:
+            print(f"[Giveaway Count Update Error] {e!r}")
+
+    @discord.ui.button(emoji="\U0001F381", style=discord.ButtonStyle.primary, custom_id="giveaway_enter")
     async def enter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         gw = GIVEAWAYS.get(str(interaction.message.id))
         if not gw:
@@ -825,6 +846,7 @@ class GiveawayView(discord.ui.View):
             save_giveaway(gw)
             embed = embed_ok("You Are In!", f"You entered the giveaway for **{gw['prize']}**.\nTotal entries: `{len(gw['entries'])}`\nClick **Enter** again to leave.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        await self.refresh_message(interaction, gw)
 
     @discord.ui.button(label="Entries", style=discord.ButtonStyle.secondary, custom_id="giveaway_entries")
     async def entries_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -972,7 +994,7 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
     else:
         GIVEAWAY_DEBUG["stage"] = f"{mid}: editing message"
         try:
-            await asyncio.wait_for(message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True)), timeout=20)
+            await asyncio.wait_for(message.edit(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw)), timeout=20)
         except Exception as e:
             print(f"[Giveaway Edit Error] {mid}: {e!r}")
             GIVEAWAY_DEBUG["last_error"] = f"Edit failed: {e!r}"
@@ -1027,7 +1049,7 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
     message = await get_giveaway_message(bot, gw)
     if message:
         try:
-            await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
+            await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView.for_giveaway(gw))
         except Exception as e:
             print(f"[Giveaway Edit Error] {e}")
     await announce_and_record(bot, gw, winners, rerolled=True, message=message)
