@@ -1054,6 +1054,9 @@ async def announce_giveaway_winners(bot: commands.Bot, gw: dict, winners: List[s
             name = users[w].name if users[w] else "Unknown"
             blocks.append(f"**{head}**\n**Mention:** <@{w}>\n**Username:** {name}\n**User ID:** `{w}`")
         embed = discord.Embed(title=gw["prize"], description="\n".join(blocks) + jump, color=COLOR_GRAY)
+        reward_text = giveaway_reward_text(gw)
+        if reward_text:
+            embed.add_field(name="Reward Given Automatically", value=f"`{reward_text}` each", inline=False)
         if len(winners) == 1 and users[winners[0]]:
             embed.set_thumbnail(url=users[winners[0]].display_avatar.url)
     else:
@@ -1076,6 +1079,37 @@ async def announce_giveaway_winners(bot: commands.Bot, gw: dict, winners: List[s
         return False
 
 
+def giveaway_reward_text(gw: dict) -> str:
+    parts = []
+    if int(gw.get("reward_points", 0) or 0) > 0:
+        parts.append(f"{int(gw['reward_points']):,} points")
+    if int(gw.get("reward_premium_days", 0) or 0) > 0:
+        parts.append(f"{int(gw['reward_premium_days'])} days TE Premium")
+    return " + ".join(parts)
+
+
+def grant_giveaway_rewards(gw: dict, winners: List[str]) -> int:
+    """Gives the automatic reward (points and/or TE Premium) to winners who have not got it yet."""
+    if not giveaway_reward_text(gw):
+        return 0
+    rewarded = gw.setdefault("rewarded", [])
+    given = 0
+    for uid in winners:
+        if uid in rewarded:
+            continue
+        try:
+            if int(gw.get("reward_points", 0) or 0) > 0:
+                add_user_points(str(uid), int(gw["reward_points"]))
+            if int(gw.get("reward_premium_days", 0) or 0) > 0:
+                extend_user_premium(str(uid), int(gw["reward_premium_days"]))
+            rewarded.append(uid)
+            given += 1
+        except Exception as e:
+            print(f"[Giveaway Reward Error] {uid}: {e!r}")
+    save_giveaway(gw)
+    return given
+
+
 async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False) -> List[str]:
     if gw.get("ended"):
         return gw.get("winner_ids", [])
@@ -1094,6 +1128,7 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
     if ended_early:
         gw["end_ts"] = datetime.now(timezone.utc).timestamp()
     save_giveaway(gw)
+    grant_giveaway_rewards(gw, winners)
 
     print(f"[Giveaway] Ended {mid} ({gw['prize']}): {len(gw['entries'])} entries, winners: {winners}")
     GIVEAWAY_DEBUG["stage"] = f"{mid}: finding message"
@@ -1157,6 +1192,7 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
     winners = random.sample(valid, min(pick, len(valid)))
     gw["winner_ids"] = winners
     save_giveaway(gw)
+    grant_giveaway_rewards(gw, winners)
 
     message = await get_giveaway_message(bot, gw)
     if message:

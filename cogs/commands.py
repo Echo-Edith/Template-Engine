@@ -17,6 +17,7 @@ from cogs.features import (
     RobloxUnsyncView,
     GiveawayView,
     giveaway_payload,
+    giveaway_reward_text,
     GIVEAWAYS,
     GIVEAWAY_DEBUG,
     MOD_ACTION_LABELS,
@@ -2063,10 +2064,14 @@ class CommandsCog(commands.Cog):
 
     @giveaway_group.command(name="create", description="Start a giveaway.")
     @app_commands.describe(prize="What is being given away.", duration="How long it runs, e.g. 30m, 2h, 1d, 1w.",
-                           winners="Number of winners (default 1).", channel="Where to post it (defaults to this channel).")
+                           winners="Number of winners (default 1).", channel="Where to post it (defaults to this channel).",
+                           reward_points="Optional. Points given to each winner automatically.",
+                           reward_premium_days="Optional. Days of TE Premium given to each winner (30 = one month).")
     async def giveaway_create_cmd(
         self, interaction: discord.Interaction, prize: app_commands.Range[str, 1, 200], duration: str,
-        winners: Optional[app_commands.Range[int, 1, 25]] = 1, channel: Optional[discord.TextChannel] = None
+        winners: Optional[app_commands.Range[int, 1, 25]] = 1, channel: Optional[discord.TextChannel] = None,
+        reward_points: Optional[app_commands.Range[int, 1, 1000000]] = None,
+        reward_premium_days: Optional[app_commands.Range[int, 1, 3650]] = None
     ):
         delta = parse_duration_strict(duration)
         if delta is None or delta < timedelta(seconds=30) or delta > timedelta(days=365):
@@ -2093,6 +2098,8 @@ class CommandsCog(commands.Cog):
             "entries": [],
             "ended": False,
             "winner_ids": [],
+            "reward_points": int(reward_points or 0),
+            "reward_premium_days": int(reward_premium_days or 0),
         }
         try:
             msg = await channel.send(allowed_mentions=NO_PINGS, **giveaway_payload(gw))
@@ -2102,16 +2109,22 @@ class CommandsCog(commands.Cog):
         gw["message_id"] = str(msg.id)
         save_giveaway(gw)
         embed = embed_ok("Giveaway Created", f"Posted in {channel.mention}.\n[Jump to giveaway]({msg.jump_url})")
+        if giveaway_reward_text(gw):
+            embed.add_field(name="Auto Reward", value=f"`{giveaway_reward_text(gw)}` for each winner", inline=False)
         embed.add_field(name="Message ID", value=f"`{msg.id}`", inline=True)
         embed.add_field(name="Ends", value=f"<t:{int(gw['end_ts'])}:R>", inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @giveaway_group.command(name="edit", description="Change the prize, winners or time left of a running giveaway.")
     @app_commands.describe(message_id="The giveaway to edit.", prize="New prize.", winners="New number of winners.",
-                           duration="New time left from now, e.g. 1h, 2d.")
+                           duration="New time left from now, e.g. 1h, 2d.",
+                           reward_points="New auto reward points per winner (0 = none).",
+                           reward_premium_days="New auto TE Premium days per winner (0 = none).")
     async def giveaway_edit_cmd(
         self, interaction: discord.Interaction, message_id: str, prize: Optional[app_commands.Range[str, 1, 200]] = None,
-        winners: Optional[app_commands.Range[int, 1, 25]] = None, duration: Optional[str] = None
+        winners: Optional[app_commands.Range[int, 1, 25]] = None, duration: Optional[str] = None,
+        reward_points: Optional[app_commands.Range[int, 0, 1000000]] = None,
+        reward_premium_days: Optional[app_commands.Range[int, 0, 3650]] = None
     ):
         gw = self._find_giveaway(interaction, message_id)
         if not gw:
@@ -2120,8 +2133,8 @@ class CommandsCog(commands.Cog):
         if gw.get("ended"):
             await interaction.response.send_message(embed=embed_err("Giveaway Ended", "Ended giveaways cannot be edited. Use `/giveaway reroll` instead."), ephemeral=True)
             return
-        if prize is None and winners is None and duration is None:
-            await interaction.response.send_message(embed=embed_err("Nothing To Change", "Give at least one of: `prize`, `winners`, `duration`."), ephemeral=True)
+        if prize is None and winners is None and duration is None and reward_points is None and reward_premium_days is None:
+            await interaction.response.send_message(embed=embed_err("Nothing To Change", "Give at least one option to change."), ephemeral=True)
             return
 
         if duration is not None:
@@ -2134,6 +2147,10 @@ class CommandsCog(commands.Cog):
             gw["prize"] = prize
         if winners is not None:
             gw["winners"] = int(winners)
+        if reward_points is not None:
+            gw["reward_points"] = int(reward_points)
+        if reward_premium_days is not None:
+            gw["reward_premium_days"] = int(reward_premium_days)
 
         await interaction.response.defer(ephemeral=True)
         save_giveaway(gw)
