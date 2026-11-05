@@ -1184,12 +1184,14 @@ async def announce_and_record(bot: commands.Bot, gw: dict, winners: List[str], r
 
 async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = None) -> Optional[List[str]]:
     """Picks new winners (previous winners are skipped). Returns None if nobody else can win."""
-    previous = tuple(gw.get("winner_ids", []))
-    valid = await valid_giveaway_entries(bot, gw, exclude=previous)
+    # Everyone who already won (any earlier draw) can never be picked again
+    past = list(dict.fromkeys(list(gw.get("past_winners", [])) + list(gw.get("winner_ids", []))))
+    valid = await valid_giveaway_entries(bot, gw, exclude=tuple(past))
     if not valid:
         return None
     pick = int(count or gw["winners"])
     winners = random.sample(valid, min(pick, len(valid)))
+    gw["past_winners"] = past
     gw["winner_ids"] = winners
     save_giveaway(gw)
     grant_giveaway_rewards(gw, winners)
