@@ -1804,7 +1804,8 @@ class FeaturesCog(commands.Cog):
             print("[Reminder Loop Error] Timed out after 60s")
             GIVEAWAY_DEBUG["last_error"] = "Reminders timed out (60s)"
         except Exception as e:
-            print(f"[Reminder Loop Error] {e}")
+            print(f"[Reminder Loop Error] {e!r}")
+            GIVEAWAY_DEBUG["last_error"] = f"Reminder loop: {e!r}"
         GIVEAWAY_DEBUG["stage"] = "giveaways"
         try:
             await asyncio.wait_for(self.process_giveaways(), timeout=120)
@@ -1812,7 +1813,8 @@ class FeaturesCog(commands.Cog):
             print("[Giveaway Loop Error] Timed out after 120s")
             GIVEAWAY_DEBUG["last_error"] = f"Giveaways timed out (120s) at: {GIVEAWAY_DEBUG.get('stage')}"
         except Exception as e:
-            print(f"[Giveaway Loop Error] {e}")
+            print(f"[Giveaway Loop Error] {e!r}")
+            GIVEAWAY_DEBUG["last_error"] = f"Giveaway loop: {e!r}"
         GIVEAWAY_DEBUG["stage"] = "idle"
         GIVEAWAY_DEBUG["last_tick"] = datetime.now(timezone.utc).timestamp()
 
@@ -1859,24 +1861,29 @@ class FeaturesCog(commands.Cog):
 
     async def process_giveaways(self):
         now = datetime.now(timezone.utc).timestamp()
-        # Retry winner messages that failed to post (up to 5 tries, within a day of ending)
-        for gw in [g for g in GIVEAWAYS.values()
-                   if g.get("ended") and g.get("announced") is False
-                   and int(g.get("announce_tries", 0)) < 5 and now - g["end_ts"] < 86400
-                   and now - g.get("last_try", 0) >= 60]:
+
+        # Each giveaway is handled on its own, so one broken record can never block the others.
+        for gw in list(GIVEAWAYS.values()):
             try:
-                message = await get_giveaway_message(self.bot, gw)
-                await announce_and_record(self.bot, gw, gw.get("winner_ids", []), message=message)
-            except Exception as e:
-                print(f"[Giveaway Retry Error] {gw.get('message_id')}: {e!r}")
-        for gw in [g for g in GIVEAWAYS.values() if not g.get("ended") and g["end_ts"] <= now]:
-            try:
-                await finish_giveaway(self.bot, gw)
+                end_ts = float(gw.get("end_ts") or 0)
+                if end_ts <= 0:
+                    continue
+
+                if not gw.get("ended"):
+                    if end_ts <= now:
+                        await finish_giveaway(self.bot, gw)
+                    continue
+
+                # Retry winner messages that failed to post (up to 5 tries, within a day of ending)
+                if (gw.get("announced") is False and int(gw.get("announce_tries", 0)) < 5
+                        and now - end_ts < 86400 and now - float(gw.get("last_try", 0)) >= 60):
+                    message = await get_giveaway_message(self.bot, gw)
+                    await announce_and_record(self.bot, gw, gw.get("winner_ids", []), message=message)
             except Exception as e:
                 import traceback
                 print(f"[Giveaway Finish Error] {gw.get('message_id')}: {e!r}")
-                GIVEAWAY_DEBUG["last_error"] = f"Finish failed: {e!r}"
                 traceback.print_exc()
+                GIVEAWAY_DEBUG["last_error"] = f"{gw.get('message_id')}: {e!r}"
 
     # -------------------------------------------------------------
     # AFK SYSTEM: remove AFK when the user talks, tell people who ping an AFK user
