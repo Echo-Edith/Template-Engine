@@ -82,7 +82,7 @@ STAFF_COMMANDS = {"staff", "staff-list"}  # only HARDCODED_STAFF may run these
 
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox-user", "gameinfo", "timestamp", "remind",
-    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem",
+    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem", "promo",
 }
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
