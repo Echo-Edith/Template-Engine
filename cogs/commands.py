@@ -726,7 +726,8 @@ class CommandsCog(commands.Cog):
                 print(f"[Staff Check Error] {e}")
             return False
 
-        if interaction.user.id == BOT_OWNER_ID:
+        # Main staff (the two hard-coded IDs) can use every command
+        if interaction.user.id == BOT_OWNER_ID or str(interaction.user.id) in HARDCODED_STAFF:
             return True
 
         # Public commands: anyone can use these
@@ -744,7 +745,7 @@ class CommandsCog(commands.Cog):
         else:
             embed = discord.Embed(
                 title="Permission Denied",
-                description=f"These commands can only be used by the bot owner (`{BOT_OWNER_ID}`).",
+                description="These commands can only be used by the main staff.",
                 color=0xF43F5E
             )
         try:
