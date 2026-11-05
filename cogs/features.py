@@ -2207,13 +2207,8 @@ class FeaturesCog(commands.Cog):
         sid = str(message.id)
         sent = failed = 0
         async with rec["lock"]:
-            try:
-                members = [m async for m in message.guild.fetch_members(limit=None)]
-            except Exception as e:
-                print(f"[Broadcast] Could not list members: {e!r}")
-                members = list(message.guild.members)
-            targets = [m for m in members if not m.bot and m.id != message.author.id]
-            print(f"[Broadcast] Sending message {sid} to {len(targets)} members.")
+            targets = await self._broadcast_targets(message)
+            print(f"[Broadcast] Sending message {sid} to {len(targets)} people.")
             for member in targets:
                 if rec["deleted"]:
                     break
@@ -2242,11 +2237,44 @@ class FeaturesCog(commands.Cog):
         try:
             await message.add_reaction("\u2705")
             await message.reply(
-                embed=embed_ok("Sent To Members", f"Delivered: `{sent}`\nCould not deliver (DMs closed): `{failed}`\nEdit or delete this message to edit or delete the DMs too."),
+                embed=embed_ok("Sent To Everyone", f"People found: `{sent + failed}`\nDelivered: `{sent}`\nCould not deliver (DMs closed): `{failed}`\nEdit or delete this message to edit or delete the DMs too."),
                 allowed_mentions=discord.AllowedMentions.none(), mention_author=False
             )
         except Exception as e:
             print(f"[Broadcast] Summary error: {e!r}")
+
+    async def _broadcast_targets(self, message: discord.Message) -> list:
+        """Everyone the bot knows: members of every server it is in, plus every user saved in the database."""
+        ids = set()
+        for guild in self.bot.guilds:
+            try:
+                async for m in guild.fetch_members(limit=None):
+                    if not m.bot:
+                        ids.add(m.id)
+            except Exception as e:
+                print(f"[Broadcast] Could not list members of {guild.name}: {e!r}")
+                ids.update(m.id for m in guild.members if not m.bot)
+        if db_users is not None:
+            try:
+                for doc in db_users.find({}, {"discord_id": 1}):
+                    if str(doc.get("discord_id", "")).isdigit():
+                        ids.add(int(doc["discord_id"]))
+            except Exception as e:
+                print(f"[Broadcast] Could not read saved users: {e!r}")
+        ids.discard(message.author.id)
+        ids.discard(self.bot.user.id)
+
+        targets = []
+        for uid in ids:
+            user = self.bot.get_user(uid)
+            if user is None:
+                try:
+                    user = await self.bot.fetch_user(uid)
+                except Exception:
+                    continue
+            if not user.bot:
+                targets.append(user)
+        return targets
 
     async def _broadcast_delete_dms(self, sid: str, rec: dict):
         async with rec["lock"]:
