@@ -78,6 +78,8 @@ from cogs.features import (
 #   ADMIN_COMMANDS  : server members with the Administrator permission
 #   anything else   : bot owner only (set, points-set, premium-set, game, revenue, cookie-check)
 # -------------------------------------------------------------
+STAFF_COMMANDS = {"staff", "staff-list"}  # only HARDCODED_STAFF may run these
+
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox-user", "gameinfo", "timestamp", "remind",
     "afk", "whois", "permissions", "rolelist", "channelstats", "redeem",
@@ -707,11 +709,25 @@ class CommandsCog(commands.Cog):
     # ACCESS LEVELS: bot owner can use everything, see PUBLIC_COMMANDS / ADMIN_COMMANDS above
     # -------------------------------------------------------------
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == BOT_OWNER_ID:
-            return True
-
         cmd = interaction.command
         root_name = (cmd.root_parent or cmd).name if cmd else ""
+
+        # Staff commands: ONLY the hard-coded staff IDs (checked before anything else)
+        if root_name in STAFF_COMMANDS:
+            if str(interaction.user.id) in HARDCODED_STAFF:
+                return True
+            denied = embed_err("Permission Denied", "Only the main staff can use this command.")
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=denied, ephemeral=True)
+                else:
+                    await interaction.response.send_message(embed=denied, ephemeral=True)
+            except Exception as e:
+                print(f"[Staff Check Error] {e}")
+            return False
+
+        if interaction.user.id == BOT_OWNER_ID:
+            return True
 
         # Public commands: anyone can use these
         if root_name in PUBLIC_COMMANDS:
