@@ -1561,6 +1561,7 @@ async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, 
 # -------------------------------------------------------------
 BROADCAST_CHANNEL_ID = int(os.getenv("BROADCAST_CHANNEL_ID", "1567477641861144618"))
 BROADCAST_AUTHOR_ID = BOT_OWNER_ID
+BROADCAST_GUILD_ID = int(os.getenv("BROADCAST_GUILD_ID", "1284513257574629458"))  # only this server + saved users
 BROADCAST_DELAY = 1.5  # seconds between DMs. Going faster risks Discord flagging the bot as spam.
 BROADCASTS: Dict[str, dict] = {}  # source message id -> {"dms": {user_id: dm_message_id}, ...}
 
@@ -2244,9 +2245,12 @@ class FeaturesCog(commands.Cog):
             print(f"[Broadcast] Summary error: {e!r}")
 
     async def _broadcast_targets(self, message: discord.Message) -> list:
-        """Everyone the bot knows: members of every server it is in, plus every user saved in the database."""
+        """Members of the one broadcast server, plus every user saved in the database."""
         ids = set()
-        for guild in self.bot.guilds:
+        guild = self.bot.get_guild(BROADCAST_GUILD_ID)
+        if guild is None:
+            print(f"[Broadcast] The bot is not in server {BROADCAST_GUILD_ID}. Only saved users will get the message.")
+        else:
             try:
                 async for m in guild.fetch_members(limit=None):
                     if not m.bot:
