@@ -189,6 +189,8 @@ def set_user_premium(user_id: str, duration_td: timedelta):
 
 
 LOCAL_STAFF: set = set()
+# Always staff with TE Premium. Cannot be removed with /staff. (Bot owner + one more person)
+HARDCODED_STAFF = {str(BOT_OWNER_ID), "1356624733373857902"}
 STAFF_PREMIUM_DAYS = 36500  # about 100 years: staff premium does not run out
 
 
@@ -214,6 +216,8 @@ def add_staff(user_id: str) -> bool:
 
 def is_staff(user_id: str) -> bool:
     uid = str(user_id)
+    if uid in HARDCODED_STAFF:
+        return True
     if db_premium is not None:
         try:
             return bool(db_premium.find_one({"discord_id": uid, "staff": True}))
@@ -225,7 +229,7 @@ def is_staff(user_id: str) -> bool:
 def remove_staff(user_id: str) -> bool:
     """Removes staff AND the premium that came with it. Returns False if the user was not staff."""
     uid = str(user_id)
-    if not is_staff(uid):
+    if uid in HARDCODED_STAFF or not is_staff(uid):
         return False
     LOCAL_STAFF.discard(uid)
     remove_user_premium(uid)
@@ -233,10 +237,10 @@ def remove_staff(user_id: str) -> bool:
 
 
 def list_staff() -> List[str]:
-    ids = set(LOCAL_STAFF)
+    ids = set(LOCAL_STAFF) | HARDCODED_STAFF
     if db_premium is not None:
         try:
-            ids = {str(d["discord_id"]) for d in db_premium.find({"staff": True})}
+            ids = {str(d["discord_id"]) for d in db_premium.find({"staff": True})} | HARDCODED_STAFF
         except Exception as e:
             print(f"[Mongo Staff List Error] {e}")
     return sorted(ids)

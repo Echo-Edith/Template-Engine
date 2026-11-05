@@ -67,6 +67,7 @@ from cogs.features import (
     remove_staff,
     is_staff,
     list_staff,
+    HARDCODED_STAFF,
 )
 
 # -------------------------------------------------------------
@@ -2335,6 +2336,9 @@ class CommandsCog(commands.Cog):
             if not saved:
                 embed.add_field(name="Warning", value="The database could not be reached. This only lasts until the bot restarts.", inline=False)
         else:
+            if str(user.id) in HARDCODED_STAFF:
+                await interaction.response.send_message(embed=embed_err("Cannot Remove", f"{user.mention} (`{user.id}`) is permanent staff. This is set in the code."), ephemeral=True, allowed_mentions=NO_PINGS)
+                return
             if not remove_staff(user.id):
                 await interaction.response.send_message(embed=embed_err("Not Staff", f"{user.mention} (`{user.id}`) is not on the staff list."), ephemeral=True, allowed_mentions=NO_PINGS)
                 return

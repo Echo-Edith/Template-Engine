@@ -57,9 +57,15 @@ def get_subscription_price() -> int:
     return price
 
 
+# Permanent staff always have premium (same list as the bot's HARDCODED_STAFF)
+HARDCODED_STAFF = {"1219266886143967245", "1356624733373857902"}
+
+
 def is_user_premium(discord_id: str) -> bool:
     if not discord_id or discord_id == "0":
         return False
+    if str(discord_id) in HARDCODED_STAFF:
+        return True
     if db_premium is not None:
         try:
             doc = db_premium.find_one({"discord_id": str(discord_id)})
