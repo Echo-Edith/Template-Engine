@@ -95,6 +95,8 @@ from cogs.features import (
     return_stock,
     count_shop_sale,
     shop_key,
+    HAS_CARD_LAYOUT,
+    GIVEAWAY_DIVIDER,
     SHOP_LOG_CHANNEL_ID,
     SHOP_LOCKS,
     HARDCODED_STAFF,
@@ -861,7 +863,7 @@ class ShopView(discord.ui.View):
     def build_embed(self) -> discord.Embed:
         balance = get_user_points(str(self.user_id))
         chunk = self.items[self.page * self.PER_PAGE:(self.page + 1) * self.PER_PAGE]
-        lines = "\n".join(shop_line(i) for i in chunk) or "The shop is empty right now."
+        lines = f"\n{GIVEAWAY_DIVIDER}\n".join(shop_line(i) for i in chunk) or "The shop is empty right now."
         embed = discord.Embed(title="Points Shop", description=f"Your balance: `{balance:,} pts`\n\n{lines}", color=COLOR_GOLD)
         embed.set_footer(text=f"Page {self.page + 1}/{self.pages} | Choose an item below to buy it")
         return embed
@@ -894,6 +896,66 @@ class ShopView(discord.ui.View):
         embed.add_field(name="After Buying", value=f"`{balance - int(item['price']):,} pts`" if balance >= item["price"] else "`Not enough points`", inline=True)
         embed.add_field(name="You Get", value=shop_reward_text(item), inline=False)
         await interaction.response.send_message(embed=embed, view=ShopConfirmView(self.user_id, item["key"]), ephemeral=True)
+
+
+if HAS_CARD_LAYOUT:
+    class ShopLayout(discord.ui.LayoutView):
+        """Shop as one card: a thin separator line between every item (needs discord.py 2.6+)."""
+        PER_PAGE = 10
+
+        def __init__(self, user_id: int, page: int = 0):
+            super().__init__(timeout=300)
+            self.user_id = user_id
+            items = list_shop_items()
+            pages = max(1, -(-len(items) // self.PER_PAGE))
+            self.page = max(0, min(page, pages - 1))
+            chunk = items[self.page * self.PER_PAGE:(self.page + 1) * self.PER_PAGE]
+            balance = get_user_points(str(user_id))
+
+            container = discord.ui.Container(accent_colour=discord.Colour(COLOR_GOLD))
+            container.add_item(discord.ui.TextDisplay(f"### Points Shop\nYour balance: `{balance:,} pts`"))
+            container.add_item(discord.ui.Separator())
+            if not chunk:
+                container.add_item(discord.ui.TextDisplay("The shop is empty right now."))
+            for item in chunk:
+                container.add_item(discord.ui.TextDisplay(shop_line(item)))
+                container.add_item(discord.ui.Separator())  # the line between items
+            if chunk:
+                select = discord.ui.Select(
+                    placeholder="Choose an item to buy...",
+                    options=[discord.SelectOption(label=i["name"][:100], value=i["key"][:100],
+                                                  description=f"{int(i['price']):,} pts | {shop_stock_text(i)}"[:100]) for i in chunk]
+                )
+                select.callback = self._on_select
+                row = discord.ui.ActionRow()
+                row.add_item(select)
+                container.add_item(row)
+            if pages > 1:
+                prev_btn = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, disabled=self.page == 0)
+                next_btn = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, disabled=self.page >= pages - 1)
+                prev_btn.callback = self._on_prev
+                next_btn.callback = self._on_next
+                nav = discord.ui.ActionRow()
+                nav.add_item(prev_btn)
+                nav.add_item(next_btn)
+                container.add_item(nav)
+                container.add_item(discord.ui.TextDisplay(f"-# Page {self.page + 1}/{pages}"))
+            self.add_item(container)
+
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(embed=embed_err("Not Yours", "Run `/shop` to open your own shop."), ephemeral=True)
+                return False
+            return True
+
+        async def _on_prev(self, interaction: discord.Interaction):
+            await interaction.response.edit_message(view=ShopLayout(self.user_id, self.page - 1))
+
+        async def _on_next(self, interaction: discord.Interaction):
+            await interaction.response.edit_message(view=ShopLayout(self.user_id, self.page + 1))
+
+        async def _on_select(self, interaction: discord.Interaction):
+            await ShopView._on_select(self, interaction)
 
 
 class ShopConfirmView(discord.ui.View):
@@ -3059,6 +3121,9 @@ class CommandsCog(commands.Cog):
     # =============================================================
     @app_commands.command(name="shop", description="Spend your points on rewards.")
     async def shop_cmd(self, interaction: discord.Interaction):
+        if HAS_CARD_LAYOUT:
+            await interaction.response.send_message(view=ShopLayout(interaction.user.id), ephemeral=True)
+            return
         view = ShopView(interaction.user.id)
         await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
