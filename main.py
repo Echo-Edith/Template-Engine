@@ -32,7 +32,8 @@ intents.members = True
 bot = commands.Bot(
     command_prefix="!",
     intents=intents,
-    help_command=None
+    help_command=None,
+    max_messages=20000  # how many recent messages the bot remembers (the message log needs this to show old text)
 )
 
 @bot.event
