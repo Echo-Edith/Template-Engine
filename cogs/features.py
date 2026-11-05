@@ -214,6 +214,32 @@ def add_staff(user_id: str) -> bool:
     return True
 
 
+LOCAL_STAFF_ROLES: dict = {}
+
+
+def set_staff_role(user_id: str, guild_id: int, role_id: int):
+    """Remembers which Discord role was given to a staff member (so /staff remove can take it back)."""
+    uid = str(user_id)
+    LOCAL_STAFF_ROLES[uid] = {"guild_id": int(guild_id), "role_id": int(role_id)}
+    if db_premium is not None:
+        try:
+            db_premium.update_one({"discord_id": uid}, {"$set": {"staff_role": LOCAL_STAFF_ROLES[uid]}})
+        except Exception as e:
+            print(f"[Mongo Staff Role Error] {e}")
+
+
+def get_staff_role(user_id: str) -> Optional[dict]:
+    uid = str(user_id)
+    if db_premium is not None:
+        try:
+            doc = db_premium.find_one({"discord_id": uid}) or {}
+            if doc.get("staff_role"):
+                return doc["staff_role"]
+        except Exception as e:
+            print(f"[Mongo Staff Role Read Error] {e}")
+    return LOCAL_STAFF_ROLES.get(uid)
+
+
 def is_staff(user_id: str) -> bool:
     uid = str(user_id)
     if uid in HARDCODED_STAFF:
