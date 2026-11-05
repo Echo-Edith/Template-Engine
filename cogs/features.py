@@ -935,7 +935,13 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
     if gw.get("ended"):
         return gw.get("winner_ids", [])
 
-    valid = await valid_giveaway_entries(bot, gw)
+    mid = gw.get("message_id")
+    GIVEAWAY_DEBUG["stage"] = f"{mid}: checking entries"
+    try:
+        valid = await asyncio.wait_for(valid_giveaway_entries(bot, gw), timeout=30)
+    except asyncio.TimeoutError:
+        print(f"[Giveaway Warning] {mid}: member check timed out. Using all entries.")
+        valid = list(gw["entries"])
     winners = random.sample(valid, min(int(gw["winners"]), len(valid))) if valid else []
 
     gw["ended"] = True
@@ -944,17 +950,27 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
         gw["end_ts"] = datetime.now(timezone.utc).timestamp()
     save_giveaway(gw)
 
-    print(f"[Giveaway] Ended {gw['message_id']} ({gw['prize']}): {len(gw['entries'])} entries, winners: {winners}")
-    message = await get_giveaway_message(bot, gw)
+    print(f"[Giveaway] Ended {mid} ({gw['prize']}): {len(gw['entries'])} entries, winners: {winners}")
+    GIVEAWAY_DEBUG["stage"] = f"{mid}: finding message"
+    try:
+        message = await asyncio.wait_for(get_giveaway_message(bot, gw), timeout=20)
+    except asyncio.TimeoutError:
+        message = None
     if message is None:
-        print(f"[Giveaway Warning] Message {gw['message_id']} not found in channel {gw['channel_id']}. Announcing in the channel only.")
+        print(f"[Giveaway Warning] Message {mid} not found in channel {gw['channel_id']}. Announcing in the channel only.")
     else:
+        GIVEAWAY_DEBUG["stage"] = f"{mid}: editing message"
         try:
-            await message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True))
+            await asyncio.wait_for(message.edit(embed=build_giveaway_embed(gw), view=GiveawayView(ended=True)), timeout=20)
         except Exception as e:
-            print(f"[Giveaway Edit Error] {gw['message_id']}: {e!r}")
+            print(f"[Giveaway Edit Error] {mid}: {e!r}")
             GIVEAWAY_DEBUG["last_error"] = f"Edit failed: {e!r}"
-    await announce_and_record(bot, gw, winners, message=message)
+    GIVEAWAY_DEBUG["stage"] = f"{mid}: posting winners"
+    try:
+        await asyncio.wait_for(announce_and_record(bot, gw, winners, message=message), timeout=40)
+    except asyncio.TimeoutError:
+        GIVEAWAY_DEBUG["last_error"] = f"Posting winners timed out for {mid}"
+        gw["announced"] = False
     return winners
 
 
@@ -1747,14 +1763,25 @@ class FeaturesCog(commands.Cog):
     @tasks.loop(seconds=10)
     async def scheduler_loop(self):
         GIVEAWAY_DEBUG["last_tick"] = datetime.now(timezone.utc).timestamp()
+        # Every step has a time limit, so one stuck Discord call can never freeze the timer again.
+        GIVEAWAY_DEBUG["stage"] = "reminders"
         try:
-            await self.process_reminders()
+            await asyncio.wait_for(self.process_reminders(), timeout=60)
+        except asyncio.TimeoutError:
+            print("[Reminder Loop Error] Timed out after 60s")
+            GIVEAWAY_DEBUG["last_error"] = "Reminders timed out (60s)"
         except Exception as e:
             print(f"[Reminder Loop Error] {e}")
+        GIVEAWAY_DEBUG["stage"] = "giveaways"
         try:
-            await self.process_giveaways()
+            await asyncio.wait_for(self.process_giveaways(), timeout=120)
+        except asyncio.TimeoutError:
+            print("[Giveaway Loop Error] Timed out after 120s")
+            GIVEAWAY_DEBUG["last_error"] = f"Giveaways timed out (120s) at: {GIVEAWAY_DEBUG.get('stage')}"
         except Exception as e:
             print(f"[Giveaway Loop Error] {e}")
+        GIVEAWAY_DEBUG["stage"] = "idle"
+        GIVEAWAY_DEBUG["last_tick"] = datetime.now(timezone.utc).timestamp()
 
     @scheduler_loop.error
     async def scheduler_loop_error(self, error):

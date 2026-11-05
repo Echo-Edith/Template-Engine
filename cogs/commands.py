@@ -2148,6 +2148,7 @@ class CommandsCog(commands.Cog):
             embed.add_field(name="Winner Message Posted", value=f"`{gw.get('announced')}`", inline=True)
         else:
             embed.add_field(name="Problem", value="This giveaway is not tracked. The bot forgot it (restart without the database?). Use `/giveaway delete` and create a new one.", inline=False)
+        embed.add_field(name="Timer Step", value=f"`{GIVEAWAY_DEBUG.get('stage', 'unknown')}`", inline=False)
         embed.add_field(name="Last Error", value=f"```{GIVEAWAY_DEBUG.get('last_error') or 'None'}```"[:1000], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
