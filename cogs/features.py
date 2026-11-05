@@ -774,12 +774,6 @@ def delete_giveaway_record(message_id: str):
 # -------------------------------------------------------------
 # GIVEAWAY ENGINE
 # -------------------------------------------------------------
-GIVEAWAY_BANNER_URL = os.getenv(
-    "GIVEAWAY_BANNER_URL",
-    "https://cdn.discordapp.com/attachments/1564516558926123018/1567425359517978645/F3364D80-B8EA-45D9-9AC8-AF9C21B59C3F.png?ex=6aec221f&is=6aead09f&hm=26c665bf4404913fee1bd3ec6156dbc0721d0a09e34311ad788a91eac0fc22bb&"
-).strip()
-
-
 def build_giveaway_embed(gw: dict) -> discord.Embed:
     end_ts = int(gw["end_ts"])
     host = f"<@{gw['host_id']}>"
@@ -799,8 +793,6 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
             description=f"Click **Enter** to join the giveaway!\n\n**Ends:** <t:{end_ts}:R>\n**Hosted by:** {host}\n**Winners:** `{int(gw['winners'])}`",
             color=COLOR_PURPLE
         )
-    if GIVEAWAY_BANNER_URL:
-        embed.set_image(url=GIVEAWAY_BANNER_URL)
     return embed
 
 
@@ -906,14 +898,33 @@ async def announce_giveaway_winners(bot: commands.Bot, gw: dict, winners: List[s
     jump = f"\n\n[Jump to giveaway]({message.jump_url})" if message else ""
     if winners:
         mentions = ", ".join(f"<@{w}>" for w in winners)
-        title = "New Winner" if rerolled else "Giveaway Winner"
-        if len(winners) > 1:
-            title += "s"
-        embed = embed_ok(title, f"Congratulations {mentions}! You won **{gw['prize']}**.{jump}")
-        content = mentions
+        if rerolled:
+            content = f"\U0001F381 {mentions} {'is the new winner' if len(winners) == 1 else 'are the new winners'}!"
+        else:
+            content = f"\U0001F381 {mentions} {'is the winner' if len(winners) == 1 else 'are the winners'}!"
+
+        # Heist style: prize as the title, then Mention / Username / User ID for each winner
+        users = {}
+        for w in winners:
+            user = bot.get_user(int(w))
+            if user is None:
+                try:
+                    user = await asyncio.wait_for(bot.fetch_user(int(w)), timeout=10)
+                except Exception:
+                    user = None
+            users[w] = user
+
+        blocks = []
+        for n, w in enumerate(winners, start=1):
+            head = "Winner" if len(winners) == 1 else f"Winner {n}"
+            name = users[w].name if users[w] else "Unknown"
+            blocks.append(f"**{head}**\n**Mention:** <@{w}>\n**Username:** {name}\n**User ID:** `{w}`")
+        embed = discord.Embed(title=gw["prize"], description="\n".join(blocks) + jump, color=COLOR_GRAY)
+        if len(winners) == 1 and users[winners[0]]:
+            embed.set_thumbnail(url=users[winners[0]].display_avatar.url)
     else:
-        embed = embed_err("No Winners", f"There were no valid entries for **{gw['prize']}**.{jump}")
         content = None
+        embed = embed_err("No Winners", f"There were no valid entries for **{gw['prize']}**.{jump}")
 
     allowed = discord.AllowedMentions(users=True, roles=False, everyone=False, replied_user=False)
     if message:
