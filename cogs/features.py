@@ -315,6 +315,37 @@ def extend_user_premium(user_id: str, days: int) -> datetime:
     return new_exp
 
 
+def reduce_user_premium(user_id: str, days: int):
+    """Takes days of premium away. If nothing is left, premium is removed."""
+    uid = str(user_id)
+    raw = None
+    if db_premium is not None:
+        try:
+            raw = (db_premium.find_one({"discord_id": uid}) or {}).get("expires_at")
+        except Exception as e:
+            print(f"[Mongo Premium Read Error] {e}")
+    if raw is None:
+        raw = LOCAL_PREMIUM_USERS.get(uid)
+    if not raw:
+        return
+    try:
+        current = datetime.fromisoformat(str(raw))
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return
+    new_exp = current - timedelta(days=int(days))
+    if new_exp <= datetime.now(timezone.utc):
+        remove_user_premium(uid)
+        return
+    if db_premium is not None:
+        try:
+            db_premium.update_one({"discord_id": uid}, {"$set": {"expires_at": new_exp.isoformat()}})
+        except Exception as e:
+            print(f"[Mongo Reduce Premium Error] {e}")
+    LOCAL_PREMIUM_USERS[uid] = new_exp.isoformat()
+
+
 def remove_user_premium(user_id: str):
     """Removes premium status from MongoDB or local storage."""
     if db_premium is not None:
@@ -1110,6 +1141,22 @@ def grant_giveaway_rewards(gw: dict, winners: List[str]) -> int:
     return given
 
 
+def revoke_giveaway_rewards(gw: dict, old_winners: List[str]):
+    """Takes the automatic reward back from earlier winners (used when a giveaway is rerolled)."""
+    rewarded = gw.setdefault("rewarded", [])
+    for uid in old_winners:
+        if uid not in rewarded:
+            continue
+        try:
+            if int(gw.get("reward_points", 0) or 0) > 0:
+                add_user_points(str(uid), -int(gw["reward_points"]))
+            if int(gw.get("reward_premium_days", 0) or 0) > 0:
+                reduce_user_premium(str(uid), int(gw["reward_premium_days"]))
+            rewarded.remove(uid)
+        except Exception as e:
+            print(f"[Giveaway Reward Revoke Error] {uid}: {e!r}")
+
+
 async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False) -> List[str]:
     if gw.get("ended"):
         return gw.get("winner_ids", [])
@@ -1192,6 +1239,7 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
     pick = int(count or gw["winners"])
     winners = random.sample(valid, min(pick, len(valid)))
     gw["past_winners"] = past
+    revoke_giveaway_rewards(gw, list(gw.get("winner_ids", [])))  # first winners lose the reward
     gw["winner_ids"] = winners
     save_giveaway(gw)
     grant_giveaway_rewards(gw, winners)
