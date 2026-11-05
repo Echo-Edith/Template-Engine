@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import asyncio
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
@@ -280,3 +281,71 @@ async def generate_server_layout(
         "success": True,
         "data": layout_data
     }
+
+
+# --- AI SERVER CONSULTANT (/analyze) ---
+class AnalysisProblem(BaseModel):
+    title: str = Field(description="Short name of the problem, e.g. 'Everyone can mention @everyone'")
+    detail: str = Field(description="1-2 simple sentences: what is wrong and why it matters. Name the real channels or roles.")
+    severity: str = Field(description="One of: high, medium, low")
+
+
+class AnalysisSuggestion(BaseModel):
+    title: str = Field(description="Short action title, e.g. 'Add a rules channel'")
+    detail: str = Field(description="1-2 simple sentences: exactly what to do. Name the real channels or roles.")
+
+
+class ServerAnalysisSchema(BaseModel):
+    score: int = Field(description="Overall server quality from 0 to 100. Be honest, not generous.")
+    summary: str = Field(description="2-3 simple sentences about the overall state of the server")
+    strengths: List[str] = Field(description="Up to 5 things the server already does well")
+    problems: List[AnalysisProblem] = Field(description="Up to 6 problems, most serious first")
+    suggestions: List[AnalysisSuggestion] = Field(description="Up to 8 concrete improvements, most useful first")
+
+
+async def analyze_server(summary: Dict[str, Any], findings: List[str]) -> dict:
+    """AI server consultant: reads a summary of a Discord server and suggests improvements."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "GEMINI_API_KEY is not set."}
+
+    client = genai.Client(api_key=api_key)
+
+    system_instruction = (
+        "You are an expert Discord community consultant. You review the structure of a Discord server "
+        "and give honest, specific, practical advice.\n"
+        "Rules:\n"
+        "1. Use the real channel, category and role names from the data. Never invent channels that are already there.\n"
+        "2. Judge organization, naming, permissions and security, onboarding (rules, welcome, roles), "
+        "moderation setup (logs, mod channels), community features and missing basics.\n"
+        "3. The 'detected_issues' list was found by automatic checks. Use it, explain it, and add what it missed.\n"
+        "4. Write in short, simple English. No markdown, no emojis.\n"
+        "5. Be honest with the score. A normal untouched server is around 40-60."
+    )
+    user_query = (
+        "Analyze this Discord server and suggest improvements.\n\n"
+        f"SERVER DATA (JSON):\n{json.dumps(summary, ensure_ascii=False)[:24000]}\n\n"
+        f"DETECTED ISSUES:\n{json.dumps(findings, ensure_ascii=False)}"
+    )
+
+    last_error = None
+    for model_name in GEMINI_MODELS:
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=model_name,
+                contents=user_query,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    response_schema=ServerAnalysisSchema,
+                    temperature=0.4,
+                ),
+            )
+            data = json.loads(response.text)
+            data["score"] = max(0, min(100, int(data.get("score", 50))))
+            return {"success": True, "data": data, "model": model_name}
+        except Exception as e:
+            last_error = e
+            print(f"[Analyze] {model_name} failed: {e}. Trying next model...")
+    return {"success": False, "error": f"All AI models failed. Last error: {last_error}"}

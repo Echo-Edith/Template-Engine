@@ -2137,6 +2137,92 @@ def count_shop_sale(key: str):
 
 
 # -------------------------------------------------------------
+# SERVER ANALYSIS (/analyze): summary + automatic checks
+# -------------------------------------------------------------
+def build_server_summary(guild: discord.Guild) -> Tuple[dict, List[str]]:
+    """Returns (a compact summary of the server for the AI, a list of problems found by simple checks)."""
+    everyone = guild.default_role
+    findings: List[str] = []
+
+    role_info = []
+    for r in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+        if r.is_default():
+            continue
+        p = r.permissions
+        role_info.append({
+            "name": r.name, "members": len(r.members), "managed_by_bot": r.managed, "hoisted": r.hoist,
+            "administrator": p.administrator, "mention_everyone": p.mention_everyone,
+            "manage_server": p.manage_guild, "manage_roles": p.manage_roles, "manage_channels": p.manage_channels,
+            "ban_members": p.ban_members, "kick_members": p.kick_members,
+        })
+
+    categories = []
+    for cat in sorted(guild.categories, key=lambda c: c.position):
+        categories.append({
+            "name": cat.name,
+            "private": cat.overwrites_for(everyone).view_channel is False,
+            "channels": [{"name": c.name, "type": str(c.type).replace("ChannelType.", ""),
+                          "has_topic": bool(getattr(c, "topic", None)),
+                          "slowmode": getattr(c, "slowmode_delay", 0),
+                          "read_only": c.overwrites_for(everyone).send_messages is False}
+                         for c in sorted(cat.channels, key=lambda c: c.position)],
+        })
+    uncategorized = [{"name": c.name, "type": str(c.type).replace("ChannelType.", "")}
+                     for c in guild.channels if not isinstance(c, discord.CategoryChannel) and c.category is None]
+
+    bots = sum(1 for m in guild.members if m.bot)
+    summary = {
+        "name": guild.name,
+        "members": guild.member_count,
+        "bots": bots,
+        "boost_level": guild.premium_tier,
+        "verification_level": str(guild.verification_level),
+        "content_filter": str(guild.explicit_content_filter),
+        "default_notifications": str(guild.default_notifications),
+        "features": list(guild.features)[:15],
+        "role_count": len(role_info),
+        "roles": role_info[:60],
+        "categories": categories[:30],
+        "uncategorized_channels": uncategorized[:40],
+        "has_icon": guild.icon is not None,
+        "has_banner": guild.banner is not None,
+        "emoji_count": len(guild.emojis),
+    }
+
+    # ---- simple automatic checks
+    ep = everyone.permissions
+    if ep.administrator:
+        findings.append("HIGH: @everyone has the Administrator permission. Anyone can control the server.")
+    if ep.mention_everyone:
+        findings.append("HIGH: @everyone can mention @everyone and @here (spam risk).")
+    if ep.manage_channels or ep.manage_roles or ep.manage_guild or ep.ban_members or ep.kick_members:
+        findings.append("HIGH: @everyone has moderation or management permissions.")
+    admins = [r["name"] for r in role_info if r["administrator"] and not r["managed_by_bot"]]
+    if len(admins) > 3:
+        findings.append(f"MEDIUM: {len(admins)} normal roles have Administrator ({', '.join(admins[:6])}). Fewer is safer.")
+    if str(guild.verification_level) in ("VerificationLevel.none", "none"):
+        findings.append("MEDIUM: Verification level is None. Raids and spam accounts can join easily.")
+    if uncategorized:
+        findings.append(f"LOW: {len(uncategorized)} channels are not in any category.")
+    empty = [c["name"] for c in categories if not c["channels"]]
+    if empty:
+        findings.append(f"LOW: Empty categories: {', '.join(empty[:6])}.")
+    unused = [r["name"] for r in role_info if r["members"] == 0 and not r["managed_by_bot"]]
+    if len(unused) > 3:
+        findings.append(f"LOW: {len(unused)} roles have no members ({', '.join(unused[:6])}).")
+    all_names = " ".join(c.name.lower() for c in guild.channels)
+    if "rule" not in all_names:
+        findings.append("MEDIUM: There is no rules channel.")
+    if "welcome" not in all_names and "start" not in all_names and "intro" not in all_names:
+        findings.append("LOW: There is no welcome or start-here channel.")
+    if "log" not in all_names:
+        findings.append("MEDIUM: There is no log channel for moderation.")
+    if "announce" not in all_names and "news" not in all_names:
+        findings.append("LOW: There is no announcements channel.")
+    return summary, findings
+
+
+# -------------------------------------------------------------
 # ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
 # -------------------------------------------------------------
 class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):

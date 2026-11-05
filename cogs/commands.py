@@ -96,6 +96,7 @@ from cogs.features import (
     count_shop_sale,
     shop_key,
     HAS_CARD_LAYOUT,
+    build_server_summary,
     LIFETIME_PREMIUM_DAYS,
     has_lifetime_premium,
     set_user_premium,
@@ -124,7 +125,7 @@ PUBLIC_COMMANDS = {
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
     "warn", "clear", "purge", "mute", "unmute", "kick", "ban", "unban",
-    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog", "backup",
+    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog", "backup", "analyze",
 }
 
 
@@ -3210,6 +3211,65 @@ class CommandsCog(commands.Cog):
         embed.add_field(name="Stock", value=f"`{shop_stock_text(item)}`", inline=True)
         embed.add_field(name="Reward", value=shop_reward_text(item), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
+
+
+    # =============================================================
+    # AI SERVER CONSULTANT
+    # =============================================================
+    @app_commands.command(name="analyze", description="AI server consultant: analyze this server and suggest improvements.")
+    @app_commands.guild_only()
+    @app_commands.checks.cooldown(1, 60.0, key=lambda i: i.guild_id)
+    async def analyze_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        summary, findings = build_server_summary(guild)
+
+        try:
+            import ai_brain
+            result = await asyncio.wait_for(ai_brain.analyze_server(summary, findings), timeout=90)
+        except Exception as e:
+            print(f"[Analyze Error] {e!r}")
+            result = {"success": False, "error": str(e)}
+
+        if not result.get("success"):
+            # The AI is down: still show what the automatic checks found
+            embed = embed_info("AI Server Consultant", "The AI could not answer right now, so this is only the automatic check.", COLOR_GOLD)
+            embed.add_field(name="Problems Found", value="\n".join(f"\u2022 {f}" for f in findings)[:1000] or "Nothing found.", inline=False)
+            embed.add_field(name="AI Error", value=f"```{str(result.get('error'))[:300]}```", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        data = result["data"]
+        score = int(data["score"])
+        color = COLOR_GREEN if score >= 75 else (COLOR_GOLD if score >= 50 else COLOR_RED)
+        bar = "\u2588" * (score // 10) + "\u2591" * (10 - score // 10)
+
+        def cut(text: str, limit: int) -> str:
+            text = str(text)
+            return text if len(text) <= limit else text[:limit - 1] + "\u2026"
+
+        pages = []
+        overview = discord.Embed(title=f"AI Server Consultant | {guild.name}", description=cut(data["summary"], 1500), color=color)
+        overview.add_field(name="Score", value=f"`{score}/100`\n`{bar}`", inline=False)
+        if data.get("strengths"):
+            overview.add_field(name="What Is Good", value=cut("\n".join(f"\u2022 {s}" for s in data["strengths"][:5]), 1000), inline=False)
+        overview.add_field(name="Checked", value=f"`{len(guild.roles) - 1}` roles | `{len(guild.categories)}` categories | `{len(guild.channels) - len(guild.categories)}` channels", inline=False)
+        pages.append(overview)
+
+        if data.get("problems"):
+            lines = []
+            for p in data["problems"][:6]:
+                sev = str(p.get("severity", "low")).upper()
+                lines.append(f"`{sev}` **{cut(p['title'], 80)}**\n{cut(p['detail'], 300)}")
+            pages.append(discord.Embed(title="Problems Found", description=cut("\n\n".join(lines), 3900), color=COLOR_RED))
+
+        if data.get("suggestions"):
+            lines = [f"**{n}. {cut(s['title'], 80)}**\n{cut(s['detail'], 300)}" for n, s in enumerate(data["suggestions"][:8], start=1)]
+            pages.append(discord.Embed(title="How To Improve", description=cut("\n\n".join(lines), 3900), color=COLOR_PURPLE))
+
+        for n, page in enumerate(pages, start=1):
+            page.set_footer(text=f"Page {n}/{len(pages)} | AI advice can be wrong. Check it before you change things.")
+        await send_pages(interaction, pages, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
