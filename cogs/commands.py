@@ -70,6 +70,7 @@ from cogs.features import (
     remove_staff,
     is_staff,
     list_staff,
+    list_premium_users,
     HARDCODED_STAFF,
     COMMAND_ADMINS,
     extend_user_premium,
@@ -83,7 +84,7 @@ from cogs.features import (
 #   ADMIN_COMMANDS  : server members with the Administrator permission
 #   anything else   : bot owner only (set, points-set, premium-set, game, revenue, cookie-check)
 # -------------------------------------------------------------
-STAFF_COMMANDS = {"staff", "staff-list"}  # only HARDCODED_STAFF may run these
+STAFF_COMMANDS = {"staff", "staff-list", "premiums"}  # only HARDCODED_STAFF may run these
 
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox-user", "gameinfo", "timestamp", "remind",
@@ -2550,6 +2551,16 @@ class CommandsCog(commands.Cog):
                     except Exception as e:
                         embed.add_field(name="Role", value=f"Could not remove {role.mention}: `{e}`", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @app_commands.command(name="premiums", description="Show everyone with TE Premium (owner only).")
+    async def premiums_cmd(self, interaction: discord.Interaction):
+        ids = list_premium_users()
+        if not ids:
+            await send_pages(interaction, [embed_info("TE Premium Users", "Nobody has TE Premium right now.")], ephemeral=True)
+            return
+        lines = [f"<@{uid}>\n`{uid}`\n" for uid in ids]
+        pages = build_pages("TE Premium Users", lines, per_page=10, header=f"Premium users: `{len(lines)}`\n\n")
+        await send_pages(interaction, pages, ephemeral=True)
 
     @app_commands.command(name="staff-list", description="Show staff (one per line) and choose the role new staff get.")
     async def staff_list_cmd(self, interaction: discord.Interaction):

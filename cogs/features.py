@@ -315,6 +315,31 @@ def extend_user_premium(user_id: str, days: int) -> datetime:
     return new_exp
 
 
+def list_premium_users() -> List[str]:
+    """IDs of everyone with active TE Premium (permanent staff included)."""
+    now = datetime.now(timezone.utc)
+
+    def active(raw) -> bool:
+        if not raw:
+            return True
+        try:
+            exp = datetime.fromisoformat(str(raw))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return exp > now
+        except ValueError:
+            return True
+
+    ids = {uid for uid, raw in LOCAL_PREMIUM_USERS.items() if active(raw)}
+    if db_premium is not None:
+        try:
+            ids = {str(d["discord_id"]) for d in db_premium.find({}) if d.get("discord_id") and active(d.get("expires_at"))}
+        except Exception as e:
+            print(f"[Mongo Premium List Error] {e}")
+    ids |= HARDCODED_STAFF
+    return sorted(ids, key=int)
+
+
 def reduce_user_premium(user_id: str, days: int):
     """Takes days of premium away. If nothing is left, premium is removed."""
     uid = str(user_id)
