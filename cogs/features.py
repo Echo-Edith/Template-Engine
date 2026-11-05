@@ -35,6 +35,7 @@ db_giveaways = None
 db_settings = None
 db_promos = None
 db_broadcasts = None
+db_backups = None
 
 if MONGO_URI:
     try:
@@ -54,6 +55,7 @@ if MONGO_URI:
         db_settings = db["settings"]
         db_promos = db["promo_codes"]
         db_broadcasts = db["broadcasts"]
+        db_backups = db["backups"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -1700,6 +1702,296 @@ def build_greeting_embed(kind: str, template: str, member, guild) -> discord.Emb
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=guild.name, icon_url=guild.icon.url if guild.icon else None)
     return embed
+
+
+# -------------------------------------------------------------
+# SERVER BACKUPS (/backup)
+# -------------------------------------------------------------
+BACKUP_LIMIT_PER_GUILD = 10
+LOCAL_BACKUPS: Dict[str, dict] = {}
+LOCAL_BACKUP_COUNTER = {"n": 0}
+BACKUP_SAVED = [
+    "Roles and their permissions",
+    "Categories and channels (names, topics, settings, order)",
+    "Channel and category permission overwrites (for roles)",
+    "Server settings (name, verification, notifications, AFK, system channel)",
+    "Bot settings (join/leave messages, message log)",
+]
+BACKUP_NOT_SAVED = [
+    "Messages and files",
+    "Members and the roles they have",
+    "Emojis and stickers",
+    "Server icon, banner, webhooks and integrations",
+]
+CHANNEL_KIND = {
+    discord.ChannelType.text: "text",
+    discord.ChannelType.voice: "voice",
+    discord.ChannelType.stage_voice: "stage",
+    discord.ChannelType.forum: "forum",
+    discord.ChannelType.news: "news",
+}
+
+
+def normalize_backup_id(text: str) -> str:
+    return (text or "").strip().upper()
+
+
+def next_backup_id() -> str:
+    number = None
+    if db_counters is not None:
+        try:
+            doc = db_counters.find_one_and_update(
+                {"_id": "backups"}, {"$inc": {"value": 1}}, upsert=True, return_document=ReturnDocument.AFTER
+            )
+            number = int(doc["value"])
+        except Exception as e:
+            print(f"[Backup Counter Error] {e}")
+    if number is None:
+        LOCAL_BACKUP_COUNTER["n"] += 1
+        number = LOCAL_BACKUP_COUNTER["n"]
+    return f"TE-BK-{number:05d}"
+
+
+def backup_counts(backup: dict) -> Tuple[int, int, int]:
+    """(channels, roles, categories)"""
+    return len(backup.get("channels", [])), len(backup.get("roles", [])), len(backup.get("categories", []))
+
+
+def _overwrites_data(channel) -> list:
+    data = []
+    for target, ow in channel.overwrites.items():
+        if isinstance(target, discord.Role):
+            allow, deny = ow.pair()
+            data.append({"target_id": target.id, "allow": allow.value, "deny": deny.value})
+    return data
+
+
+def snapshot_guild(guild: discord.Guild, created_by) -> dict:
+    roles = []
+    for r in sorted(guild.roles, key=lambda r: r.position):
+        if r.is_default() or r.managed:
+            continue
+        roles.append({
+            "id": r.id, "name": r.name, "color": r.color.value, "hoist": r.hoist,
+            "mentionable": r.mentionable, "permissions": r.permissions.value, "position": r.position,
+        })
+    categories = [
+        {"id": c.id, "name": c.name, "position": c.position, "overwrites": _overwrites_data(c)}
+        for c in sorted(guild.categories, key=lambda c: c.position)
+    ]
+    channels = []
+    for ch in sorted((c for c in guild.channels if not isinstance(c, discord.CategoryChannel)), key=lambda c: c.position):
+        kind = CHANNEL_KIND.get(ch.type)
+        if kind is None:
+            continue  # threads and unknown types are not saved
+        item = {"id": ch.id, "name": ch.name, "kind": kind, "category_id": ch.category_id,
+                "position": ch.position, "overwrites": _overwrites_data(ch)}
+        if kind in ("text", "news", "forum"):
+            item["topic"] = getattr(ch, "topic", None)
+            item["nsfw"] = bool(getattr(ch, "nsfw", False))
+            item["slowmode_delay"] = int(getattr(ch, "slowmode_delay", 0) or 0)
+        if kind in ("voice", "stage"):
+            item["bitrate"] = int(getattr(ch, "bitrate", 64000) or 64000)
+            item["user_limit"] = int(getattr(ch, "user_limit", 0) or 0)
+        channels.append(item)
+    settings = {
+        "name": guild.name,
+        "verification_level": guild.verification_level.value,
+        "default_notifications": guild.default_notifications.value,
+        "explicit_content_filter": guild.explicit_content_filter.value,
+        "afk_timeout": guild.afk_timeout,
+        "afk_channel_id": guild.afk_channel.id if guild.afk_channel else None,
+        "system_channel_id": guild.system_channel.id if guild.system_channel else None,
+    }
+    return {
+        "backup_id": next_backup_id(),
+        "guild_id": guild.id,
+        "guild_name": guild.name,
+        "created_by": str(created_by),
+        "created_at": datetime.now(timezone.utc).timestamp(),
+        "everyone_permissions": guild.default_role.permissions.value,
+        "roles": roles,
+        "categories": categories,
+        "channels": channels,
+        "settings": settings,
+        "bot_config": dict(get_guild_config(guild.id)),
+    }
+
+
+def save_backup(backup: dict) -> bool:
+    LOCAL_BACKUPS[backup["backup_id"]] = backup
+    if db_backups is not None:
+        try:
+            db_backups.replace_one({"backup_id": backup["backup_id"]}, backup, upsert=True)
+        except Exception as e:
+            print(f"[Backup Save Error] {e}")
+            return False
+    return True
+
+
+def get_backup(backup_id: str) -> Optional[dict]:
+    bid = normalize_backup_id(backup_id)
+    if db_backups is not None:
+        try:
+            doc = db_backups.find_one({"backup_id": bid}, {"_id": 0})
+            if doc:
+                return doc
+            return None
+        except Exception as e:
+            print(f"[Backup Read Error] {e}")
+    return LOCAL_BACKUPS.get(bid)
+
+
+def list_backups(guild_id: Optional[int] = None) -> List[dict]:
+    items: List[dict] = []
+    if db_backups is not None:
+        try:
+            query = {"guild_id": int(guild_id)} if guild_id is not None else {}
+            items = list(db_backups.find(query, {"_id": 0}))
+        except Exception as e:
+            print(f"[Backup List Error] {e}")
+            items = []
+    else:
+        items = [b for b in LOCAL_BACKUPS.values() if guild_id is None or b["guild_id"] == int(guild_id)]
+    return sorted(items, key=lambda b: b.get("created_at", 0), reverse=True)
+
+
+def delete_backup(backup_id: str) -> bool:
+    bid = normalize_backup_id(backup_id)
+    existed = LOCAL_BACKUPS.pop(bid, None) is not None
+    if db_backups is not None:
+        try:
+            return db_backups.delete_one({"backup_id": bid}).deleted_count > 0
+        except Exception as e:
+            print(f"[Backup Delete Error] {e}")
+    return existed
+
+
+async def restore_guild(guild: discord.Guild, backup: dict) -> dict:
+    """Rebuilds roles, categories, channels, settings and bot settings from a backup.
+    The caller must clear the server first. Returns counts and a list of problems."""
+    problems: List[str] = []
+    made = {"roles": 0, "categories": 0, "channels": 0}
+    role_map: Dict[int, discord.Role] = {int(backup["guild_id"]): guild.default_role}
+    channel_map: Dict[int, Any] = {}
+    me_perms = guild.me.guild_permissions.value
+
+    async def pause():
+        await asyncio.sleep(0.3)
+
+    # @everyone permissions
+    try:
+        await guild.default_role.edit(permissions=discord.Permissions(backup.get("everyone_permissions", 0) & me_perms))
+    except Exception as e:
+        problems.append(f"@everyone permissions: {e}")
+
+    # roles (highest first, so the order ends up the same as in the backup)
+    for r in sorted(backup["roles"], key=lambda r: r["position"], reverse=True):
+        kwargs = dict(name=r["name"], colour=discord.Colour(r["color"]), hoist=r["hoist"], mentionable=r["mentionable"],
+                      reason="Template Engine backup restore")
+        try:
+            try:
+                new_role = await guild.create_role(permissions=discord.Permissions(r["permissions"]), **kwargs)
+            except discord.Forbidden:
+                new_role = await guild.create_role(permissions=discord.Permissions(r["permissions"] & me_perms), **kwargs)
+            role_map[int(r["id"])] = new_role
+            made["roles"] += 1
+        except Exception as e:
+            problems.append(f"Role {r['name']}: {e}")
+        await pause()
+
+    def build_overwrites(items: list) -> dict:
+        result = {}
+        for o in items:
+            role = role_map.get(int(o["target_id"]))
+            if role is not None:
+                result[role] = discord.PermissionOverwrite.from_pair(discord.Permissions(o["allow"]), discord.Permissions(o["deny"]))
+        return result
+
+    async def create_with_fallback(factory, name: str, items: list):
+        try:
+            return await factory(overwrites=build_overwrites(items))
+        except discord.Forbidden:
+            problems.append(f"{name}: permissions could not be copied")
+            return await factory()
+
+    # categories
+    for c in sorted(backup["categories"], key=lambda c: c["position"]):
+        try:
+            cat = await create_with_fallback(
+                lambda **kw: guild.create_category(c["name"], reason="Template Engine backup restore", **kw), f"Category {c['name']}", c["overwrites"])
+            channel_map[int(c["id"])] = cat
+            made["categories"] += 1
+        except Exception as e:
+            problems.append(f"Category {c['name']}: {e}")
+        await pause()
+
+    # channels
+    for ch in sorted(backup["channels"], key=lambda c: c["position"]):
+        category = channel_map.get(int(ch["category_id"])) if ch.get("category_id") else None
+        kind = ch["kind"]
+        common = {"category": category, "reason": "Template Engine backup restore"}
+        try:
+            if kind in ("text", "news"):
+                def factory(**kw):
+                    return guild.create_text_channel(ch["name"], topic=ch.get("topic"), nsfw=ch.get("nsfw", False),
+                                                     slowmode_delay=ch.get("slowmode_delay", 0), **common, **kw)
+            elif kind == "forum":
+                def factory(**kw):
+                    return guild.create_forum(ch["name"], topic=ch.get("topic") or "", nsfw=ch.get("nsfw", False),
+                                              slowmode_delay=ch.get("slowmode_delay", 0), **common, **kw)
+            elif kind == "voice":
+                def factory(**kw):
+                    return guild.create_voice_channel(ch["name"], bitrate=min(ch.get("bitrate", 64000), guild.bitrate_limit),
+                                                      user_limit=ch.get("user_limit", 0), **common, **kw)
+            else:
+                def factory(**kw):
+                    return guild.create_stage_channel(ch["name"], **common, **kw)
+            new_ch = await create_with_fallback(factory, f"Channel {ch['name']}", ch["overwrites"])
+            channel_map[int(ch["id"])] = new_ch
+            made["channels"] += 1
+            if kind == "news":
+                problems.append(f"{ch['name']}: restored as a normal text channel (announcement channels need Community)")
+        except Exception as e:
+            problems.append(f"Channel {ch['name']}: {e}")
+        await pause()
+
+    # server settings
+    st = backup.get("settings", {})
+    try:
+        await guild.edit(
+            name=st.get("name", guild.name),
+            verification_level=discord.VerificationLevel(st.get("verification_level", 0)),
+            default_notifications=discord.NotificationLevel(st.get("default_notifications", 0)),
+            explicit_content_filter=discord.ContentFilter(st.get("explicit_content_filter", 0)),
+            afk_timeout=st.get("afk_timeout", 300),
+            afk_channel=channel_map.get(int(st["afk_channel_id"])) if st.get("afk_channel_id") else None,
+            system_channel=channel_map.get(int(st["system_channel_id"])) if st.get("system_channel_id") else None,
+            reason="Template Engine backup restore",
+        )
+    except Exception as e:
+        problems.append(f"Server settings: {e}")
+
+    # bot settings (channel IDs are mapped to the new channels)
+    try:
+        cfg = get_guild_config(guild.id)
+        cfg.clear()
+        for key, value in (backup.get("bot_config") or {}).items():
+            if key == "message_log":
+                new = channel_map.get(int(value))
+                if new:
+                    cfg["message_log"] = new.id
+            elif key in ("join", "leave") and isinstance(value, dict):
+                entry = dict(value)
+                new = channel_map.get(int(entry.get("channel_id", 0)))
+                if new:
+                    entry["channel_id"] = new.id
+                    cfg[key] = entry
+        save_guild_config(guild.id)
+    except Exception as e:
+        problems.append(f"Bot settings: {e}")
+
+    return {"made": made, "problems": problems}
 
 
 # -------------------------------------------------------------

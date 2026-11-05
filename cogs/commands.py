@@ -76,6 +76,17 @@ from cogs.features import (
     render_greeting,
     build_greeting_embed,
     DEFAULT_GREETINGS,
+    BACKUP_LIMIT_PER_GUILD,
+    BACKUP_SAVED,
+    BACKUP_NOT_SAVED,
+    backup_counts,
+    normalize_backup_id,
+    snapshot_guild,
+    save_backup,
+    get_backup,
+    list_backups,
+    delete_backup,
+    restore_guild,
     HARDCODED_STAFF,
     COMMAND_ADMINS,
     extend_user_premium,
@@ -98,7 +109,7 @@ PUBLIC_COMMANDS = {
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
     "warn", "clear", "purge", "mute", "unmute", "kick", "ban", "unban",
-    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog",
+    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog", "backup",
 }
 
 
@@ -725,6 +736,70 @@ class StaffListView(discord.ui.View):
             notice += "\nThe database could not be reached, so this only lasts until the bot restarts."
         view = StaffListView(self.owner_id, self.page)
         await interaction.response.edit_message(embed=view.build_embed(notice), view=view, allowed_mentions=NO_PINGS)
+
+
+# -------------------------------------------------------------
+# SERVER BACKUPS (/backup)
+# -------------------------------------------------------------
+def backup_embed(backup: dict, title: str, description: str, color: int = COLOR_GREEN, detailed: bool = False) -> discord.Embed:
+    channels, roles, categories = backup_counts(backup)
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.set_author(name="Template Engine \u2022 Server Backup")
+    embed.add_field(name="Backup ID", value=f"`{backup['backup_id']}`", inline=True)
+    embed.add_field(name="Server", value=f"`{backup['guild_name']}`", inline=True)
+    embed.add_field(name="Created", value=f"<t:{int(backup['created_at'])}:R>", inline=True)
+    embed.add_field(name="Channels", value=f"`{channels}`", inline=True)
+    embed.add_field(name="Roles", value=f"`{roles}`", inline=True)
+    embed.add_field(name="Categories", value=f"`{categories}`", inline=True)
+    if detailed:
+        names = [c["name"] for c in backup.get("categories", [])][:10]
+        if names:
+            embed.add_field(name="Categories Saved", value="\n".join(f"`{n}`" for n in names), inline=False)
+        cfg = backup.get("bot_config") or {}
+        bot_bits = [label for key, label in (("join", "Join message"), ("leave", "Leave message"), ("message_log", "Message log")) if key in cfg]
+        embed.add_field(name="Bot Settings Saved", value=", ".join(f"`{b}`" for b in bot_bits) or "`None`", inline=False)
+    embed.add_field(name="Saved", value="\n".join(f"\u2022 {x}" for x in BACKUP_SAVED), inline=False)
+    embed.add_field(name="Not Saved", value="\n".join(f"\u2022 {x}" for x in BACKUP_NOT_SAVED), inline=False)
+    return embed
+
+
+class BackupConfirmView(discord.ui.View):
+    """Confirm step for Restore (clears the server) and Delete."""
+
+    def __init__(self, cog, user_id: int, mode: str, backup: dict):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.user_id = user_id
+        self.mode = mode
+        self.backup = backup
+        self.confirm_btn.label = "Restore Backup" if mode == "restore" else "Delete Backup"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(embed=embed_err("Not Yours", "Only the person who ran the command can use these buttons."), ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        if self.mode == "delete":
+            removed = delete_backup(self.backup["backup_id"])
+            if removed:
+                await interaction.response.edit_message(embed=embed_ok("Backup Deleted", f"`{self.backup['backup_id']}` was deleted."), view=None)
+            else:
+                await interaction.response.edit_message(embed=embed_err("Not Deleted", "The database could not delete it. Try again."), view=None)
+            return
+        await interaction.response.edit_message(
+            embed=embed_info("Restoring...", "Clearing the server and rebuilding it from the backup. This can take a few minutes. Do not use the server meanwhile.", COLOR_GOLD),
+            view=None
+        )
+        await self.cog.run_restore(interaction, self.backup)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(embed=embed_info("Cancelled", "Nothing was changed."), view=None)
 
 
 # -------------------------------------------------------------
@@ -2680,6 +2755,120 @@ class CommandsCog(commands.Cog):
         if not saved:
             embed.add_field(name="Warning", value="The database could not be reached. This only lasts until the bot restarts.", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+    # =============================================================
+    # SERVER BACKUPS
+    # =============================================================
+    async def backup_id_autocomplete(self, interaction: discord.Interaction, current: str):
+        if not interaction.guild:
+            return []
+        items = list_backups(None if interaction.user.id in COMMAND_ADMINS or str(interaction.user.id) in COMMAND_ADMINS else interaction.guild.id)
+        text = current.strip().upper()
+        return [
+            app_commands.Choice(name=f"{b['backup_id']} | {b['guild_name']}"[:100], value=b["backup_id"])
+            for b in items if text in b["backup_id"]
+        ][:25]
+
+    @app_commands.command(name="backup", description="Save, view, list, restore or delete a backup of this server.")
+    @app_commands.describe(action="What to do.", backup_id="The backup ID, e.g. TE-BK-00001 (not needed for Create and List).")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Create", value="create"),
+        app_commands.Choice(name="View", value="view"),
+        app_commands.Choice(name="List", value="list"),
+        app_commands.Choice(name="Restore", value="restore"),
+        app_commands.Choice(name="Delete", value="delete"),
+    ])
+    @app_commands.autocomplete(backup_id=backup_id_autocomplete)
+    @app_commands.guild_only()
+    async def backup_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str], backup_id: Optional[str] = None):
+        guild = interaction.guild
+        is_admin_user = str(interaction.user.id) in COMMAND_ADMINS
+        act = action.value
+
+        if act == "create":
+            await interaction.response.defer(ephemeral=True)
+            if len(list_backups(guild.id)) >= BACKUP_LIMIT_PER_GUILD:
+                await interaction.followup.send(embed=embed_err("Backup Limit Reached", f"You can keep `{BACKUP_LIMIT_PER_GUILD}` backups. Delete one first with `/backup` Delete."), ephemeral=True)
+                return
+            backup = snapshot_guild(guild, interaction.user.id)
+            saved = save_backup(backup)
+            embed = backup_embed(backup, "Backup Successfully Created", "Your server configuration has been saved.")
+            if not saved:
+                embed.add_field(name="Warning", value="The database could not be reached. This backup only lasts until the bot restarts.", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if act == "list":
+            backups = list_backups(None if is_admin_user else guild.id)
+            if not backups:
+                await send_pages(interaction, [embed_info("Server Backups", "There are no backups yet. Use `/backup` Create.")], ephemeral=True)
+                return
+            lines = []
+            for b in backups:
+                ch, ro, ca = backup_counts(b)
+                lines.append(f"`{b['backup_id']}` | **{b['guild_name']}** | `{ch}` channels, `{ro}` roles | <t:{int(b['created_at'])}:R>")
+            pages = build_pages("Server Backups", lines, per_page=10, header=f"Backups: `{len(lines)}`\n\n")
+            await send_pages(interaction, pages, ephemeral=True)
+            return
+
+        # View / Restore / Delete need an ID
+        if not backup_id:
+            await interaction.response.send_message(embed=embed_err("Backup ID Needed", "Give the `backup_id`, for example `TE-BK-00001`. Use List to see your backups."), ephemeral=True)
+            return
+        backup = get_backup(backup_id)
+        if backup is None or (backup["guild_id"] != guild.id and not is_admin_user):
+            await interaction.response.send_message(embed=embed_err("Backup Not Found", f"No backup `{normalize_backup_id(backup_id)}` for this server."), ephemeral=True)
+            return
+
+        if act == "view":
+            await interaction.response.send_message(embed=backup_embed(backup, "Backup Details", "Saved server configuration.", COLOR_PURPLE, detailed=True), ephemeral=True)
+            return
+
+        if act == "delete":
+            view = BackupConfirmView(self, interaction.user.id, "delete", backup)
+            embed = backup_embed(backup, "Delete This Backup?", "This cannot be undone.", COLOR_RED)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            return
+
+        # Restore: only the server owner (or the main staff) can do this
+        if interaction.user.id != guild.owner_id and not is_admin_user:
+            await interaction.response.send_message(embed=embed_err("Owner Only", "Only the server owner can restore a backup."), ephemeral=True)
+            return
+        if backup["guild_id"] != guild.id and not is_admin_user:
+            await interaction.response.send_message(embed=embed_err("Wrong Server", "This backup was made in another server."), ephemeral=True)
+            return
+        me_perms = guild.me.guild_permissions
+        if not (me_perms.administrator or (me_perms.manage_channels and me_perms.manage_roles and me_perms.manage_guild)):
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I need `Administrator` (or Manage Channels, Manage Roles and Manage Server) to restore a backup."), ephemeral=True)
+            return
+        view = BackupConfirmView(self, interaction.user.id, "restore", backup)
+        embed = backup_embed(
+            backup, "Restore This Backup?",
+            "**This deletes ALL current channels, categories and roles in this server** and rebuilds them from the backup.\nMessages in deleted channels are lost for good.",
+            COLOR_RED
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    async def run_restore(self, interaction: discord.Interaction, backup: dict):
+        guild = interaction.guild
+        features = self.bot.get_cog("FeaturesCog")
+        try:
+            await features.nuke_guild_structure(guild)
+            result = await restore_guild(guild, backup)
+        except Exception as e:
+            print(f"[Backup Restore Error] {e!r}")
+            await interaction.edit_original_response(embed=embed_err("Restore Failed", f"`{str(e)[:500]}`"), view=None)
+            return
+        made, problems = result["made"], result["problems"]
+        embed = backup_embed(backup, "Backup Restored", "The server was rebuilt from the backup.")
+        embed.add_field(name="Created", value=f"`{made['roles']}` roles, `{made['categories']}` categories, `{made['channels']}` channels", inline=False)
+        if problems:
+            embed.add_field(name=f"Problems ({len(problems)})", value="\n".join(f"\u2022 {p[:150]}" for p in problems[:8])[:1000], inline=False)
+        try:
+            await interaction.edit_original_response(embed=embed, view=None)
+        except Exception as e:
+            print(f"[Backup Restore Reply Error] {e!r}")
 
 
 async def setup(bot: commands.Bot):
