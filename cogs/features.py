@@ -1446,6 +1446,47 @@ def build_denied_embed(guild_name: str, reason: str) -> discord.Embed:
 # PRICES (shared with the website through MongoDB: settings / "prices")
 # -------------------------------------------------------------
 DEFAULT_PRICES = {"subscription_robux": 299, "points_cost": 100, "dev_product_robux": None}
+# =====================================================================
+# WEBSITE THEMES (/theme). The website reads the same database value.
+# =====================================================================
+SITE_THEMES = {
+    "blueprint": "Blueprint (default)",
+    "winter": "Winter",
+    "halloween": "Halloween",
+    "christmas": "Christmas",
+    "spring": "Spring",
+    "summer": "Summer",
+}
+LOCAL_SITE_THEME = {"theme": "blueprint"}
+
+
+def get_site_theme() -> str:
+    theme = LOCAL_SITE_THEME["theme"]
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "website_theme"}) or {}
+            if doc.get("theme") in SITE_THEMES:
+                theme = doc["theme"]
+        except Exception as e:
+            print(f"[Theme Read Error] {e}")
+    return theme
+
+
+def set_site_theme(theme: str) -> bool:
+    """Saves the website theme. Returns False if it could not be saved to the database."""
+    if theme not in SITE_THEMES:
+        return False
+    LOCAL_SITE_THEME["theme"] = theme
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": "website_theme"}, {"$set": {"theme": theme}}, upsert=True)
+            return True
+        except Exception as e:
+            print(f"[Theme Save Error] {e}")
+            return False
+    return False
+
+
 LOCAL_PRICES: Dict[str, int] = {}
 
 

@@ -58,6 +58,21 @@ def get_subscription_price() -> int:
     return price
 
 
+SITE_THEMES = {"blueprint", "winter", "halloween", "christmas", "spring", "summer"}
+
+
+def get_site_theme() -> str:
+    """Theme chosen with the bot's /theme command (same database). Falls back to the default."""
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "website_theme"}) or {}
+            if doc.get("theme") in SITE_THEMES:
+                return doc["theme"]
+        except Exception as e:
+            print(f"[Theme Read Error] {e}")
+    return "blueprint"
+
+
 # Permanent staff always have premium (same list as the bot's HARDCODED_STAFF)
 HARDCODED_STAFF = {"1219266886143967245"}
 
@@ -111,6 +126,7 @@ def index():
         is_premium=is_premium,
         discord_client_id=DISCORD_CLIENT_ID,
         subscription_price=get_subscription_price(),
+        site_theme=get_site_theme(),
         roblox_store_url=os.environ.get("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
     )
 

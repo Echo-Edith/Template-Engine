@@ -12,6 +12,10 @@ from discord.ext import commands
 from discord import app_commands
 
 from cogs.features import (
+    SITE_THEMES,
+    WEBSITE_URL,
+    get_site_theme,
+    set_site_theme,
     BOT_OWNER_ID,
     RobloxVerificationView,
     RobloxUnsyncView,
@@ -2627,6 +2631,35 @@ class CommandsCog(commands.Cog):
     async def _ac_delete(self, interaction: discord.Interaction, current: str):
         return await self._giveaway_choices(interaction, current)
 
+
+    # =============================================================
+    # WEBSITE THEME: /theme set, /theme view
+    # =============================================================
+    theme_group = app_commands.Group(name="theme", description="Website theme tools (owner only).")
+
+    @theme_group.command(name="set", description="Change the website theme, for example for a season.")
+    @app_commands.describe(theme="The theme to show on the website.")
+    @app_commands.choices(theme=[app_commands.Choice(name=label, value=key) for key, label in SITE_THEMES.items()])
+    async def theme_set(self, interaction: discord.Interaction, theme: app_commands.Choice[str]):
+        await interaction.response.defer(ephemeral=True)
+        old = get_site_theme()
+        saved = set_site_theme(theme.value)
+        embed = embed_ok("Website Theme Changed", "The website will show the new theme the next time a page loads.")
+        embed.add_field(name="Old Theme", value=f"`{SITE_THEMES.get(old, old)}`", inline=True)
+        embed.add_field(name="New Theme", value=f"`{SITE_THEMES[theme.value]}`", inline=True)
+        if WEBSITE_URL:
+            embed.add_field(name="Website", value=WEBSITE_URL, inline=False)
+        if not saved:
+            embed.add_field(name="Warning", value="The theme could not be saved to the database. The website may not change.", inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @theme_group.command(name="view", description="Show the current website theme and all themes.")
+    async def theme_view(self, interaction: discord.Interaction):
+        current = get_site_theme()
+        embed = embed_info("Website Theme", f"Current theme: `{SITE_THEMES.get(current, current)}`", COLOR_PURPLE)
+        embed.add_field(name="All Themes", value="\n".join(f"`{label}`" for label in SITE_THEMES.values()), inline=False)
+        embed.add_field(name="Change It", value="`/theme set`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # =============================================================
     # PRICES: /change price
