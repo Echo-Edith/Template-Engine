@@ -3335,7 +3335,7 @@ class CommandsCog(commands.Cog):
     @app_commands.describe(
         category="Where new ticket channels are created.",
         staff_role="The role that can see and close tickets.",
-        log_channel="Where transcripts are saved when a ticket closes.",
+        log_channel="Channel ID for transcripts. Can be in another server (the bot must be there).",
         panel_channel="Optional. Post the ticket buttons in this channel."
     )
     async def ticket_setup_cmd(
@@ -3343,14 +3343,20 @@ class CommandsCog(commands.Cog):
         interaction: discord.Interaction,
         category: discord.CategoryChannel,
         staff_role: discord.Role,
-        log_channel: discord.TextChannel,
+        log_channel: str,
         panel_channel: Optional[discord.TextChannel] = None
     ):
+        digits = "".join(ch for ch in log_channel if ch.isdigit())
+        log_channel = interaction.client.get_channel(int(digits)) if digits else None
+        if log_channel is None or not hasattr(log_channel, "send"):
+            await interaction.response.send_message(
+                embed=embed_err("Channel Not Found", "I cannot see that channel. Use the channel ID, and make sure the bot is in that server."), ephemeral=True)
+            return
         me = interaction.guild.me
         if not me.guild_permissions.manage_channels:
             await interaction.response.send_message(embed=embed_err("Missing Permission", "I need `Manage Channels` to create ticket channels."), ephemeral=True)
             return
-        perms = log_channel.permissions_for(me)
+        perms = log_channel.permissions_for(log_channel.guild.me)
         if not (perms.view_channel and perms.send_messages and perms.attach_files and perms.embed_links):
             await interaction.response.send_message(
                 embed=embed_err("Missing Permission", f"I need `View Channel`, `Send Messages`, `Embed Links` and `Attach Files` in {log_channel.mention}."), ephemeral=True)
@@ -3366,7 +3372,7 @@ class CommandsCog(commands.Cog):
         embed = embed_ok("Tickets Ready", "People can now open tickets.")
         embed.add_field(name="Category", value=f"`{category.name}`", inline=True)
         embed.add_field(name="Staff Role", value=staff_role.mention, inline=True)
-        embed.add_field(name="Transcripts", value=log_channel.mention, inline=True)
+        embed.add_field(name="Transcripts", value=f"{log_channel.mention}\n`{log_channel.guild.name}`", inline=True)
         if panel_channel is not None:
             panel = discord.Embed(
                 title="Need Help?",

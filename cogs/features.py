@@ -2478,13 +2478,14 @@ async def close_ticket(bot: commands.Bot, channel: discord.TextChannel, closed_b
     embed.add_field(name="Opened By", value=f"<@{ticket['user_id']}>\n`{ticket['user_id']}`", inline=True)
     embed.add_field(name="Closed By", value=f"{closed_by.mention}", inline=True)
     embed.add_field(name="Type", value=f"`{TICKET_KINDS.get(ticket['kind'], ticket['kind'])}`", inline=True)
+    embed.add_field(name="Server", value=f"`{guild.name}`\n`{guild.id}`", inline=True)
     embed.add_field(name="Subject", value=f"`{ticket['subject'][:200]}`", inline=False)
     embed.add_field(name="Messages", value=f"`{count}`", inline=True)
     embed.add_field(name="Open For", value=f"`{hours}h {rest // 60}m`", inline=True)
     embed.timestamp = datetime.now(timezone.utc)
 
     delivered = False
-    log_channel = guild.get_channel(int(cfg["log_channel_id"])) if cfg.get("log_channel_id") else None
+    log_channel = bot.get_channel(int(cfg["log_channel_id"])) if cfg.get("log_channel_id") else None  # can be in another server
     if log_channel is not None:
         try:
             await log_channel.send(embed=embed, file=discord.File(io.BytesIO(data), filename=filename), allowed_mentions=discord.AllowedMentions.none())
