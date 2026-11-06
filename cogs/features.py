@@ -1456,6 +1456,7 @@ SITE_THEMES = {
     "christmas": "Christmas",
     "spring": "Spring",
     "summer": "Summer",
+    "stpatrick": "St. Patrick's Day",
 }
 LOCAL_SITE_THEME = {"theme": "blueprint"}
 

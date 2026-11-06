@@ -58,7 +58,7 @@ def get_subscription_price() -> int:
     return price
 
 
-SITE_THEMES = {"blueprint", "winter", "halloween", "christmas", "spring", "summer"}
+SITE_THEMES = {"blueprint", "winter", "halloween", "christmas", "spring", "summer", "stpatrick"}
 
 
 def get_site_theme() -> str:
