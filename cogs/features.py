@@ -2223,6 +2223,92 @@ def build_server_summary(guild: discord.Guild) -> Tuple[dict, List[str]]:
 
 
 # -------------------------------------------------------------
+# DAILY REWARD WITH STREAK (/daily)
+# -------------------------------------------------------------
+try:
+    from zoneinfo import ZoneInfo
+    DAILY_TZ = ZoneInfo(os.getenv("DAILY_TIMEZONE", "Asia/Tokyo"))
+except Exception:
+    DAILY_TZ = timezone(timedelta(hours=9))  # Tokyo time if the timezone data is missing
+
+DAILY_BASE = 10          # reward on streak day 1
+DAILY_STEP = 1           # reward goes up by this much each day
+DAILY_MAX = 50           # a normal day never pays more than this
+DAILY_MILESTONE_EVERY = 50
+DAILY_MILESTONE_REWARD = 100  # every 50th streak day pays this instead
+LOCAL_DAILY: Dict[str, dict] = {}
+DAILY_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
+def daily_reward_for(streak: int) -> int:
+    if streak > 0 and streak % DAILY_MILESTONE_EVERY == 0:
+        return DAILY_MILESTONE_REWARD
+    return min(DAILY_MAX, DAILY_BASE + DAILY_STEP * (streak - 1))
+
+
+def daily_today():
+    return datetime.now(DAILY_TZ).date()
+
+
+def next_daily_reset_ts() -> int:
+    tomorrow = datetime.combine(daily_today() + timedelta(days=1), datetime.min.time(), tzinfo=DAILY_TZ)
+    return int(tomorrow.timestamp())
+
+
+def get_daily_state(user_id: str) -> dict:
+    uid = str(user_id)
+    if db_users is not None:
+        try:
+            doc = db_users.find_one({"discord_id": uid}) or {}
+            return {"streak": int(doc.get("daily_streak", 0)), "best": int(doc.get("daily_best", 0)),
+                    "last": doc.get("daily_last")}
+        except Exception as e:
+            print(f"[Mongo Daily Read Error] {e}")
+    return dict(LOCAL_DAILY.get(uid, {"streak": 0, "best": 0, "last": None}))
+
+
+def save_daily_state(user_id: str, state: dict) -> bool:
+    uid = str(user_id)
+    LOCAL_DAILY[uid] = dict(state)
+    if db_users is not None:
+        try:
+            db_users.update_one(
+                {"discord_id": uid},
+                {"$set": {"discord_id": uid, "daily_streak": state["streak"], "daily_best": state["best"], "daily_last": state["last"]}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"[Mongo Daily Save Error] {e}")
+            return False
+    return True
+
+
+def claim_daily(user_id: str) -> dict:
+    """Claims today's reward. The streak grows if yesterday was claimed, and resets to 1 after a missed day.
+    Returns {"status": "ok"|"already", "streak", "best", "reward", "new_total"}."""
+    state = get_daily_state(user_id)
+    today = daily_today()
+    last = None
+    if state.get("last"):
+        try:
+            last = datetime.strptime(state["last"], "%Y-%m-%d").date()
+        except ValueError:
+            last = None
+
+    if last == today:
+        return {"status": "already", "streak": state["streak"], "best": state["best"],
+                "reward": 0, "new_total": get_user_points(user_id)}
+
+    streak = state["streak"] + 1 if last == today - timedelta(days=1) else 1  # missed a day = back to 1
+    reward = daily_reward_for(streak)
+    best = max(state.get("best", 0), streak)
+    saved = save_daily_state(user_id, {"streak": streak, "best": best, "last": today.isoformat()})
+    new_total = add_user_points(user_id, reward)
+    return {"status": "ok", "streak": streak, "best": best, "reward": reward, "new_total": new_total, "saved": saved,
+            "was_reset": bool(state["streak"] > 1 and streak == 1)}
+
+
+# -------------------------------------------------------------
 # ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
 # -------------------------------------------------------------
 class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):

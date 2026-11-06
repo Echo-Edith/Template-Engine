@@ -96,6 +96,12 @@ from cogs.features import (
     count_shop_sale,
     shop_key,
     HAS_CARD_LAYOUT,
+    claim_daily,
+    daily_reward_for,
+    next_daily_reset_ts,
+    DAILY_LOCKS,
+    DAILY_MILESTONE_EVERY,
+    DAILY_MILESTONE_REWARD,
     build_server_summary,
     LIFETIME_PREMIUM_DAYS,
     has_lifetime_premium,
@@ -120,7 +126,7 @@ STAFF_COMMANDS = {"staff", "premiums"}  # only HARDCODED_STAFF may run these
 
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox", "gameinfo", "timestamp", "remind",
-    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem", "promo", "shop",
+    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem", "promo", "shop", "daily",
 }
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
@@ -3270,6 +3276,40 @@ class CommandsCog(commands.Cog):
         for n, page in enumerate(pages, start=1):
             page.set_footer(text=f"Page {n}/{len(pages)} | AI advice can be wrong. Check it before you change things.")
         await send_pages(interaction, pages, ephemeral=True)
+
+
+    # =============================================================
+    # DAILY REWARD
+    # =============================================================
+    @app_commands.command(name="daily", description="Claim your daily points. Come back every day to raise the reward.")
+    async def daily_cmd(self, interaction: discord.Interaction):
+        lock = DAILY_LOCKS.setdefault(interaction.user.id, asyncio.Lock())
+        async with lock:  # stops double clicks from claiming twice
+            result = claim_daily(str(interaction.user.id))
+
+        if result["status"] == "already":
+            embed = discord.Embed(title="Already Claimed", color=COLOR_GOLD,
+                                  description=f"You already claimed today.\nCome back <t:{next_daily_reset_ts()}:R> to keep your streak.")
+            embed.add_field(name="Streak", value=f"`{result['streak']} days`", inline=True)
+            embed.add_field(name="Next Reward", value=f"`+{daily_reward_for(result['streak'] + 1)} pts`", inline=True)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        streak = result["streak"]
+        milestone = streak % DAILY_MILESTONE_EVERY == 0
+        title = f"Day {streak} Streak Bonus!" if milestone else "Daily Reward Claimed!"
+        embed = discord.Embed(title=title, color=COLOR_GREEN, description=f"You got **{result['reward']} points**.")
+        embed.add_field(name="Reward", value=f"`+{result['reward']} pts`", inline=True)
+        embed.add_field(name="Streak", value=f"`{streak} days`", inline=True)
+        embed.add_field(name="New Balance", value=f"`{result['new_total']:,} pts`", inline=True)
+        embed.add_field(name="Next Reward", value=f"`+{daily_reward_for(streak + 1)} pts` <t:{next_daily_reset_ts()}:R>", inline=False)
+        to_milestone = DAILY_MILESTONE_EVERY - (streak % DAILY_MILESTONE_EVERY)
+        if not milestone:
+            embed.add_field(name="Big Bonus", value=f"`{DAILY_MILESTONE_REWARD} pts` in `{to_milestone}` days", inline=False)
+        if result.get("was_reset"):
+            embed.add_field(name="Streak Reset", value="You missed a day, so your streak started again.", inline=False)
+        embed.set_footer(text=f"Best streak: {result['best']} days")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
