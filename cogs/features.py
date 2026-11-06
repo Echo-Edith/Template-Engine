@@ -1068,6 +1068,36 @@ if HAS_CARD_LAYOUT:
             self.add_item(container)
 
 
+HAS_FILE_COMPONENT = HAS_CARD_LAYOUT and hasattr(discord.ui, "File")
+
+
+def log_payload(title: str, color: int, items: list, file: Optional[discord.File] = None) -> dict:
+    """Arguments for channel.send() that show a clean log.
+    Card layout: title, then a thin separator line between every item (like the Discord ad card).
+    Old discord.py: falls back to a normal embed with text lines."""
+    can_card = HAS_CARD_LAYOUT and (file is None or HAS_FILE_COMPONENT)
+    if not can_card:
+        payload = {"embed": build_log_embed(title, color, items)}
+        if file is not None:
+            payload["file"] = file
+        return payload
+    container = discord.ui.Container(accent_colour=discord.Colour(color))
+    container.add_item(discord.ui.TextDisplay(f"### {title}"))
+    for label, value in items:
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(f"**{label}**\n{value}"[:1200]))
+    if file is not None:
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.File(f"attachment://{file.filename}"))
+    container.add_item(discord.ui.TextDisplay(f"-# <t:{int(datetime.now(timezone.utc).timestamp())}:F>"))
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    payload = {"view": view}
+    if file is not None:
+        payload["file"] = file
+    return payload
+
+
 def message_uses_card_layout(message: Optional[discord.Message]) -> bool:
     flags = getattr(message, "flags", None)
     return bool(getattr(flags, "components_v2", False))
@@ -1622,9 +1652,9 @@ async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, 
         ("Code Expires", f"<t:{int(expires)}:R>" if expires else "`Never`"),
         ("Redeemed In", f"`{where}`"),
     ]
-    embed = build_log_embed("Promo Code Redeemed", COLOR_GREEN, items, thumbnail=user.display_avatar.url)
+    payload = log_payload("Promo Code Redeemed", COLOR_GREEN, items)
     try:
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(**payload, allowed_mentions=discord.AllowedMentions.none())
     except Exception as e:
         print(f"[Promo Log Error] {e}")
 
@@ -2486,7 +2516,7 @@ async def close_ticket(bot: commands.Bot, channel: discord.TextChannel, closed_b
     duration = datetime.now(timezone.utc).timestamp() - ticket["created_at"]
     hours, rest = divmod(int(duration), 3600)
 
-    embed = build_log_embed(f"Ticket #{ticket['ticket_id']:04d} Closed", COLOR_GRAY, [
+    log_items = [
         ("Opened By", f"<@{ticket['user_id']}>\n`{ticket['user_id']}`"),
         ("Closed By", f"{closed_by.mention}\n`{closed_by.id}`"),
         ("Type", f"`{TICKET_KINDS.get(ticket['kind'], ticket['kind'])}`"),
@@ -2494,13 +2524,16 @@ async def close_ticket(bot: commands.Bot, channel: discord.TextChannel, closed_b
         ("Subject", f"`{ticket['subject'][:200]}`"),
         ("Messages", f"`{count}`"),
         ("Open For", f"`{hours}h {rest // 60}m`"),
-    ])
+    ]
+    embed = build_log_embed(f"Ticket #{ticket['ticket_id']:04d} Closed", COLOR_GRAY, log_items)  # used for the DM copy
 
     delivered = False
     log_channel = bot.get_channel(int(cfg["log_channel_id"])) if cfg.get("log_channel_id") else None  # can be in another server
     if log_channel is not None:
         try:
-            await log_channel.send(embed=embed, file=discord.File(io.BytesIO(data), filename=filename), allowed_mentions=discord.AllowedMentions.none())
+            await log_channel.send(**log_payload(f"Ticket #{ticket['ticket_id']:04d} Closed", COLOR_GRAY, log_items,
+                                                 file=discord.File(io.BytesIO(data), filename=filename)),
+                                   allowed_mentions=discord.AllowedMentions.none())
             delivered = True
         except Exception as e:
             print(f"[Ticket Transcript Error] {e!r}")
@@ -3368,7 +3401,7 @@ class FeaturesCog(commands.Cog):
             return
         author_id = author.id if author else int((data.get("author") or {}).get("id", 0) or 0)
         jump = f"https://discord.com/channels/{payload.guild_id}/{payload.channel_id}/{payload.message_id}"
-        embed = build_log_embed("Message Edited", COLOR_GOLD, [
+        log_out = log_payload("Message Edited", COLOR_GOLD, [
             ("Author", f"<@{author_id}>\n`{author_id}`" if author_id else "`Unknown`"),
             ("Channel", f"<#{payload.channel_id}>"),
             ("Before", f"```{before[:900]}```" if before else "`Unknown (sent before the bot started)`"),
@@ -3376,7 +3409,7 @@ class FeaturesCog(commands.Cog):
             ("Message", f"[Jump to message]({jump})"),
         ])
         try:
-            await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await log_channel.send(**log_out, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
             print(f"[Message Log Error] {e!r}")
 
@@ -3400,9 +3433,9 @@ class FeaturesCog(commands.Cog):
         else:
             items.append(("Content", "`Unknown (sent before the bot started)`"))
         items.append(("Message ID", f"`{payload.message_id}`"))
-        embed = build_log_embed("Message Deleted", COLOR_RED, items)
+        log_out = log_payload("Message Deleted", COLOR_RED, items)
         try:
-            await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await log_channel.send(**log_out, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
             print(f"[Message Log Error] {e!r}")
 

@@ -112,7 +112,7 @@ from cogs.features import (
     set_user_premium,
     GIVEAWAY_DIVIDER,
     SHOP_LOG_CHANNEL_ID,
-    build_log_embed,
+    log_payload,
     SHOP_LOCKS,
     HARDCODED_STAFF,
     COMMAND_ADMINS,
@@ -1073,8 +1073,8 @@ class ShopConfirmView(discord.ui.View):
                 if item["reward"] == "custom":
                     items.append(("Action Needed",
                                   f"Deliver this item in {ticket_channel.mention}." if ticket_channel else "Deliver this item to the buyer."))
-                log = build_log_embed("Shop Purchase", COLOR_GOLD, items)
-                await channel.send(embed=log, allowed_mentions=NO_PINGS)
+                log = log_payload("Shop Purchase", COLOR_GOLD, items)
+                await channel.send(**log, allowed_mentions=NO_PINGS)
         except Exception as e:
             print(f"[Shop Log Error] {e!r}")
         return embed

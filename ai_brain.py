@@ -97,20 +97,26 @@ def calculate_account_age(discord_id: str) -> str:
         return "Unknown"
 
 
-LOG_DIVIDER = "\u2500" * 30
+IS_COMPONENTS_V2 = 32768  # message flag: the message is built from components (cards with thin separator lines)
 
 
-def log_description(items) -> str:
-    """Clean log body: each item is a bold label, its value, then a thin line."""
-    parts = []
+def log_components(title: str, items, color: int, file_name: Optional[str] = None) -> list:
+    """Clean log card as raw component JSON: title, thin separator line between every item. No emojis."""
+    inner = [{"type": 10, "content": f"### {title}"[:300]}]
     for label, value in items:
         value = str(value)
         if len(value) > 80 or "\n" in value:
-            value = f"```\n{value[:900]}\n```"
+            if not value.startswith(("<", "`")):
+                value = f"```\n{value[:900]}\n```"
         elif not value.startswith(("<", "`", "http")):
             value = f"`{value}`"
-        parts.append(f"**{label}**\n{value}")
-    return f"\n{LOG_DIVIDER}\n".join(parts)
+        inner.append({"type": 14, "divider": True, "spacing": 1})
+        inner.append({"type": 10, "content": f"**{label}**\n{value}"[:1200]})
+    if file_name:
+        inner.append({"type": 14, "divider": True, "spacing": 1})
+        inner.append({"type": 13, "file": {"url": f"attachment://{file_name}"}})
+    inner.append({"type": 10, "content": f"-# <t:{int(datetime.now(timezone.utc).timestamp())}:F>"})
+    return [{"type": 17, "accent_color": color, "components": inner}]
 
 
 async def send_webhook_log(
@@ -138,25 +144,16 @@ async def send_webhook_log(
     for key, val in action_details.items():
         items.append((str(key), val))
 
-    embed = {
-        "title": title,
-        "description": log_description(items),
-        "color": color,
-        "footer": {
-            "text": "Studio Logging System"
-        },
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
     payload = {
         "username": "Studio Logger",
         "avatar_url": "https://cdn.discordapp.com/embed/avatars/0.png",
-        "embeds": [embed]
+        "flags": IS_COMPONENTS_V2,
+        "components": log_components(title, items, color),
     }
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(webhook_url, json=payload) as resp:
+            async with session.post(webhook_url, params={"with_components": "true"}, json=payload) as resp:
                 pass
     except Exception as e:
         print(f"Failed to send Discord webhook log: {e}")
