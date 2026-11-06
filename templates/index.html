@@ -958,11 +958,6 @@ background: var(--accent-purple-glow) !important;
 </a>
 {% endif %}
 
-{% if roblox_store_url and not is_premium %}
-<a href="{{ roblox_store_url }}" target="_blank" class="btn-glass btn-premium">
-<i class="fa-solid fa-crown"></i> Get TE Premium ({{ subscription_price }} Robux)
-</a>
-{% endif %}
 </div>
 
 <button id="verify-continue-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" disabled onclick="proceedToGenerator()">
