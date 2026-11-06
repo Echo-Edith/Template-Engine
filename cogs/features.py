@@ -2032,7 +2032,7 @@ async def restore_guild(guild: discord.Guild, backup: dict) -> dict:
 # -------------------------------------------------------------
 # POINTS SHOP (/shop to buy, /sell to add items)
 # -------------------------------------------------------------
-SHOP_LOG_CHANNEL_ID = int(os.getenv("SHOP_LOG_CHANNEL_ID", "1567516050218811495"))
+SHOP_LOG_CHANNEL_ID = int(os.getenv("SHOP_LOG_CHANNEL_ID", "1568091563123417149"))
 LOCAL_SHOP: Dict[str, dict] = {}
 SHOP_LOCKS: Dict[int, asyncio.Lock] = {}
 
