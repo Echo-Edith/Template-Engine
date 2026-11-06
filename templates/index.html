@@ -900,7 +900,7 @@ background: var(--accent-purple-glow) !important;
 <i class="fa-solid fa-circle-check fa-3x" style="color: var(--accent-green); margin-bottom: 18px;"></i>
 <div class="brand-header">
 <h1 id="final-title-heading">Blueprint Submitted!</h1>
-<p id="final-desc-text">Your blueprint has been sent to staff for deployment review.</p>
+<p id="final-desc-text">Your blueprint has been sent to the bot. It will be deployed automatically, no staff needed.</p>
 </div>
 <button class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="resetBuilder()" style="margin-top: 10px;">
 Start New Layout
@@ -942,7 +942,7 @@ Continue in 5s
 <strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout requires Robux unless you have an active <strong>TE Premium</strong> subscription ({{ subscription_price }} Robux/mo).
 </div>
 <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
-Submitting this design will dispatch your blueprint to staff for manual deployment review.
+Submitting this design sends your blueprint to the bot. It is deployed automatically, so no staff review is needed.
 </p>
 <div style="display:flex; gap:10px;">
 <button class="btn-glass btn-secondary" onclick="closeRobuxNoticeModal()">
@@ -1513,8 +1513,8 @@ async function handleSubmitDesign() {
                 if (heading) heading.innerText = "TE Premium Design Dispatched!";
                 if (desc) desc.innerText = "Your layout blueprint has been sent directly to the bot for auto-deployment!";
             } else {
-                if (heading) heading.innerText = "Blueprint Submitted to Staff!";
-                if (desc) desc.innerText = "Your blueprint has been sent to staff for deployment review.";
+                if (heading) heading.innerText = "Blueprint Submitted!";
+                if (desc) desc.innerText = "Your blueprint has been sent to the bot. It will be deployed automatically, no staff needed.";
             }
         } else if (response.status === 401) {
             alert('Your login has expired. Please log in with Discord again, then submit.');
