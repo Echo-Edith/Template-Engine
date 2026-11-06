@@ -96,6 +96,10 @@ from cogs.features import (
     count_shop_sale,
     shop_key,
     HAS_CARD_LAYOUT,
+    TicketPanelView,
+    get_ticket_by_channel,
+    close_ticket,
+    create_ticket,
     claim_daily,
     daily_reward_for,
     next_daily_reset_ts,
@@ -131,7 +135,7 @@ PUBLIC_COMMANDS = {
 ADMIN_COMMANDS = {
     "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
     "warn", "clear", "purge", "mute", "unmute", "kick", "ban", "unban",
-    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog", "backup", "analyze",
+    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog", "backup", "analyze", "ticket",
 }
 
 
@@ -1043,8 +1047,17 @@ class ShopConfirmView(discord.ui.View):
             embed.add_field(name="TE Premium", value="`Lifetime`", inline=False)
         elif premium_until is not None:
             embed.add_field(name="TE Premium Until", value=f"<t:{int(premium_until.timestamp())}:F>", inline=False)
+        ticket_channel = None
         if item["reward"] == "custom":
-            embed.add_field(name="Next Step", value="Staff were told and will deliver it to you soon.", inline=False)
+            if interaction.guild:  # open a private ticket so staff can deliver it
+                ticket_channel, _ = await create_ticket(
+                    interaction.guild, interaction.user, "order", f"Order: {item['name']}", item.get("description", ""),
+                    [("Item", f"`{item['name']}`"), ("Paid", f"`{price:,} pts`")]
+                )
+            if ticket_channel is not None:
+                embed.add_field(name="Your Ticket", value=f"{ticket_channel.mention}\nStaff will deliver your item there.", inline=False)
+            else:
+                embed.add_field(name="Next Step", value="Staff were told and will deliver it to you soon.", inline=False)
 
         try:  # purchase log
             channel = interaction.client.get_channel(SHOP_LOG_CHANNEL_ID)
@@ -1056,7 +1069,8 @@ class ShopConfirmView(discord.ui.View):
                 log.add_field(name="New Balance", value=f"`{new_balance:,} pts`", inline=True)
                 log.add_field(name="Reward", value=shop_reward_text(item), inline=True)
                 if item["reward"] == "custom":
-                    log.add_field(name="Action Needed", value="Deliver this item to the buyer.", inline=False)
+                    log.add_field(name="Action Needed",
+                                  value=f"Deliver this item in {ticket_channel.mention}." if ticket_channel else "Deliver this item to the buyer.", inline=False)
                 log.timestamp = datetime.now(timezone.utc)
                 await channel.send(embed=log, allowed_mentions=NO_PINGS)
         except Exception as e:
@@ -3310,6 +3324,86 @@ class CommandsCog(commands.Cog):
             embed.add_field(name="Streak Reset", value="You missed a day, so your streak started again.", inline=False)
         embed.set_footer(text=f"Best streak: {result['best']} days")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+    # =============================================================
+    # TICKETS
+    # =============================================================
+    ticket_group = app_commands.Group(name="ticket", description="Ticket system tools (server admins).", guild_only=True)
+
+    @ticket_group.command(name="setup", description="Set up tickets: category, staff role, transcript channel, and post the panel.")
+    @app_commands.describe(
+        category="Where new ticket channels are created.",
+        staff_role="The role that can see and close tickets.",
+        log_channel="Where transcripts are saved when a ticket closes.",
+        panel_channel="Optional. Post the ticket buttons in this channel."
+    )
+    async def ticket_setup_cmd(
+        self,
+        interaction: discord.Interaction,
+        category: discord.CategoryChannel,
+        staff_role: discord.Role,
+        log_channel: discord.TextChannel,
+        panel_channel: Optional[discord.TextChannel] = None
+    ):
+        me = interaction.guild.me
+        if not me.guild_permissions.manage_channels:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", "I need `Manage Channels` to create ticket channels."), ephemeral=True)
+            return
+        perms = log_channel.permissions_for(me)
+        if not (perms.view_channel and perms.send_messages and perms.attach_files and perms.embed_links):
+            await interaction.response.send_message(
+                embed=embed_err("Missing Permission", f"I need `View Channel`, `Send Messages`, `Embed Links` and `Attach Files` in {log_channel.mention}."), ephemeral=True)
+            return
+        if staff_role.is_default() or staff_role.managed:
+            await interaction.response.send_message(embed=embed_err("Cannot Use This Role", "Pick a normal staff role."), ephemeral=True)
+            return
+
+        cfg = get_guild_config(interaction.guild.id)
+        cfg["tickets"] = {"category_id": category.id, "staff_role_id": staff_role.id, "log_channel_id": log_channel.id}
+        saved = save_guild_config(interaction.guild.id)
+
+        embed = embed_ok("Tickets Ready", "People can now open tickets.")
+        embed.add_field(name="Category", value=f"`{category.name}`", inline=True)
+        embed.add_field(name="Staff Role", value=staff_role.mention, inline=True)
+        embed.add_field(name="Transcripts", value=log_channel.mention, inline=True)
+        if panel_channel is not None:
+            panel = discord.Embed(
+                title="Need Help?",
+                description="Press a button below to open a private ticket. Our staff will answer you there.",
+                color=COLOR_PURPLE
+            )
+            panel.add_field(name="Support", value="Questions or problems.", inline=True)
+            panel.add_field(name="Buy Premium", value="Buy TE Premium with help from staff.", inline=True)
+            try:
+                await panel_channel.send(embed=panel, view=TicketPanelView())
+                embed.add_field(name="Panel Posted", value=panel_channel.mention, inline=False)
+            except Exception as e:
+                embed.add_field(name="Panel Not Posted", value=f"`{str(e)[:200]}`", inline=False)
+        else:
+            embed.add_field(name="Panel", value="Run `/ticket setup` again with `panel_channel` to post the buttons.", inline=False)
+        if not saved:
+            embed.add_field(name="Warning", value="The database could not be reached. This only lasts until the bot restarts.", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @ticket_group.command(name="close", description="Close this ticket and save the transcript.")
+    async def ticket_close_cmd(self, interaction: discord.Interaction):
+        if get_ticket_by_channel(interaction.channel.id) is None:
+            await interaction.response.send_message(embed=embed_err("Not A Ticket", "Use this inside a ticket channel."), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embed_info("Closing Ticket", "Saving the transcript. This channel will be deleted in a moment.", COLOR_GOLD))
+        ok = await close_ticket(self.bot, interaction.channel, interaction.user)
+        if not ok:
+            await interaction.followup.send(embed=embed_err("Could Not Close", "I could not save the transcript, so the ticket stays open. Check the log channel and my permissions."))
+
+    @ticket_group.command(name="add", description="Add a person to this ticket.")
+    @app_commands.describe(user="The person to add.")
+    async def ticket_add_cmd(self, interaction: discord.Interaction, user: discord.Member):
+        if get_ticket_by_channel(interaction.channel.id) is None:
+            await interaction.response.send_message(embed=embed_err("Not A Ticket", "Use this inside a ticket channel."), ephemeral=True)
+            return
+        await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
+        await interaction.response.send_message(embed=embed_ok("Person Added", f"{user.mention} can now see this ticket."), allowed_mentions=discord.AllowedMentions(users=True))
 
 
 async def setup(bot: commands.Bot):

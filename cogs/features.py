@@ -2,6 +2,7 @@ import os
 import re
 import json
 import random
+import io
 import asyncio
 import aiohttp
 from datetime import datetime, timezone, timedelta
@@ -37,6 +38,7 @@ db_promos = None
 db_broadcasts = None
 db_backups = None
 db_shop = None
+db_tickets = None
 
 if MONGO_URI:
     try:
@@ -58,6 +60,7 @@ if MONGO_URI:
         db_broadcasts = db["broadcasts"]
         db_backups = db["backups"]
         db_shop = db["shop_items"]
+        db_tickets = db["tickets"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -2309,6 +2312,261 @@ def claim_daily(user_id: str) -> dict:
 
 
 # -------------------------------------------------------------
+# TICKET SYSTEM (support, premium purchases and shop orders)
+# -------------------------------------------------------------
+TICKET_KINDS = {
+    "support": "Support",
+    "purchase": "Premium Purchase",
+    "order": "Shop Order",
+}
+LOCAL_TICKETS: Dict[int, dict] = {}   # channel id -> ticket record
+LOCAL_TICKET_COUNTERS: Dict[int, int] = {}
+
+
+def ticket_cfg(guild_id: int) -> dict:
+    return get_guild_config(guild_id).get("tickets") or {}
+
+
+def next_ticket_number(guild_id: int) -> int:
+    if db_counters is not None:
+        try:
+            doc = db_counters.find_one_and_update(
+                {"_id": f"tickets:{guild_id}"}, {"$inc": {"value": 1}}, upsert=True, return_document=ReturnDocument.AFTER
+            )
+            return int(doc["value"])
+        except Exception as e:
+            print(f"[Ticket Counter Error] {e}")
+    LOCAL_TICKET_COUNTERS[guild_id] = LOCAL_TICKET_COUNTERS.get(guild_id, 0) + 1
+    return LOCAL_TICKET_COUNTERS[guild_id]
+
+
+def save_ticket(ticket: dict):
+    LOCAL_TICKETS[int(ticket["channel_id"])] = ticket
+    if db_tickets is not None:
+        try:
+            db_tickets.replace_one({"channel_id": int(ticket["channel_id"])}, ticket, upsert=True)
+        except Exception as e:
+            print(f"[Ticket Save Error] {e}")
+
+
+def get_ticket_by_channel(channel_id: int) -> Optional[dict]:
+    if db_tickets is not None:
+        try:
+            doc = db_tickets.find_one({"channel_id": int(channel_id)}, {"_id": 0})
+            return doc
+        except Exception as e:
+            print(f"[Ticket Read Error] {e}")
+    return LOCAL_TICKETS.get(int(channel_id))
+
+
+def find_open_ticket(guild_id: int, user_id: int, kind: str) -> Optional[dict]:
+    query = {"guild_id": int(guild_id), "user_id": int(user_id), "kind": kind, "status": "open"}
+    if db_tickets is not None:
+        try:
+            return db_tickets.find_one(query, {"_id": 0})
+        except Exception as e:
+            print(f"[Ticket Find Error] {e}")
+    for t in LOCAL_TICKETS.values():
+        if all(t.get(k) == v for k, v in query.items()):
+            return t
+    return None
+
+
+def is_ticket_staff(member: discord.Member, cfg: dict) -> bool:
+    if str(member.id) in COMMAND_ADMINS:
+        return True
+    perms = member.guild_permissions
+    if perms.administrator or perms.manage_channels:
+        return True
+    role_id = cfg.get("staff_role_id")
+    return bool(role_id and any(r.id == int(role_id) for r in member.roles))
+
+
+async def create_ticket(guild: discord.Guild, user: discord.abc.User, kind: str, subject: str, details: str = "",
+                        extra_fields: Optional[List[Tuple[str, str]]] = None) -> Tuple[Optional[discord.TextChannel], str]:
+    """Opens a private ticket channel. Returns (channel, "") or (None / existing channel, reason)."""
+    cfg = ticket_cfg(guild.id)
+    category = guild.get_channel(int(cfg["category_id"])) if cfg.get("category_id") else None
+    staff_role = guild.get_role(int(cfg["staff_role_id"])) if cfg.get("staff_role_id") else None
+    if category is None or staff_role is None:
+        return None, "Tickets are not set up in this server. An admin must run `/ticket setup`."
+
+    if kind == "support":  # one open support ticket per person
+        existing = find_open_ticket(guild.id, user.id, kind)
+        if existing:
+            channel = guild.get_channel(int(existing["channel_id"]))
+            if channel is not None:
+                return channel, "exists"
+
+    number = next_ticket_number(guild.id)
+    safe_name = re.sub(r"[^a-z0-9]+", "-", user.name.lower()).strip("-")[:20] or "user"
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
+        staff_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True,
+                                                attach_files=True, embed_links=True, manage_messages=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True,
+                                              manage_channels=True, embed_links=True, attach_files=True),
+    }
+    try:
+        channel = await guild.create_text_channel(
+            f"{kind}-{number:04d}-{safe_name}", category=category, overwrites=overwrites,
+            topic=f"Ticket #{number:04d} | {user} | {user.id}", reason=f"Ticket opened by {user}"
+        )
+    except Exception as e:
+        print(f"[Ticket Create Error] {e!r}")
+        return None, f"I could not create the ticket channel: `{str(e)[:200]}`"
+
+    ticket = {"ticket_id": number, "guild_id": guild.id, "channel_id": channel.id, "user_id": user.id, "kind": kind,
+              "subject": subject[:200], "created_at": datetime.now(timezone.utc).timestamp(), "status": "open"}
+    save_ticket(ticket)
+
+    embed = discord.Embed(title=f"Ticket #{number:04d} | {TICKET_KINDS.get(kind, kind)}", color=COLOR_PURPLE)
+    embed.add_field(name="Opened By", value=f"{user.mention}\n`{user.id}`", inline=True)
+    embed.add_field(name="Type", value=f"`{TICKET_KINDS.get(kind, kind)}`", inline=True)
+    embed.add_field(name="Subject", value=f"`{subject[:200]}`", inline=False)
+    if details:
+        embed.add_field(name="Details", value=details[:1000], inline=False)
+    for name, value in (extra_fields or []):
+        embed.add_field(name=name, value=value, inline=True)
+    embed.set_footer(text="Staff: press Close Ticket when this is done. A transcript is saved.")
+    try:
+        await channel.send(
+            content=f"{user.mention} {staff_role.mention}", embed=embed, view=TicketCloseView(),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=[staff_role])
+        )
+    except Exception as e:
+        print(f"[Ticket Welcome Error] {e!r}")
+    return channel, ""
+
+
+async def build_transcript(channel: discord.TextChannel) -> Tuple[str, int]:
+    lines = []
+    count = 0
+    async for m in channel.history(limit=None, oldest_first=True):
+        count += 1
+        stamp = m.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        text = m.content or ""
+        for e in m.embeds:
+            bits = [x for x in (e.title, e.description) if x]
+            text += (" " if text else "") + "[embed: " + " | ".join(bits)[:400] + "]"
+            for f in e.fields:
+                text += f"\n    {f.name}: {f.value}"
+        for a in m.attachments:
+            text += f"\n    [file] {a.filename}: {a.url}"
+        lines.append(f"[{stamp}] {m.author} ({m.author.id}): {text}")
+    return "\n".join(lines) or "(no messages)", count
+
+
+async def close_ticket(bot: commands.Bot, channel: discord.TextChannel, closed_by: discord.abc.User) -> bool:
+    """Saves a transcript to the log channel (and DMs it to the opener), then deletes the channel."""
+    ticket = get_ticket_by_channel(channel.id)
+    if ticket is None:
+        return False
+    guild = channel.guild
+    cfg = ticket_cfg(guild.id)
+    text, count = await build_transcript(channel)
+    filename = f"transcript-{ticket['ticket_id']:04d}.txt"
+    header = (f"Ticket #{ticket['ticket_id']:04d} | {TICKET_KINDS.get(ticket['kind'], ticket['kind'])}\n"
+              f"Subject: {ticket['subject']}\nOpened by: {ticket['user_id']}\nClosed by: {closed_by} ({closed_by.id})\n"
+              f"Messages: {count}\n{'-' * 40}\n")
+    data = (header + text).encode("utf-8")
+    duration = datetime.now(timezone.utc).timestamp() - ticket["created_at"]
+    hours, rest = divmod(int(duration), 3600)
+
+    embed = discord.Embed(title=f"Ticket #{ticket['ticket_id']:04d} Closed", color=COLOR_GRAY)
+    embed.add_field(name="Opened By", value=f"<@{ticket['user_id']}>\n`{ticket['user_id']}`", inline=True)
+    embed.add_field(name="Closed By", value=f"{closed_by.mention}", inline=True)
+    embed.add_field(name="Type", value=f"`{TICKET_KINDS.get(ticket['kind'], ticket['kind'])}`", inline=True)
+    embed.add_field(name="Subject", value=f"`{ticket['subject'][:200]}`", inline=False)
+    embed.add_field(name="Messages", value=f"`{count}`", inline=True)
+    embed.add_field(name="Open For", value=f"`{hours}h {rest // 60}m`", inline=True)
+    embed.timestamp = datetime.now(timezone.utc)
+
+    delivered = False
+    log_channel = guild.get_channel(int(cfg["log_channel_id"])) if cfg.get("log_channel_id") else None
+    if log_channel is not None:
+        try:
+            await log_channel.send(embed=embed, file=discord.File(io.BytesIO(data), filename=filename), allowed_mentions=discord.AllowedMentions.none())
+            delivered = True
+        except Exception as e:
+            print(f"[Ticket Transcript Error] {e!r}")
+    try:  # the person who opened it also gets a copy
+        opener = bot.get_user(int(ticket["user_id"])) or await bot.fetch_user(int(ticket["user_id"]))
+        await opener.send(embed=embed, file=discord.File(io.BytesIO(data), filename=filename))
+    except Exception:
+        pass
+
+    if not delivered:
+        return False  # keep the channel so the transcript is not lost
+    ticket["status"] = "closed"
+    ticket["closed_by"] = closed_by.id
+    ticket["closed_at"] = datetime.now(timezone.utc).timestamp()
+    save_ticket(ticket)
+    LOCAL_TICKETS.pop(channel.id, None)
+    try:
+        await channel.delete(reason=f"Ticket closed by {closed_by}")
+    except Exception as e:
+        print(f"[Ticket Delete Error] {e!r}")
+    return True
+
+
+class TicketOpenModal(discord.ui.Modal):
+    subject = discord.ui.TextInput(label="Subject", max_length=100, placeholder="A short title")
+    details = discord.ui.TextInput(label="Details", style=discord.TextStyle.paragraph, required=False, max_length=900,
+                                   placeholder="Tell us what you need")
+
+    def __init__(self, kind: str):
+        super().__init__(title="Premium Purchase" if kind == "purchase" else "Open A Ticket")
+        self.kind = kind
+        if kind == "purchase":
+            self.subject.label = "What do you want to buy?"
+            self.details.label = "How do you want to pay? Any notes?"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        channel, note = await create_ticket(interaction.guild, interaction.user, self.kind, self.subject.value, self.details.value)
+        if channel is None:
+            await interaction.followup.send(embed=embed_err("Could Not Open Ticket", note), ephemeral=True)
+        elif note == "exists":
+            await interaction.followup.send(embed=embed_info("You Already Have A Ticket", f"Please use {channel.mention}.", COLOR_GOLD), ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed_ok("Ticket Opened", f"Go to {channel.mention}. Staff will help you there."), ephemeral=True)
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Support", style=discord.ButtonStyle.primary, custom_id="ticket_open_support")
+    async def support_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketOpenModal("support"))
+
+    @discord.ui.button(label="Buy Premium", style=discord.ButtonStyle.success, custom_id="ticket_open_purchase")
+    async def purchase_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketOpenModal("purchase"))
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close")
+    async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = ticket_cfg(interaction.guild.id)
+        if not is_ticket_staff(interaction.user, cfg):
+            await interaction.response.send_message(embed=embed_err("Staff Only", "Only staff can close tickets."), ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embed_info("Closing Ticket", "Saving the transcript. This channel will be deleted in a moment.", COLOR_GOLD))
+        ok = await close_ticket(interaction.client, interaction.channel, interaction.user)
+        if not ok:
+            try:
+                await interaction.followup.send(embed=embed_err("Could Not Close", "I could not save the transcript, so the ticket stays open. Check the log channel and my permissions."))
+            except Exception:
+                pass
+
+
+# -------------------------------------------------------------
 # ROBLOX VERIFICATION MODAL & PERSISTENT VIEWS
 # -------------------------------------------------------------
 class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
@@ -3521,6 +3779,8 @@ async def setup(bot: commands.Bot):
     bot.add_view(RobloxUnsyncView())
     bot.add_view(PremiumMissingBotView())
     bot.add_view(GiveawayView())
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketCloseView())
     if HAS_CARD_LAYOUT:
         try:
             bot.add_view(GiveawayLayout())
