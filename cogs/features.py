@@ -3550,6 +3550,7 @@ class FeaturesCog(commands.Cog):
         if not is_design_channel:
             return
 
+        print(f"[Design Channel] Message {message.id} from {message.author} ({message.author.id}) in {message.channel.id}: {len(message.attachments)} attachment(s).")
         json_attachment = None
         for attachment in message.attachments:
             if attachment.filename.endswith(".json"):

@@ -97,6 +97,23 @@ def calculate_account_age(discord_id: str) -> str:
         return "Unknown"
 
 
+LOG_DIVIDER = "\u2500" * 30
+
+
+def log_description(items) -> str:
+    """Classic embed body: bold label, value, thin line between items. No emojis."""
+    parts = []
+    for label, value in items:
+        value = str(value)
+        if len(value) > 80 or "\n" in value:
+            if not value.startswith(("<", "`")):
+                value = f"```\n{value[:900]}\n```"
+        elif not value.startswith(("<", "`", "http")):
+            value = f"`{value}`"
+        parts.append(f"**{label}**\n{value}")
+    return f"\n{LOG_DIVIDER}\n".join(parts)
+
+
 IS_COMPONENTS_V2 = 32768  # message flag: the message is built from components (cards with thin separator lines)
 
 
