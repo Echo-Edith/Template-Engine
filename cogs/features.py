@@ -1488,6 +1488,7 @@ def set_site_theme(theme: str) -> bool:
     return False
 
 
+DESIGN_DONE: set = set()  # design messages already handled (so the DM is sent once)
 LOCAL_PRICES: Dict[str, int] = {}
 
 
@@ -3609,6 +3610,87 @@ class FeaturesCog(commands.Cog):
 
         try:
             attachment_bytes = await json_attachment.read()
+        except Exception as e:
+            print(f"[Auto-Build Parsing Error] Could not read JSON attachment: {e}")
+            return
+        await self.process_design_submission(message.id, message.channel, attachment_bytes)
+
+    # -------------------------------------------------------------
+    # BACKUP READER: website cards (new message layout) read straight from the raw gateway data,
+    # so the DM still works even if the library does not show the file on the message.
+    # -------------------------------------------------------------
+    @commands.Cog.listener("on_socket_raw_receive")
+    async def design_raw_receive(self, raw):
+        if not isinstance(raw, str) or "MESSAGE_CREATE" not in raw:
+            return
+        if not any(str(c) in raw for c in (PREMIUM_DESIGN_CHANNEL_ID, NON_PREMIUM_DESIGN_CHANNEL_ID)):
+            return
+        try:
+            event = json.loads(raw)
+            if event.get("t") != "MESSAGE_CREATE":
+                return
+            data = event.get("d") or {}
+            channel_id = str(data.get("channel_id"))
+            if channel_id not in (str(PREMIUM_DESIGN_CHANNEL_ID), str(NON_PREMIUM_DESIGN_CHANNEL_ID)):
+                return
+            author_id = int((data.get("author") or {}).get("id", 0))
+            if author_id not in (self.bot.user.id, BOT_OWNER_ID):
+                return
+            message_id = int(data["id"])
+        except Exception:
+            return
+
+        await asyncio.sleep(3)  # give the normal reader a chance first
+        if message_id in DESIGN_DONE:
+            return
+
+        url = None
+        for att in data.get("attachments") or []:
+            if str(att.get("filename", "")).endswith(".json"):
+                url = att.get("url")
+                break
+
+        def find_file(components):
+            for comp in components or []:
+                if comp.get("type") == 13:
+                    f = comp.get("file") or {}
+                    name = str(comp.get("name", ""))
+                    for key in ("proxy_url", "url"):
+                        if str(f.get(key, "")).startswith("http") and (name.endswith(".json") or ".json" in str(f.get(key, ""))):
+                            return f[key]
+                found = find_file(comp.get("components"))
+                if found:
+                    return found
+            return None
+
+        if not url:
+            url = find_file(data.get("components"))
+        print(f"[Design Raw] Message {message_id}: file url {'found' if url else 'NOT found'}.")
+        if not url:
+            return
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+                    file_bytes = await resp.read()
+        except Exception as e:
+            print(f"[Design Raw] Could not download the design file: {e}")
+            return
+
+        channel = self.bot.get_channel(int(channel_id))
+        await self.process_design_submission(message_id, channel, file_bytes)
+
+    async def process_design_submission(self, message_id: int, channel, attachment_bytes: bytes):
+        """Reads the design file and starts the build or the deployment DM. Runs once per message."""
+        if message_id in DESIGN_DONE:
+            return
+        DESIGN_DONE.add(message_id)
+        if len(DESIGN_DONE) > 500:
+            DESIGN_DONE.clear()
+            DESIGN_DONE.add(message_id)
+
+        try:
             payload = json.loads(attachment_bytes.decode("utf-8"))
         except Exception as e:
             print(f"[Auto-Build Parsing Error] Could not read JSON attachment: {e}")
@@ -3641,9 +3723,9 @@ class FeaturesCog(commands.Cog):
             await self.notify_build_denied(submitting_user_id, guild.name, reason)
             return
 
-        if not is_premium_submission and str(message.channel.id) != str(PREMIUM_DESIGN_CHANNEL_ID):
+        if not is_premium_submission and str(getattr(channel, 'id', 0)) != str(PREMIUM_DESIGN_CHANNEL_ID):
             print(f"[Frontend Direct DM] Initiating direct DM with 5 retries to submitter {submitting_user_id} before logging...")
-            await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, message.channel)
+            await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, channel)
         else:
             print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
             await self.execute_auto_build(guild, layout)
