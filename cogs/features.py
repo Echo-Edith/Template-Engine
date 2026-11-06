@@ -1098,6 +1098,33 @@ def log_payload(title: str, color: int, items: list, file: Optional[discord.File
     return payload
 
 
+WEBSITE_URL = os.getenv("WEBSITE_URL", "https://templateengine-xi.vercel.app").strip()
+WEBSITE_COOLDOWN_SECONDS = 30
+WEBSITE_WORD = re.compile(r"\bwebsite\b", re.IGNORECASE)
+WEBSITE_LAST_REPLY: Dict[int, float] = {}  # channel id -> time of the last reply
+
+
+def website_payload() -> dict:
+    """The reply for the word 'website': a card (or embed on old discord.py) with a link button to the site."""
+    title = "Template Engine Website"
+    text = "Build your Discord server layout with AI, then deploy it with the bot."
+    if HAS_CARD_LAYOUT:
+        container = discord.ui.Container(accent_colour=discord.Colour(COLOR_PURPLE))
+        container.add_item(discord.ui.TextDisplay(f"### {title}"))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(text))
+        container.add_item(discord.ui.Separator())
+        row = discord.ui.ActionRow()
+        row.add_item(discord.ui.Button(label="Open Website", style=discord.ButtonStyle.link, url=WEBSITE_URL))
+        container.add_item(row)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(container)
+        return {"view": view}
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="Open Website", style=discord.ButtonStyle.link, url=WEBSITE_URL))
+    return {"embed": discord.Embed(title=title, description=text, color=COLOR_PURPLE), "view": view}
+
+
 def message_uses_card_layout(message: Optional[discord.Message]) -> bool:
     flags = getattr(message, "flags", None)
     return bool(getattr(flags, "components_v2", False))
@@ -3192,6 +3219,22 @@ class FeaturesCog(commands.Cog):
             user = await self.bot.fetch_user(int(uid))
         dm = user.dm_channel or await user.create_dm()
         return dm.get_partial_message(int(dm_message_id))
+
+    @commands.Cog.listener("on_message")
+    async def website_on_message(self, message: discord.Message):
+        """Someone writes the word 'website' -> reply with the website button. One reply per channel every 30 seconds."""
+        if message.author.bot or not message.guild or not message.content:
+            return
+        if not WEBSITE_URL or not WEBSITE_WORD.search(message.content):
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        if now - WEBSITE_LAST_REPLY.get(message.channel.id, 0.0) < WEBSITE_COOLDOWN_SECONDS:
+            return
+        WEBSITE_LAST_REPLY[message.channel.id] = now  # set first so quick messages cannot slip through
+        try:
+            await message.reply(**website_payload(), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            print(f"[Website Reply Error] {e!r}")
 
     @commands.Cog.listener("on_message")
     async def broadcast_on_message(self, message: discord.Message):
