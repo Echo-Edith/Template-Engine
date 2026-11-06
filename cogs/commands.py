@@ -112,6 +112,7 @@ from cogs.features import (
     set_user_premium,
     GIVEAWAY_DIVIDER,
     SHOP_LOG_CHANNEL_ID,
+    build_log_embed,
     SHOP_LOCKS,
     HARDCODED_STAFF,
     COMMAND_ADMINS,
@@ -1062,16 +1063,17 @@ class ShopConfirmView(discord.ui.View):
         try:  # purchase log
             channel = interaction.client.get_channel(SHOP_LOG_CHANNEL_ID)
             if channel:
-                log = discord.Embed(title="Shop Purchase", color=COLOR_GOLD)
-                log.add_field(name="Buyer", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
-                log.add_field(name="Item", value=f"`{item['name']}`", inline=True)
-                log.add_field(name="Price", value=f"`{price:,} pts`", inline=True)
-                log.add_field(name="New Balance", value=f"`{new_balance:,} pts`", inline=True)
-                log.add_field(name="Reward", value=shop_reward_text(item), inline=True)
+                items = [
+                    ("Buyer", f"{interaction.user.mention}\n`{interaction.user.id}`"),
+                    ("Item", f"`{item['name']}`"),
+                    ("Price", f"`{price:,} pts`"),
+                    ("New Balance", f"`{new_balance:,} pts`"),
+                    ("Reward", shop_reward_text(item)),
+                ]
                 if item["reward"] == "custom":
-                    log.add_field(name="Action Needed",
-                                  value=f"Deliver this item in {ticket_channel.mention}." if ticket_channel else "Deliver this item to the buyer.", inline=False)
-                log.timestamp = datetime.now(timezone.utc)
+                    items.append(("Action Needed",
+                                  f"Deliver this item in {ticket_channel.mention}." if ticket_channel else "Deliver this item to the buyer."))
+                log = build_log_embed("Shop Purchase", COLOR_GOLD, items)
                 await channel.send(embed=log, allowed_mentions=NO_PINGS)
         except Exception as e:
             print(f"[Shop Log Error] {e!r}")

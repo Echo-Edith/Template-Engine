@@ -97,6 +97,22 @@ def calculate_account_age(discord_id: str) -> str:
         return "Unknown"
 
 
+LOG_DIVIDER = "\u2500" * 30
+
+
+def log_description(items) -> str:
+    """Clean log body: each item is a bold label, its value, then a thin line."""
+    parts = []
+    for label, value in items:
+        value = str(value)
+        if len(value) > 80 or "\n" in value:
+            value = f"```\n{value[:900]}\n```"
+        elif not value.startswith(("<", "`", "http")):
+            value = f"`{value}`"
+        parts.append(f"**{label}**\n{value}")
+    return f"\n{LOG_DIVIDER}\n".join(parts)
+
+
 async def send_webhook_log(
     webhook_url: str,
     title: str,
@@ -104,7 +120,7 @@ async def send_webhook_log(
     action_details: Dict[str, Any],
     color: int = 0x8b5cf6
 ):
-    """Dispatches a structured, glass-themed webhook log to Discord with clear user metrics."""
+    """Dispatches a structured, clean webhook log to Discord with clear user metrics."""
     if not webhook_url:
         return
 
@@ -113,35 +129,24 @@ async def send_webhook_log(
     mention = f"<@{user_id}>" if user_id != "0" else "@unknown"
     account_age = calculate_account_age(user_id) if user_id != "0" else "Unknown"
 
-    user_details_value = (
-        f"**User:** {mention}\n"
-        f"**Username:** `{username}`\n"
-        f"**User ID:** `{user_id}`\n"
-        f"**Account Age:** `{account_age}`"
-    )
+    items = [
+        ("User", mention),
+        ("Username", username),
+        ("User ID", user_id),
+        ("Account Age", account_age),
+    ]
+    for key, val in action_details.items():
+        items.append((str(key), val))
 
     embed = {
         "title": title,
+        "description": log_description(items),
         "color": color,
-        "fields": [
-            {
-                "name": "👤 User Information",
-                "value": user_details_value,
-                "inline": False
-            }
-        ],
         "footer": {
             "text": "Studio Logging System"
         },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-
-    for key, val in action_details.items():
-        embed["fields"].append({
-            "name": f"📌 {key}",
-            "value": f"```\n{str(val)[:1000]}\n```" if len(str(val)) > 80 else f"`{val}`",
-            "inline": False
-        })
 
     payload = {
         "username": "Studio Logger",
@@ -230,7 +235,7 @@ async def generate_server_layout(
         if webhook_url and user_info:
             await send_webhook_log(
                 webhook_url=webhook_url,
-                title="⚠️ AI Generation Failed (All Models)",
+                title="AI Generation Failed (All Models)",
                 user_info=user_info,
                 action_details={
                     "Prompt": prompt,
@@ -284,7 +289,7 @@ async def generate_server_layout(
     if webhook_url and user_info:
         await send_webhook_log(
             webhook_url=webhook_url,
-            title="⚡ AI Server Layout Generated",
+            title="AI Server Layout Generated",
             user_info=user_info,
             action_details={
                 "Prompt": prompt,

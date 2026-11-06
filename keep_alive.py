@@ -242,34 +242,23 @@ def submit_design_endpoint():
 
     account_age = ai_brain.calculate_account_age(user_id)
 
-    embed_title = "⭐ Premium Auto-Build Submitted" if is_premium else "📝 Standard Design Submitted"
-    embed_color = 0xF1C40F if is_premium else 0x8B5CF6
+    embed_title = "Premium Auto-Build Submitted" if is_premium else "Standard Design Submitted"
+    embed_color = 0xC9962B if is_premium else 0xE0661A
 
     embed_payload = {
         "title": embed_title,
+        "description": ai_brain.log_description([
+            ("User", f"<@{user_id}>"),
+            ("User ID", user_id),
+            ("Account Age", account_age),
+            ("Target Server ID", target_server_id),
+            ("Invite Link", invite_link),
+            ("Categories", categories_count),
+            ("Channels", channels_count),
+            ("Roles", roles_count),
+            ("Prompt", prompt_text[:900] if len(str(prompt_text)) > 80 else prompt_text),
+        ]),
         "color": embed_color,
-        "fields": [
-            {
-                "name": "👤 Submitting User",
-                "value": f"**Mention:** <@{user_id}>\n**User ID:** `{user_id}`\n**Account Age:** `{account_age}`",
-                "inline": False
-            },
-            {
-                "name": "🌐 Server Information",
-                "value": f"**Target Guild ID:** `{target_server_id}`\n**Invite Link:** {invite_link}",
-                "inline": False
-            },
-            {
-                "name": "📊 Server Overview",
-                "value": f"**Categories:** `{categories_count}` | **Channels:** `{channels_count}` | **Roles:** `{roles_count}`",
-                "inline": False
-            },
-            {
-                "name": "💬 Prompt Description",
-                "value": f"```{prompt_text[:950]}```",
-                "inline": False
-            }
-        ],
         "footer": {"text": "Template Engine Infrastructure Log"},
         "timestamp": ai_brain.datetime.now(ai_brain.timezone.utc).isoformat()
     }

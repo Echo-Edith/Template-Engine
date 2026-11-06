@@ -556,6 +556,20 @@ COLOR_RED = 0xF43F5E
 COLOR_GOLD = 0xF1C40F
 COLOR_GRAY = 0x95A5A6
 
+LOG_DIVIDER = "\u2500" * 30
+
+
+def build_log_embed(title: str, color: int, items: list, thumbnail: Optional[str] = None, footer: Optional[str] = None) -> discord.Embed:
+    """One clean log layout for every log: bold label, value, thin line between items. No emojis."""
+    body = f"\n{LOG_DIVIDER}\n".join(f"**{label}**\n{value}" for label, value in items)
+    embed = discord.Embed(title=title, description=body[:4000], color=color, timestamp=datetime.now(timezone.utc))
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    if footer:
+        embed.set_footer(text=footer)
+    return embed
+
+
 
 def embed_ok(title: str, description: Optional[str] = None) -> discord.Embed:
     return discord.Embed(title=title, description=description, color=COLOR_GREEN)
@@ -1589,28 +1603,26 @@ async def send_promo_log(bot: commands.Bot, user, promo: dict, old_points: int, 
     uses = f"{promo.get('uses', 0)}/{limit}" if limit is not None else f"{promo.get('uses', 0)}/unlimited"
     expires = promo.get("expires_at")
 
-    embed = discord.Embed(
-        title="Promo Code Redeemed",
-        description=f"{user.mention} redeemed a promo code.",
-        color=COLOR_GREEN,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.add_field(name="User", value=f"`{user}`\n`{user.id}`", inline=True)
-    embed.add_field(name="Code", value=f"`{promo['code']}`", inline=True)
     reward_parts = []
     if int(promo.get("points", 0)) > 0:
         reward_parts.append(f"+{int(promo['points']):,} pts")
     if int(promo.get("premium_days", 0)) > 0:
         reward_parts.append(f"{int(promo['premium_days'])} days TE Premium")
-    embed.add_field(name="Reward", value=f"`{' + '.join(reward_parts) or 'Nothing'}`", inline=True)
+    items = [
+        ("User", f"{user.mention}\n`{user}`\n`{user.id}`"),
+        ("Code", f"`{promo['code']}`"),
+        ("Reward", f"`{' + '.join(reward_parts) or 'Nothing'}`"),
+    ]
     if premium_until is not None:
-        embed.add_field(name="Premium Until", value=f"<t:{int(premium_until.timestamp())}:F>", inline=True)
-    embed.add_field(name="Previous Balance", value=f"`{old_points:,} pts`", inline=True)
-    embed.add_field(name="New Balance", value=f"`{new_points:,} pts`", inline=True)
-    embed.add_field(name="Code Uses", value=f"`{uses}`", inline=True)
-    embed.add_field(name="Code Expires", value=f"<t:{int(expires)}:R>" if expires else "`Never`", inline=True)
-    embed.add_field(name="Redeemed In", value=f"`{where}`", inline=True)
-    embed.set_thumbnail(url=user.display_avatar.url)
+        items.append(("Premium Until", f"<t:{int(premium_until.timestamp())}:F>"))
+    items += [
+        ("Previous Balance", f"`{old_points:,} pts`"),
+        ("New Balance", f"`{new_points:,} pts`"),
+        ("Code Uses", f"`{uses}`"),
+        ("Code Expires", f"<t:{int(expires)}:R>" if expires else "`Never`"),
+        ("Redeemed In", f"`{where}`"),
+    ]
+    embed = build_log_embed("Promo Code Redeemed", COLOR_GREEN, items, thumbnail=user.display_avatar.url)
     try:
         await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     except Exception as e:
@@ -2474,15 +2486,15 @@ async def close_ticket(bot: commands.Bot, channel: discord.TextChannel, closed_b
     duration = datetime.now(timezone.utc).timestamp() - ticket["created_at"]
     hours, rest = divmod(int(duration), 3600)
 
-    embed = discord.Embed(title=f"Ticket #{ticket['ticket_id']:04d} Closed", color=COLOR_GRAY)
-    embed.add_field(name="Opened By", value=f"<@{ticket['user_id']}>\n`{ticket['user_id']}`", inline=True)
-    embed.add_field(name="Closed By", value=f"{closed_by.mention}", inline=True)
-    embed.add_field(name="Type", value=f"`{TICKET_KINDS.get(ticket['kind'], ticket['kind'])}`", inline=True)
-    embed.add_field(name="Server", value=f"`{guild.name}`\n`{guild.id}`", inline=True)
-    embed.add_field(name="Subject", value=f"`{ticket['subject'][:200]}`", inline=False)
-    embed.add_field(name="Messages", value=f"`{count}`", inline=True)
-    embed.add_field(name="Open For", value=f"`{hours}h {rest // 60}m`", inline=True)
-    embed.timestamp = datetime.now(timezone.utc)
+    embed = build_log_embed(f"Ticket #{ticket['ticket_id']:04d} Closed", COLOR_GRAY, [
+        ("Opened By", f"<@{ticket['user_id']}>\n`{ticket['user_id']}`"),
+        ("Closed By", f"{closed_by.mention}\n`{closed_by.id}`"),
+        ("Type", f"`{TICKET_KINDS.get(ticket['kind'], ticket['kind'])}`"),
+        ("Server", f"`{guild.name}`\n`{guild.id}`"),
+        ("Subject", f"`{ticket['subject'][:200]}`"),
+        ("Messages", f"`{count}`"),
+        ("Open For", f"`{hours}h {rest // 60}m`"),
+    ])
 
     delivered = False
     log_channel = bot.get_channel(int(cfg["log_channel_id"])) if cfg.get("log_channel_id") else None  # can be in another server
@@ -3356,12 +3368,13 @@ class FeaturesCog(commands.Cog):
             return
         author_id = author.id if author else int((data.get("author") or {}).get("id", 0) or 0)
         jump = f"https://discord.com/channels/{payload.guild_id}/{payload.channel_id}/{payload.message_id}"
-        embed = discord.Embed(title="Message Edited", description=f"[Jump to message]({jump})", color=COLOR_GOLD)
-        embed.add_field(name="Author", value=f"<@{author_id}>\n`{author_id}`" if author_id else "`Unknown`", inline=True)
-        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=True)
-        embed.add_field(name="Before", value=f"```{before[:900]}```" if before else "`Unknown (sent before the bot started)`", inline=False)
-        embed.add_field(name="After", value=f"```{after[:900]}```" if after else "`(empty)`", inline=False)
-        embed.timestamp = datetime.now(timezone.utc)
+        embed = build_log_embed("Message Edited", COLOR_GOLD, [
+            ("Author", f"<@{author_id}>\n`{author_id}`" if author_id else "`Unknown`"),
+            ("Channel", f"<#{payload.channel_id}>"),
+            ("Before", f"```{before[:900]}```" if before else "`Unknown (sent before the bot started)`"),
+            ("After", f"```{after[:900]}```" if after else "`(empty)`"),
+            ("Message", f"[Jump to message]({jump})"),
+        ])
         try:
             await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
@@ -3375,21 +3388,19 @@ class FeaturesCog(commands.Cog):
         cached = payload.cached_message
         if cached and cached.author.bot:
             return
-        embed = discord.Embed(title="Message Deleted", color=COLOR_RED)
-        if cached:
-            embed.add_field(name="Author", value=f"{cached.author.mention}\n`{cached.author.id}`", inline=True)
-        else:
-            embed.add_field(name="Author", value="`Unknown`", inline=True)
-        embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=True)
+        items = [
+            ("Author", f"{cached.author.mention}\n`{cached.author.id}`" if cached else "`Unknown`"),
+            ("Channel", f"<#{payload.channel_id}>"),
+        ]
         if cached:
             content = cached.content
-            embed.add_field(name="Content", value=f"```{content[:900]}```" if content else "`(no text)`", inline=False)
+            items.append(("Content", f"```{content[:900]}```" if content else "`(no text)`"))
             if cached.attachments:
-                embed.add_field(name="Attachments", value="\n".join(f"`{a.filename}`" for a in cached.attachments)[:1000], inline=False)
+                items.append(("Attachments", "\n".join(f"`{a.filename}`" for a in cached.attachments)[:1000]))
         else:
-            embed.add_field(name="Content", value="`Unknown (sent before the bot started)`", inline=False)
-        embed.add_field(name="Message ID", value=f"`{payload.message_id}`", inline=False)
-        embed.timestamp = datetime.now(timezone.utc)
+            items.append(("Content", "`Unknown (sent before the bot started)`"))
+        items.append(("Message ID", f"`{payload.message_id}`"))
+        embed = build_log_embed("Message Deleted", COLOR_RED, items)
         try:
             await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
