@@ -49,11 +49,24 @@ class ServerLayoutSchema(BaseModel):
 
 
 # --- GEMINI MODELS FALLBACK SEQUENCE ---
-GEMINI_MODELS = [
+# Old models (1.5, 2.0) are retired and return 404, so only current ones are listed.
+# You can override with the env var GEMINI_MODELS="model-a,model-b".
+GEMINI_MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "").split(",") if m.strip()] or [
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
+    "gemini-2.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
 ]
+
+
+def short_error(e: Exception) -> str:
+    """Short one-line error text for messages."""
+    return " ".join(str(e).split())[:160]
+
+
+def is_busy_error(e: Exception) -> bool:
+    t = str(e)
+    return any(x in t for x in ("429", "503", "500", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "overloaded"))
 
 
 # --- HELPER FUNCTIONS ---
@@ -183,29 +196,35 @@ async def generate_server_layout(
     last_error = None
     successful_model = None
 
+    all_errors = []
     for model_name in GEMINI_MODELS:
-        try:
-            print(f"Attempting generation using model: {model_name}...")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=user_query,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    response_schema=ServerLayoutSchema,
-                    temperature=0.7,
-                ),
-            )
-
-            layout_data = json.loads(response.text)
-            successful_model = model_name
+        for attempt in range(2):  # retry once if the model is busy
+            try:
+                print(f"Attempting generation using model: {model_name}...")
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=user_query,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=ServerLayoutSchema,
+                        temperature=0.7,
+                    ),
+                )
+                layout_data = json.loads(response.text)
+                successful_model = model_name
+                break
+            except Exception as e:
+                last_error = e
+                print(f"[{model_name}] Generation failed: {e}")
+                if attempt == 0 and is_busy_error(e):
+                    await asyncio.sleep(2)
+                    continue
+                all_errors.append(f"{model_name}: {short_error(e)}")
+                break
+        if layout_data:
             break
-
-        except Exception as e:
-            last_error = e
-            err_msg = str(e)
-            print(f"[{model_name}] Generation failed: {err_msg}. Retrying with next model...")
-            continue
 
     if not layout_data:
         if webhook_url and user_info:
@@ -215,13 +234,13 @@ async def generate_server_layout(
                 user_info=user_info,
                 action_details={
                     "Prompt": prompt,
-                    "Error": str(last_error)
+                    "Error": " | ".join(all_errors)[:1000]
                 },
                 color=0xf43f5e
             )
         return {
             "success": False,
-            "error": f"All Gemini models failed. Last error: {str(last_error)}"
+            "error": "All Gemini models failed. " + " | ".join(all_errors)
         }
 
     # Process layout formatting
@@ -329,6 +348,7 @@ async def analyze_server(summary: Dict[str, Any], findings: List[str]) -> dict:
     )
 
     last_error = None
+    all_errors = []
     for model_name in GEMINI_MODELS:
         try:
             response = await asyncio.to_thread(
@@ -347,5 +367,6 @@ async def analyze_server(summary: Dict[str, Any], findings: List[str]) -> dict:
             return {"success": True, "data": data, "model": model_name}
         except Exception as e:
             last_error = e
+            all_errors.append(f"{model_name}: {short_error(e)}")
             print(f"[Analyze] {model_name} failed: {e}. Trying next model...")
-    return {"success": False, "error": f"All AI models failed. Last error: {last_error}"}
+    return {"success": False, "error": "All AI models failed. " + " | ".join(all_errors)}
