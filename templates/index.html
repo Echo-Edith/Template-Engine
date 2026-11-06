@@ -42,34 +42,34 @@ function checkAuthStatus() {
 <style>
 /* Blueprint / drafting-table theme: flat solid panels, graph-paper grid, square corners, hard shadows */
 :root {
---bg-base: #0c2340;
---grid-minor: rgba(160, 210, 255, 0.08);
---grid-major: rgba(160, 210, 255, 0.18);
---panel-bg: #0f2c4d;
---panel-border: #5b8bb8;
---glass-inner-bg: #12345b;
---glass-inner-border: #2f5d8c;
---input-bg: #0a1e36;
---input-border: #3f6e9e;
+--bg-base: #060f1c;
+--grid-minor: rgba(130, 180, 230, 0.05);
+--grid-major: rgba(130, 180, 230, 0.11);
+--panel-bg: #0a1a2e;
+--panel-border: #3a5f86;
+--glass-inner-bg: #0d2239;
+--glass-inner-border: #24435f;
+--input-bg: #050d18;
+--input-border: #2c4d6d;
 --discord-dark: #2b2d31;
---discord-sidebar: #0b2240;
---discord-channel: #9fc3e6;
---discord-hover: rgba(255, 122, 26, 0.16);
+--discord-sidebar: #07141f;
+--discord-channel: #8fb0d0;
+--discord-hover: rgba(224, 102, 26, 0.16);
 --text-title: #f4f9ff;
---text-sub: #b7d2ee;
---text-muted: #7fa3c7;
---accent-purple: #ff7a1a;
---accent-purple-glow: rgba(255, 122, 26, 0.45);
---accent-gold: #ffd23f;
---accent-gold-glow: rgba(255, 210, 63, 0.45);
+--text-sub: #a3bfdc;
+--text-muted: #6a8bad;
+--accent-purple: #e0661a;
+--accent-purple-glow: rgba(224, 102, 26, 0.45);
+--accent-gold: #c9962b;
+--accent-gold-glow: rgba(201, 150, 43, 0.45);
 --accent-violet: #ff9a3d;
---accent-green: #4ade80;
---accent-red: #ff5d5d;
---card-bg: #0d2847;
---card-border: #2f5d8c;
+--accent-green: #3fb86b;
+--accent-red: #e05252;
+--card-bg: #0a1c30;
+--card-border: #24435f;
 
---gold-glass-bg: rgba(255, 210, 63, 0.08);
---gold-glass-border: #c9a42a;
+--gold-glass-bg: rgba(201, 150, 43, 0.09);
+--gold-glass-border: #8f6a1c;
 --gold-glass-glow: 4px 4px 0 rgba(0, 0, 0, 0.35);
 
 --mono: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
@@ -132,7 +132,7 @@ max-width: 680px;
 }
 
 .glass-panel.gold-theme {
-background: #1a2a3c;
+background: #11151c;
 border: 2px solid var(--gold-glass-border);
 box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.45);
 }
@@ -288,16 +288,16 @@ transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .gold-theme .form-control {
-border: 2px solid #7a6620;
+border: 2px solid #5c4a1a;
 }
 
 .gold-theme .form-control:focus {
 border-color: var(--accent-gold);
-box-shadow: 3px 3px 0 rgba(255, 210, 63, 0.35);
+box-shadow: 3px 3px 0 rgba(201, 150, 43, 0.35);
 }
 
 .form-control option {
-background: #0a1e36;
+background: #050d18;
 color: #ffffff;
 }
 
@@ -310,9 +310,9 @@ box-shadow: 3px 3px 0 var(--accent-purple-glow);
 width: 100%;
 padding: 14px;
 background: var(--accent-purple);
-border: 2px solid #8a3a00;
+border: 2px solid #6b2c00;
 border-radius: 2px;
-color: #1a0a00;
+color: #140700;
 font-family: var(--mono);
 font-weight: 800;
 font-size: 0.85rem;
@@ -331,8 +331,8 @@ text-decoration: none;
 
 .btn-glass.btn-premium {
 background: var(--accent-gold);
-color: #1a1400;
-border: 2px solid #7a6000;
+color: #120d00;
+border: 2px solid #5c4410;
 }
 
 .btn-glass:hover:not(:disabled) {
@@ -354,9 +354,9 @@ opacity: 0.5;
 cursor: not-allowed;
 transform: none;
 box-shadow: none;
-background: #3a4f66;
-color: #b7c7d8;
-border-color: #2a3b4e;
+background: #1c2a3a;
+color: #7f93a8;
+border-color: #16212d;
 }
 
 .btn-secondary {
@@ -448,14 +448,14 @@ color: #ffffff;
 }
 
 .discord-channel-item.active {
-background: rgba(255, 122, 26, 0.22);
+background: rgba(224, 102, 26, 0.22);
 border: 1px solid var(--accent-purple);
 color: #ffffff;
 font-weight: 600;
 }
 
 .gold-theme .discord-channel-item.active {
-background: rgba(255, 210, 63, 0.18);
+background: rgba(201, 150, 43, 0.18);
 border: 1px solid var(--accent-gold);
 }
 
@@ -486,12 +486,12 @@ gap: 4px;
 .add-btn-inline:hover {
 border-color: var(--accent-purple);
 color: #ffffff;
-background: rgba(255, 122, 26, 0.12);
+background: rgba(224, 102, 26, 0.12);
 }
 
 .gold-theme .add-btn-inline:hover {
 border-color: var(--accent-gold);
-background: rgba(255, 210, 63, 0.1);
+background: rgba(201, 150, 43, 0.1);
 }
 
 .reorder-hint {
@@ -515,7 +515,7 @@ margin-bottom: 16px;
 }
 
 .gold-theme .editor-card {
-background: rgba(255, 210, 63, 0.04);
+background: rgba(201, 150, 43, 0.04);
 border: 2px solid var(--gold-glass-border);
 }
 
@@ -588,7 +588,7 @@ top: 0;
 left: 0;
 width: 100vw;
 height: 100vh;
-background: rgba(4, 12, 24, 0.85);
+background: rgba(2, 6, 12, 0.88);
 z-index: 999;
 display: none;
 justify-content: center;
@@ -629,12 +629,12 @@ transition: all 0.15s ease;
 }
 
 .perm-item-inline:hover {
-background: rgba(255, 122, 26, 0.1);
+background: rgba(224, 102, 26, 0.1);
 border-color: var(--accent-purple);
 }
 
 .gold-theme .perm-item-inline:hover {
-background: rgba(255, 210, 63, 0.08);
+background: rgba(201, 150, 43, 0.08);
 border-color: var(--accent-gold);
 }
 
@@ -676,7 +676,7 @@ accent-color: var(--accent-purple);
 }
 
 .robux-badge {
-background: rgba(255, 210, 63, 0.1);
+background: rgba(201, 150, 43, 0.1);
 border: 2px dashed var(--gold-glass-border);
 color: var(--accent-gold);
 border-radius: 2px;
