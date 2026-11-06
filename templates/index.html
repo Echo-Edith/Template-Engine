@@ -891,7 +891,7 @@ background: var(--accent-purple-glow) !important;
 <button class="add-btn-inline" onclick="addNewRole()" style="padding:12px; margin-top:8px;">+ Add New Role</button>
 </div>
 <button id="submit-design-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="handleInitialSubmitClick()">
-<i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit design to staff</span>
+<i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit Design</span>
 </button>
 </div>
 
@@ -983,7 +983,7 @@ function applyPremiumTheme() {
             btn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Deploy Layout Instantly</span>`;
         } else {
             btn.classList.remove('btn-premium');
-            btn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit design to staff</span>`;
+            btn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit Design</span>`;
         }
     }
 }
