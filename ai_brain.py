@@ -97,7 +97,8 @@ def calculate_account_age(discord_id: str) -> str:
         return "Unknown"
 
 
-LOG_DIVIDER = "\u2500" * 30
+# A strikethrough over invisible blank characters = one solid line with no gaps (dashes and box characters show gaps in Discord).
+LOG_DIVIDER = "~~" + "\u2800" * 26 + "~~"
 
 
 def log_description(items) -> str:

@@ -261,19 +261,25 @@ def submit_design_endpoint():
     embed_title = "Premium Auto-Build Submitted" if is_premium else "Standard Design Submitted"
     embed_color = 0xC9962B if is_premium else 0xE0661A
 
-    # Card layout: title, thin separator lines, the design file inside, and the time at the bottom.
-    # The bot reads the file from this message (normal reader + a backup reader in cogs/features.py).
-    components = ai_brain.log_components(embed_title, [
-        ("User", f"<@{user_id}>"),
-        ("User ID", user_id),
-        ("Account Age", account_age),
-        ("Target Server ID", target_server_id),
-        ("Invite Link", invite_link),
-        ("Categories", categories_count),
-        ("Channels", channels_count),
-        ("Roles", roles_count),
-        ("Prompt", prompt_text[:900] if len(str(prompt_text)) > 80 else prompt_text),
-    ], embed_color, file_name="blueprint.json")
+    # Normal embed on purpose: the bot reads this message to start the build and send the DM.
+    # The separator is a solid line (strikethrough over blank characters), so it has no gaps.
+    embed_payload = {
+        "title": embed_title,
+        "description": ai_brain.log_description([
+            ("User", f"<@{user_id}>"),
+            ("User ID", user_id),
+            ("Account Age", account_age),
+            ("Target Server ID", target_server_id),
+            ("Invite Link", invite_link),
+            ("Categories", categories_count),
+            ("Channels", channels_count),
+            ("Roles", roles_count),
+            ("Prompt", prompt_text[:900] if len(str(prompt_text)) > 80 else prompt_text),
+        ]),
+        "color": embed_color,
+        "footer": {"text": "Template Engine Infrastructure Log"},
+        "timestamp": ai_brain.datetime.now(ai_brain.timezone.utc).isoformat()
+    }
 
     attachment_data = {
         "submitting_user_id": user_id,
@@ -296,8 +302,7 @@ def submit_design_endpoint():
             headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
 
             payload_json = {
-                "flags": ai_brain.IS_COMPONENTS_V2,
-                "components": components
+                "embeds": [embed_payload]
             }
 
             files = {

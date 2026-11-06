@@ -556,7 +556,7 @@ COLOR_RED = 0xF43F5E
 COLOR_GOLD = 0xF1C40F
 COLOR_GRAY = 0x95A5A6
 
-LOG_DIVIDER = "\u2500" * 30
+LOG_DIVIDER = "~~" + "\u2800" * 26 + "~~"  # solid line, no gaps
 
 
 def build_log_embed(title: str, color: int, items: list, thumbnail: Optional[str] = None, footer: Optional[str] = None) -> discord.Embed:
