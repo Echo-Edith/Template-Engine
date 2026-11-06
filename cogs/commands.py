@@ -12,6 +12,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from cogs.features import (
+    user_has_premium,
     SITE_THEMES,
     WEBSITE_URL,
     get_site_theme,
@@ -848,8 +849,28 @@ def shop_stock_text(item: dict) -> str:
     return "unlimited" if item.get("stock") is None else ("SOLD OUT" if item["stock"] <= 0 else f"{item['stock']} left")
 
 
-def shop_line(item: dict) -> str:
-    return f"**{item['name']}** | `{int(item['price']):,} pts` | {shop_reward_text(item)} | `{shop_stock_text(item)}`"
+def shop_price_for(item: dict, user_id) -> int:
+    """The price this user pays. TE Premium members get the item's premium discount (percent)."""
+    price = int(item["price"])
+    discount = int(item.get("premium_discount") or 0)
+    if discount > 0 and user_id is not None and user_has_premium(str(user_id)):
+        price = max(1, round(price * (100 - discount) / 100))
+    return price
+
+
+def shop_price_text(item: dict, user_id) -> str:
+    base = int(item["price"])
+    discount = int(item.get("premium_discount") or 0)
+    if discount <= 0:
+        return f"`{base:,} pts`"
+    premium_price = max(1, round(base * (100 - discount) / 100))
+    if user_id is not None and user_has_premium(str(user_id)):
+        return f"`{premium_price:,} pts` (~~{base:,}~~, Premium {discount}% off)"
+    return f"`{base:,} pts` (Premium: `{premium_price:,} pts`)"
+
+
+def shop_line(item: dict, user_id=None) -> str:
+    return f"**{item['name']}** | {shop_price_text(item, user_id)} | {shop_reward_text(item)} | `{shop_stock_text(item)}`"
 
 
 class ShopView(discord.ui.View):
@@ -867,7 +888,7 @@ class ShopView(discord.ui.View):
             select = discord.ui.Select(
                 placeholder="Choose an item to buy...",
                 options=[discord.SelectOption(label=i["name"][:100], value=i["key"][:100],
-                                              description=f"{int(i['price']):,} pts | {shop_stock_text(i)}"[:100]) for i in chunk]
+                                              description=f"{shop_price_for(i, self.user_id):,} pts | {shop_stock_text(i)}"[:100]) for i in chunk]
             )
             select.callback = self._on_select
             self.add_item(select)
@@ -882,7 +903,7 @@ class ShopView(discord.ui.View):
     def build_embed(self) -> discord.Embed:
         balance = get_user_points(str(self.user_id))
         chunk = self.items[self.page * self.PER_PAGE:(self.page + 1) * self.PER_PAGE]
-        lines = f"\n{GIVEAWAY_DIVIDER}\n".join(shop_line(i) for i in chunk) or "The shop is empty right now."
+        lines = f"\n{GIVEAWAY_DIVIDER}\n".join(shop_line(i, self.user_id) for i in chunk) or "The shop is empty right now."
         embed = discord.Embed(title="Points Shop", description=f"Your balance: `{balance:,} pts`\n\n{lines}", color=COLOR_GOLD)
         embed.set_footer(text=f"Page {self.page + 1}/{self.pages} | Choose an item below to buy it")
         return embed
@@ -910,9 +931,10 @@ class ShopView(discord.ui.View):
         embed = discord.Embed(title=f"Buy {item['name']}?", color=COLOR_GOLD)
         if item.get("description"):
             embed.description = item["description"]
-        embed.add_field(name="Price", value=f"`{int(item['price']):,} pts`", inline=True)
+        price_now = shop_price_for(item, self.user_id)
+        embed.add_field(name="Price", value=shop_price_text(item, self.user_id), inline=True)
         embed.add_field(name="Your Balance", value=f"`{balance:,} pts`", inline=True)
-        embed.add_field(name="After Buying", value=f"`{balance - int(item['price']):,} pts`" if balance >= item["price"] else "`Not enough points`", inline=True)
+        embed.add_field(name="After Buying", value=f"`{balance - price_now:,} pts`" if balance >= price_now else "`Not enough points`", inline=True)
         embed.add_field(name="You Get", value=shop_reward_text(item), inline=False)
         await interaction.response.send_message(embed=embed, view=ShopConfirmView(self.user_id, item["key"]), ephemeral=True)
 
@@ -937,13 +959,13 @@ if HAS_CARD_LAYOUT:
             if not chunk:
                 container.add_item(discord.ui.TextDisplay("The shop is empty right now."))
             for item in chunk:
-                container.add_item(discord.ui.TextDisplay(shop_line(item)))
+                container.add_item(discord.ui.TextDisplay(shop_line(item, user_id)))
                 container.add_item(discord.ui.Separator())  # the line between items
             if chunk:
                 select = discord.ui.Select(
                     placeholder="Choose an item to buy...",
                     options=[discord.SelectOption(label=i["name"][:100], value=i["key"][:100],
-                                                  description=f"{int(i['price']):,} pts | {shop_stock_text(i)}"[:100]) for i in chunk]
+                                                  description=f"{shop_price_for(i, self.user_id):,} pts | {shop_stock_text(i)}"[:100]) for i in chunk]
                 )
                 select.callback = self._on_select
                 row = discord.ui.ActionRow()
@@ -1007,7 +1029,8 @@ class ShopConfirmView(discord.ui.View):
         item = get_shop_item(self.key)
         if item is None:
             return embed_err("Item Not Found", "That item is no longer for sale.")
-        price = int(item["price"])
+        price = shop_price_for(item, uid)
+        discount_used = int(item.get("premium_discount") or 0) if price != int(item["price"]) else 0
         balance = get_user_points(uid)
         if balance < price:
             return embed_err("Not Enough Points", f"You need `{price:,} pts` but you have `{balance:,} pts`.")
@@ -1046,7 +1069,7 @@ class ShopConfirmView(discord.ui.View):
             count_shop_sale(self.key)
 
         embed = embed_ok("Purchase Complete!", f"You bought **{item['name']}**.")
-        embed.add_field(name="Paid", value=f"`{price:,} pts`", inline=True)
+        embed.add_field(name="Paid", value=f"`{price:,} pts`" + (f" (Premium {discount_used}% off)" if discount_used else ""), inline=True)
         embed.add_field(name="New Balance", value=f"`{new_balance:,} pts`", inline=True)
         if item["reward"] == "premium" and item.get("permanent"):
             embed.add_field(name="TE Premium", value="`Lifetime`", inline=False)
@@ -1070,7 +1093,7 @@ class ShopConfirmView(discord.ui.View):
                 items = [
                     ("Buyer", f"{interaction.user.mention}\n`{interaction.user.id}`"),
                     ("Item", f"`{item['name']}`"),
-                    ("Price", f"`{price:,} pts`"),
+                    ("Price", f"`{price:,} pts`" + (f" (Premium {discount_used}% off, normal `{int(item['price']):,} pts`)" if discount_used else "")),
                     ("New Balance", f"`{new_balance:,} pts`"),
                     ("Reward", shop_reward_text(item)),
                 ]
@@ -3203,6 +3226,7 @@ class CommandsCog(commands.Cog):
         permanent="Sell lifetime TE Premium that never runs out (no premium_days needed).",
         role="The role to give (for the Role reward).",
         stock="Optional. How many can be sold. Empty = unlimited.",
+        premium_discount="Optional. Percent off for TE Premium members (10 = 10% cheaper).",
         description="Optional. Shown when someone buys. Good for Custom items."
     )
     @app_commands.choices(
@@ -3224,6 +3248,7 @@ class CommandsCog(commands.Cog):
         permanent: Optional[bool] = False,
         role: Optional[discord.Role] = None,
         stock: Optional[app_commands.Range[int, 1, 1000000]] = None,
+        premium_discount: Optional[app_commands.Range[int, 1, 90]] = None,
         description: Optional[app_commands.Range[str, 1, 300]] = None
     ):
         if action.value == "remove":
@@ -3255,7 +3280,7 @@ class CommandsCog(commands.Cog):
             "premium_days": int(premium_days or 0), "permanent": bool(permanent and reward.value == "premium"), "role_id": role.id if role else None,
             "guild_id": interaction.guild.id if interaction.guild else None,
             "stock": int(stock) if stock else None, "description": description or "",
-            "sold": 0, "created_at": datetime.now(timezone.utc).timestamp(),
+            "premium_discount": int(premium_discount or 0), "sold": 0, "created_at": datetime.now(timezone.utc).timestamp(),
         }
         if not add_shop_item(item):
             await interaction.response.send_message(embed=embed_err("Item Exists", f"`{name}` is already in the shop. Remove it first to change it."), ephemeral=True)
@@ -3263,6 +3288,8 @@ class CommandsCog(commands.Cog):
         embed = embed_ok("Item Added", "It is now in `/shop`.")
         embed.add_field(name="Item", value=f"`{item['name']}`", inline=True)
         embed.add_field(name="Price", value=f"`{item['price']:,} pts`", inline=True)
+        if item["premium_discount"]:
+            embed.add_field(name="Premium Price", value=f"`{max(1, round(item['price'] * (100 - item['premium_discount']) / 100)):,} pts` ({item['premium_discount']}% off)", inline=True)
         embed.add_field(name="Stock", value=f"`{shop_stock_text(item)}`", inline=True)
         embed.add_field(name="Reward", value=shop_reward_text(item), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)

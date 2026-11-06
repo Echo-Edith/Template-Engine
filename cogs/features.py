@@ -345,6 +345,14 @@ def get_premium_expiry(user_id: str) -> Optional[datetime]:
         return None
 
 
+def user_has_premium(user_id: str) -> bool:
+    """True if the user has TE Premium right now (lifetime/staff included)."""
+    if str(user_id) in HARDCODED_STAFF:
+        return True
+    exp = get_premium_expiry(str(user_id))
+    return bool(exp and exp > datetime.now(timezone.utc))
+
+
 def has_lifetime_premium(user_id: str) -> bool:
     if str(user_id) in HARDCODED_STAFF:
         return True
