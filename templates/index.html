@@ -657,6 +657,19 @@ justify-content: center;
 gap: 6px;
 }
 
+.landing-links { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.btn-secondary-link { background: transparent; color: var(--text-main, inherit); border: 2px solid var(--card-border); }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.tpl-card { background: var(--card-bg); border: 2px solid var(--card-border); border-radius: 2px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+.tpl-card .tpl-emoji { font-size: 1.8rem; }
+.tpl-card .tpl-name { font-weight: 700; }
+.tpl-card .tpl-desc, .tpl-card .tpl-meta, .hist-meta { font-size: 0.78rem; color: var(--text-sub); }
+.tpl-card button { margin-top: auto; padding: 10px; }
+.hist-item { background: var(--card-bg); border: 2px solid var(--card-border); border-radius: 2px; padding: 12px 14px; margin-bottom: 10px; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.hist-title { font-weight: 600; word-break: break-word; }
+.hist-kind { font-size: 0.68rem; letter-spacing: 1px; text-transform: uppercase; color: var(--accent-purple); font-weight: 700; }
+.hist-actions { display: flex; gap: 8px; }
+.hist-actions button { width: auto; padding: 8px 14px; font-size: 0.82rem; }
 .editor-card {
 background: var(--card-bg);
 border: 2px solid var(--card-border);
@@ -935,6 +948,32 @@ background: var(--accent-purple-glow) !important;
 <button id="verify-continue-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" disabled onclick="proceedToGenerator()">
 <span id="continue-btn-label">Log In to Continue</span> <i class="fa-solid fa-arrow-right"></i>
 </button>
+{% if user %}
+<div class="landing-links">
+<button class="btn-glass btn-secondary-link" onclick="openTemplates()"><i class="fa-solid fa-table-cells-large"></i> Template Gallery</button>
+<button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs</button>
+</div>
+{% endif %}
+</div>
+
+<!-- PAGE: TEMPLATE GALLERY -->
+<div id="page-templates" class="page">
+<div class="brand-header">
+<h1>Template Gallery</h1>
+<p>Pick a ready layout. You can edit everything before you build it.</p>
+</div>
+<div id="template-grid" class="card-grid"></div>
+<button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
+</div>
+
+<!-- PAGE: MY DESIGNS -->
+<div id="page-history" class="page">
+<div class="brand-header">
+<h1>My Designs</h1>
+<p>Everything you made on this site. Open any item to keep working on it.</p>
+</div>
+<div id="history-list"></div>
+<button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
 </div>
 
 <!-- PAGE 2: GENERATOR PROMPT -->
@@ -957,6 +996,9 @@ background: var(--accent-purple-glow) !important;
 </div>
 <button id="generate-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" style="margin-top: 24px;" onclick="handleAIGeneration()">
 <i class="fa-solid fa-wand-magic-sparkles"></i> <span>Generate Server Layout</span>
+</button>
+<button id="gen-back-layout-btn" class="btn-glass btn-secondary-link" style="margin-top: 10px; display:none;" onclick="navigateTo('page-layout')">
+<i class="fa-solid fa-arrow-left"></i> Back to My Layout
 </button>
 </div>
 
@@ -1203,6 +1245,11 @@ const DISCORD_PERMISSIONS_LIST = [
 
 let botNoticeTimer = null;
 
+function showBackToLayoutButton() {
+    const btn = document.getElementById('gen-back-layout-btn');
+    if (btn) btn.style.display = 'block';
+}
+
 function proceedToGenerator() {
     const modal = document.getElementById('bot-notice-modal');
     if (!DISCORD_CLIENT_ID || !modal) {
@@ -1228,6 +1275,129 @@ function proceedToGenerator() {
             closeBtn.textContent = `Continue in ${left}s`;
         }
     }, 1000);
+}
+
+function escapeHtml(str) {
+    return String(str == null ? '' : str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function loadLayoutIntoEditor(blueprint) {
+    currentLayout = blueprint;
+    activeCatIdx = 0;
+    activeChanIdx = 0;
+    previousLayout = null;
+    const undoBtn = document.getElementById('ai-edit-undo-btn');
+    if (undoBtn) undoBtn.style.display = 'none';
+    renderDashboard();
+    navigateTo('page-layout');
+}
+
+async function openTemplates() {
+    navigateTo('page-templates');
+    const grid = document.getElementById('template-grid');
+    grid.innerHTML = '<p style="color:var(--text-sub);">Loading...</p>';
+    try {
+        const res = await fetch('/api/templates');
+        const data = await res.json();
+        grid.innerHTML = (data.templates || []).map(t => `
+            <div class="tpl-card">
+                <div class="tpl-emoji">${t.emoji}</div>
+                <div class="tpl-name">${escapeHtml(t.name)}</div>
+                <div class="tpl-desc">${escapeHtml(t.description)}</div>
+                <div class="tpl-meta">${t.categories} categories, ${t.channels} channels, ${t.roles} roles</div>
+                <button class="btn-glass" onclick="useTemplate('${t.id}', this)">Use Template</button>
+            </div>`).join('');
+    } catch (e) {
+        grid.innerHTML = '<p style="color:var(--text-sub);">Could not load templates. Please try again.</p>';
+    }
+}
+
+async function useTemplate(id, btn) {
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/templates/' + encodeURIComponent(id));
+        const data = await res.json();
+        if (res.ok && data.success) {
+            loadLayoutIntoEditor(data.blueprint);
+        } else {
+            alert(data.error || 'Could not open this template.');
+        }
+    } catch (e) {
+        alert('Could not reach the server. Please try again.');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+const HISTORY_KIND_LABELS = { generated: 'AI Generated', ai_edit: 'AI Edit', template: 'Template', submitted: 'Submitted' };
+
+async function openHistory() {
+    navigateTo('page-history');
+    const list = document.getElementById('history-list');
+    list.innerHTML = '<p style="color:var(--text-sub);">Loading...</p>';
+    try {
+        const res = await fetch('/api/designs');
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+            list.innerHTML = `<p style="color:var(--text-sub);">${escapeHtml(data.error || 'Could not load your designs.')}</p>`;
+            return;
+        }
+        if (!data.designs.length) {
+            list.innerHTML = '<p style="color:var(--text-sub);">Nothing here yet. Generate a layout or use a template and it will show up here.</p>';
+            return;
+        }
+        list.innerHTML = data.designs.map(d => {
+            const when = new Date(d.created_at * 1000).toLocaleString();
+            const mode = d.build_mode === 'add' ? ' (added to server)' : (d.build_mode === 'rebuild' ? ' (rebuild)' : '');
+            return `
+            <div class="hist-item" id="hist-${d.id}">
+                <div>
+                    <div class="hist-kind">${HISTORY_KIND_LABELS[d.kind] || d.kind}${mode}</div>
+                    <div class="hist-title">${escapeHtml(d.title)}</div>
+                    <div class="hist-meta">${when} \u2022 ${d.categories} categories, ${d.channels} channels, ${d.roles} roles</div>
+                </div>
+                <div class="hist-actions">
+                    <button class="btn-glass" onclick="openSavedDesign('${d.id}', this)">Open</button>
+                    <button class="btn-glass btn-secondary-link" onclick="deleteSavedDesign('${d.id}')"><i class="fa-solid fa-trash"></i></button>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        list.innerHTML = '<p style="color:var(--text-sub);">Could not load your designs. Please try again.</p>';
+    }
+}
+
+async function openSavedDesign(id, btn) {
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/designs/' + encodeURIComponent(id));
+        const data = await res.json();
+        if (res.ok && data.success) {
+            loadLayoutIntoEditor(data.blueprint);
+        } else {
+            alert(data.error || 'Could not open this design.');
+        }
+    } catch (e) {
+        alert('Could not reach the server. Please try again.');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function deleteSavedDesign(id) {
+    if (!confirm('Remove this from your history?')) return;
+    try {
+        const res = await fetch('/api/designs/' + encodeURIComponent(id), { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            const el = document.getElementById('hist-' + id);
+            if (el) el.remove();
+        } else {
+            alert(data.error || 'Could not remove it.');
+        }
+    } catch (e) {
+        alert('Could not reach the server. Please try again.');
+    }
 }
 
 function closeBotNoticeModal() {
@@ -1691,7 +1861,9 @@ function handleInitialSubmitClick() {
     const serverId = document.getElementById('gen-server-id').value.trim();
     const serverLink = document.getElementById('gen-server-link').value.trim();
     if (!serverId || !serverLink) {
-        alert('Server ID and Server Invite Link are required to submit.');
+        alert('Enter your Server ID and Invite Link first. Then press "Back to My Layout" to continue.');
+        showBackToLayoutButton();
+        navigateTo('page-generator');
         return;
     }
     if (!IS_TE_PREMIUM) {
