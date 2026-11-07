@@ -2249,6 +2249,27 @@ def list_backups(guild_id: Optional[int] = None) -> List[dict]:
     return sorted(items, key=lambda b: b.get("created_at", 0), reverse=True)
 
 
+AUTO_BACKUPS_KEPT = 3
+
+
+def make_auto_backup(guild: discord.Guild, user_id) -> dict:
+    """Safety backup taken before a TE Premium build. Only the newest few are kept."""
+    backup = snapshot_guild(guild, user_id)
+    backup["auto_build"] = True
+    save_backup(backup)
+    autos = [b for b in list_backups(guild.id) if b.get("auto_build")]  # newest first
+    for old in autos[AUTO_BACKUPS_KEPT:]:
+        delete_backup(old["backup_id"])
+    return backup
+
+
+def latest_auto_backup(guild_id: int) -> Optional[dict]:
+    for b in list_backups(guild_id):
+        if b.get("auto_build"):
+            return b
+    return None
+
+
 def delete_backup(backup_id: str) -> bool:
     bid = normalize_backup_id(backup_id)
     existed = LOCAL_BACKUPS.pop(bid, None) is not None
@@ -3883,9 +3904,36 @@ class FeaturesCog(commands.Cog):
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, channel)
         else:
             print(f"[Auto-Build] {'Free mode' if is_standard else 'Premium'} deployment for {guild.name} ({guild.id})")
+            safety_backup = None
             if is_standard:
                 record_build(submitting_user_id)
+            else:
+                # TE Premium: save the server first, so the build can be undone
+                try:
+                    safety_backup = make_auto_backup(guild, submitting_user_id)
+                except Exception as e:
+                    print(f"[Auto Backup Error] {e!r}")
             await self.execute_auto_build(guild, layout, build_mode)
+            if safety_backup:
+                await self.send_backup_dm(submitting_user_id, guild.name, safety_backup["backup_id"])
+
+    async def send_backup_dm(self, user_id: str, guild_name: str, backup_id: str):
+        embed = discord.Embed(
+            title="Build Finished",
+            description=(
+                f"Your layout for **{guild_name}** is built.\n\n"
+                f"A safety backup of the old server was saved first: `{backup_id}`\n"
+                "Not happy with the result? Run `/backup` in that server and choose **Undo Last Build**. "
+                "The server owner or you can do this (you need Administrator in that server)."
+            ),
+            color=0xC9962B
+        )
+        embed.set_footer(text="TE Premium: the last 3 builds are kept.")
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+            await user.send(embed=embed)
+        except Exception as e:
+            print(f"[Backup DM Error] {e}")
 
     async def send_limit_dm(self, user_id: str, limit: int, reset_unix: int):
         try:

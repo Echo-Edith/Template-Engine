@@ -95,6 +95,7 @@ from cogs.features import (
     snapshot_guild,
     save_backup,
     get_backup,
+    latest_auto_backup,
     list_backups,
     delete_backup,
     restore_guild,
@@ -3314,6 +3315,7 @@ class CommandsCog(commands.Cog):
         app_commands.Choice(name="View", value="view"),
         app_commands.Choice(name="List", value="list"),
         app_commands.Choice(name="Restore", value="restore"),
+        app_commands.Choice(name="Undo Last Build", value="undo"),
         app_commands.Choice(name="Delete", value="delete"),
     ])
     @app_commands.autocomplete(backup_id=backup_id_autocomplete)
@@ -3325,7 +3327,7 @@ class CommandsCog(commands.Cog):
 
         if act == "create":
             await interaction.response.defer(ephemeral=True)
-            if len(list_backups(guild.id)) >= BACKUP_LIMIT_PER_GUILD:
+            if len([b for b in list_backups(guild.id) if not b.get("auto_build")]) >= BACKUP_LIMIT_PER_GUILD:
                 await interaction.followup.send(embed=embed_err("Backup Limit Reached", f"You can keep `{BACKUP_LIMIT_PER_GUILD}` backups. Delete one first with `/backup` Delete."), ephemeral=True)
                 return
             backup = snapshot_guild(guild, interaction.user.id)
@@ -3334,6 +3336,27 @@ class CommandsCog(commands.Cog):
             if not saved:
                 embed.add_field(name="Warning", value="The database could not be reached. This backup only lasts until the bot restarts.", inline=False)
             await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if act == "undo":
+            auto = latest_auto_backup(guild.id)
+            if auto is None:
+                await interaction.response.send_message(embed=embed_err("Nothing To Undo", "There is no saved build for this server. TE Premium builds save a backup first."), ephemeral=True)
+                return
+            if interaction.user.id != guild.owner_id and not is_admin_user and str(auto.get("created_by")) != str(interaction.user.id):
+                await interaction.response.send_message(embed=embed_err("Not Allowed", "Only the server owner or the person who built the layout can undo it."), ephemeral=True)
+                return
+            me_perms = guild.me.guild_permissions
+            if not (me_perms.administrator or (me_perms.manage_channels and me_perms.manage_roles and me_perms.manage_guild)):
+                await interaction.response.send_message(embed=embed_err("Missing Permission", "I need `Administrator` (or Manage Channels, Manage Roles and Manage Server) to undo a build."), ephemeral=True)
+                return
+            view = BackupConfirmView(self, interaction.user.id, "restore", auto)
+            embed = backup_embed(
+                auto, "Undo Last Build?",
+                "**This deletes ALL current channels, categories and roles** and brings back the server as it was before the last TE Premium build.\nMessages in deleted channels are lost for good.",
+                COLOR_RED
+            )
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
 
         if act == "list":
@@ -3398,6 +3421,8 @@ class CommandsCog(commands.Cog):
             await interaction.edit_original_response(embed=embed_err("Restore Failed", f"`{str(e)[:500]}`"), view=None)
             return
         made, problems = result["made"], result["problems"]
+        if backup.get("auto_build"):
+            delete_backup(backup["backup_id"])  # used up, so the next undo goes one build further back
         embed = backup_embed(backup, "Backup Restored", "The server was rebuilt from the backup.")
         embed.add_field(name="Created", value=f"`{made['roles']}` roles, `{made['categories']}` categories, `{made['channels']}` channels", inline=False)
         if problems:
