@@ -1529,6 +1529,82 @@ def set_site_theme(theme: str) -> bool:
     return False
 
 
+# =====================================================================
+# SERVER BOOST REWARD: TE Premium while someone boosts the server.
+# 30 days at a time, renewed while the boost lasts. If the boost ends (or is refunded),
+# the unused premium days are taken back, so boosting and cancelling gives nothing.
+# =====================================================================
+BOOST_GUILD_ID = int(os.getenv("BOOST_GUILD_ID", "1284513257574629458"))
+BOOST_BLOCK_DAYS = 30
+LOCAL_BOOST_REWARDS: Dict[str, float] = {}  # user id -> time (ts) until which we already gave premium
+BOOST_SYNC = {"last": 0.0}
+
+
+def load_boost_rewards() -> Dict[str, float]:
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "boost_rewards"}) or {}
+            return {str(k): float(v) for k, v in (doc.get("users") or {}).items()}
+        except Exception as e:
+            print(f"[Boost Read Error] {e}")
+    return dict(LOCAL_BOOST_REWARDS)
+
+
+def save_boost_rewards(rewards: Dict[str, float]):
+    LOCAL_BOOST_REWARDS.clear()
+    LOCAL_BOOST_REWARDS.update(rewards)
+    if db_settings is not None:
+        try:
+            db_settings.replace_one({"_id": "boost_rewards"}, {"_id": "boost_rewards", "users": rewards}, upsert=True)
+        except Exception as e:
+            print(f"[Boost Save Error] {e}")
+
+
+async def sync_boost_rewards(bot: commands.Bot) -> int:
+    """Gives, renews or takes back boost premium for the whole server. Returns how many users changed."""
+    guild = bot.get_guild(BOOST_GUILD_ID)
+    if guild is None:
+        return 0
+    # If the member list is not fully loaded yet, do nothing (otherwise boosters could lose premium by mistake).
+    if not guild.chunked or len(guild.members) < 0.9 * (guild.member_count or 0):
+        return 0
+    now = datetime.now(timezone.utc).timestamp()
+    boosters = {str(m.id) for m in guild.members if m.premium_since and not m.bot}
+    rewards = load_boost_rewards()
+    changed = 0
+    notices = []  # (user id, text)
+
+    for uid in boosters:
+        until = rewards.get(uid)
+        if until is None:
+            extend_user_premium(uid, BOOST_BLOCK_DAYS)
+            rewards[uid] = now + BOOST_BLOCK_DAYS * 86400
+            notices.append((uid, f"Thank you for boosting **{guild.name}**! You got **{BOOST_BLOCK_DAYS} days of TE Premium**. It renews while your boost is active."))
+            changed += 1
+        elif until - now < 2 * 86400:
+            extend_user_premium(uid, BOOST_BLOCK_DAYS)
+            rewards[uid] = until + BOOST_BLOCK_DAYS * 86400
+            changed += 1
+
+    for uid in [u for u in rewards if u not in boosters]:
+        unused_days = int(max(0.0, rewards[uid] - now) // 86400)
+        if unused_days > 0:
+            reduce_user_premium(uid, unused_days)
+        rewards.pop(uid, None)
+        notices.append((uid, f"Your boost for **{guild.name}** ended, so the TE Premium from boosting ended too."))
+        changed += 1
+
+    if changed:
+        save_boost_rewards(rewards)
+    for uid, text in notices:
+        try:
+            user = await bot.fetch_user(int(uid))
+            await user.send(embed=embed_info("Server Boost Reward", text))
+        except Exception:
+            pass
+    return changed
+
+
 DESIGN_DONE: set = set()  # design messages already handled (so the DM is sent once)
 LOCAL_PRICES: Dict[str, int] = {}
 
@@ -3190,6 +3266,13 @@ class FeaturesCog(commands.Cog):
         except Exception as e:
             print(f"[Giveaway Loop Error] {e!r}")
             GIVEAWAY_DEBUG["last_error"] = f"Giveaway loop: {e!r}"
+        if datetime.now(timezone.utc).timestamp() - BOOST_SYNC["last"] >= 600:
+            BOOST_SYNC["last"] = datetime.now(timezone.utc).timestamp()
+            GIVEAWAY_DEBUG["stage"] = "boost rewards"
+            try:
+                await asyncio.wait_for(sync_boost_rewards(self.bot), timeout=60)
+            except Exception as e:
+                print(f"[Boost Sync Error] {e!r}")
         GIVEAWAY_DEBUG["stage"] = "idle"
         GIVEAWAY_DEBUG["last_tick"] = datetime.now(timezone.utc).timestamp()
 
@@ -3303,6 +3386,16 @@ class FeaturesCog(commands.Cog):
             user = await self.bot.fetch_user(int(uid))
         dm = user.dm_channel or await user.create_dm()
         return dm.get_partial_message(int(dm_message_id))
+
+    @commands.Cog.listener("on_member_update")
+    async def boost_on_member_update(self, before: discord.Member, after: discord.Member):
+        """A member starts or stops boosting: update their premium right away (not only every 10 minutes)."""
+        if after.guild.id != BOOST_GUILD_ID or before.premium_since == after.premium_since:
+            return
+        try:
+            await sync_boost_rewards(self.bot)
+        except Exception as e:
+            print(f"[Boost Update Error] {e!r}")
 
     @commands.Cog.listener("on_message")
     async def website_on_message(self, message: discord.Message):
