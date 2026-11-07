@@ -25,11 +25,7 @@ function checkAuthStatus() {
         return;
     }
 
-    if (!IS_ROBLOX_LINKED) {
-        if (btn) btn.disabled = true;
-        if (label) label.innerText = "Sync Roblox Account in Discord Server First";
-        return;
-    }
+    // A Roblox account is optional: you can also pay with server points.
 
     if (btn) {
         btn.disabled = false;
@@ -944,8 +940,8 @@ background: var(--accent-purple-glow) !important;
 {% if user %}
 <div class="editor-card" style="margin-bottom: 12px; text-align:center; background: var(--card-bg);">
 <i class="fa-solid fa-link" style="color: var(--accent-purple); font-size: 1.2rem; margin-bottom: 8px;"></i>
-<span style="font-weight: 600; font-size: 0.88rem; display:block; margin-bottom: 4px;">Roblox Sync Required</span>
-<p style="font-size:0.78rem; color: var(--text-sub);">Go to the Template Engine Discord server and head over to <code>#account-sync</code> to sync your Roblox profile.</p>
+<span style="font-weight: 600; font-size: 0.88rem; display:block; margin-bottom: 4px;">Roblox Account (Optional)</span>
+<p style="font-size:0.78rem; color: var(--text-sub);">You only need Roblox to pay with Robux. No Roblox account? You can pay with server points instead. To pay with Robux, go to the Template Engine Discord server and sync your profile in <code>#account-sync</code>.</p>
 </div>
 {% endif %}
 {% endif %}
@@ -1090,7 +1086,7 @@ background: var(--accent-purple-glow) !important;
 <i class="fa-solid fa-circle-check fa-3x" style="color: var(--accent-green); margin-bottom: 18px;"></i>
 <div class="brand-header">
 <h1 id="final-title-heading">Blueprint Submitted!</h1>
-<p id="final-desc-text">Your blueprint has been sent to the bot. It will be built automatically once your Robux payment is verified.</p>
+<p id="final-desc-text">Your blueprint has been sent to the bot. It will be built automatically once your payment (Robux or points) is verified.</p>
 </div>
 <button class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="resetBuilder()" style="margin-top: 10px;">
 Start New Layout
@@ -1129,10 +1125,10 @@ Continue in 5s
 <i class="fa-solid fa-xmark" onclick="closeRobuxNoticeModal()" style="cursor:pointer; font-size:1.2rem;"></i>
 </div>
 <div class="robux-badge">
-<strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout requires Robux unless you have an active <strong>TE Premium</strong> subscription ({{ subscription_price }} Robux/mo).
+<strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout costs Robux or server points, unless you have an active <strong>TE Premium</strong> subscription ({{ subscription_price }} Robux/mo).
 </div>
 <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
-Submitting this design sends your blueprint to the bot. Your server is built automatically once your Robux payment is verified. No staff review is needed.
+Submitting this design sends your blueprint to the bot. Your server is built automatically once your payment (Robux or points) is verified. No staff review is needed.
 </p>
 <div style="display:flex; gap:10px;">
 <button class="btn-glass btn-secondary" onclick="closeRobuxNoticeModal()">

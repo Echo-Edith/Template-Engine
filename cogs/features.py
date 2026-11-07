@@ -3786,14 +3786,14 @@ class FeaturesCog(commands.Cog):
         embed.add_field(
             name="Option 1: Buy Dev Product",
             value=(
-                f"Purchase the single-use Roblox Developer Product (**{dev_price:,} Robux**), then click **Verify Purchase**."
-                if dev_price else "Purchase the single-use Roblox Developer Product, then click **Verify Purchase**."
+                f"Purchase the single-use Roblox Developer Product (**{dev_price:,} Robux**), then click **Verify Purchase**. Needs a Roblox account."
+                if dev_price else "Purchase the single-use Roblox Developer Product, then click **Verify Purchase**. Needs a Roblox account."
             ),
             inline=False
         )
         embed.add_field(
             name="Option 2: Redeem Points",
-            value=f"Use **{points_cost:,} server points** to deploy immediately.\nYour Points: {user_pts:,} pts",
+            value=f"No Roblox account? Use **{points_cost:,} server points** to deploy immediately.\nYour Points: {user_pts:,} pts",
             inline=False
         )
 
