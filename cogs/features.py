@@ -27,6 +27,8 @@ SUBSCRIPTION_LOG_CHANNEL_ID = int(os.getenv("SUBSCRIPTION_LOG_CHANNEL_ID", "1564
 MONGO_URI = os.getenv("MONGO_URI")
 
 db_premium = None
+db_web_users = None
+db_web_inbox = None
 db_build_auth = None
 db_users = None
 db_cases = None
@@ -49,6 +51,8 @@ if MONGO_URI:
         except Exception:
             db = mongo_client.get_database("static_studio_db")
         db_premium = db["premium_users"]
+        db_web_users = db["web_users"]
+        db_web_inbox = db["web_inbox"]
         db_build_auth = db["build_authorized_users"]
         db_users = db["persistent_users"]
         db_cases = db["mod_cases"]
@@ -1620,11 +1624,65 @@ async def sync_boost_rewards(bot: commands.Bot) -> int:
         save_boost_rewards(rewards)
     for uid, text in notices:
         try:
+            if not user_allows_dms(uid):
+                continue
             user = await bot.fetch_user(int(uid))
             await user.send(embed=embed_info("Server Boost Reward", text))
         except Exception:
             pass
     return changed
+
+
+# =====================================================================
+# PERSONAL SETTINGS (/settings): saved in the same "web_users" collection the website uses
+# =====================================================================
+DEFAULT_USER_SETTINGS = {"bot_dms": True, "inbox_notify": True, "theme_mode": "default", "blocked": []}
+LOCAL_USER_SETTINGS: Dict[str, dict] = {}
+THEME_MODES = ("default", "dark", "light")
+
+
+def get_user_settings(user_id) -> dict:
+    uid = str(user_id)
+    doc = dict(LOCAL_USER_SETTINGS.get(uid, {}))
+    if db_web_users is not None:
+        try:
+            doc = db_web_users.find_one({"_id": uid}) or {}
+        except Exception as e:
+            print(f"[Settings Read Error] {e}")
+    result = dict(DEFAULT_USER_SETTINGS)
+    for key in ("bot_dms", "inbox_notify"):
+        if isinstance(doc.get(key), bool):
+            result[key] = doc[key]
+    if doc.get("theme_mode") in THEME_MODES:
+        result["theme_mode"] = doc["theme_mode"]
+    result["blocked"] = [str(b) for b in (doc.get("blocked") or [])]
+    return result
+
+
+def set_user_settings(user_id, **fields) -> bool:
+    uid = str(user_id)
+    LOCAL_USER_SETTINGS.setdefault(uid, {}).update(fields)
+    if db_web_users is not None:
+        try:
+            db_web_users.update_one({"_id": uid}, {"$set": fields}, upsert=True)
+        except Exception as e:
+            print(f"[Settings Save Error] {e}")
+            return False
+    return True
+
+
+def user_allows_dms(user_id) -> bool:
+    """False if the person turned off optional bot messages in /settings. Payment, moderation and reminder DMs ignore this."""
+    return get_user_settings(user_id)["bot_dms"]
+
+
+def remove_inbox_from(user_id, sender_ids) -> None:
+    """Deletes designs that blocked people already sent to this user (website inbox)."""
+    if db_web_inbox is not None and sender_ids:
+        try:
+            db_web_inbox.delete_many({"to": str(user_id), "from": {"$in": [str(x) for x in sender_ids]}})
+        except Exception as e:
+            print(f"[Inbox Cleanup Error] {e}")
 
 
 # =====================================================================
@@ -4056,6 +4114,8 @@ class FeaturesCog(commands.Cog):
                 await self.send_backup_dm(submitting_user_id, guild.name, safety_backup["backup_id"])
 
     async def send_backup_dm(self, user_id: str, guild_name: str, backup_id: str):
+        if not user_allows_dms(user_id):
+            return
         embed = discord.Embed(
             title="Build Finished",
             description=(
@@ -4074,6 +4134,8 @@ class FeaturesCog(commands.Cog):
             print(f"[Backup DM Error] {e}")
 
     async def send_limit_dm(self, user_id: str, limit: int, reset_unix: int):
+        if not user_allows_dms(user_id):
+            return
         try:
             user = await self.bot.fetch_user(int(user_id))
             await user.send(embed=build_limit_embed(limit, reset_unix))

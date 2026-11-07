@@ -605,6 +605,9 @@ def notify_design_received(to_id: str, from_id: str, from_name: str, counts: tup
     """DMs the receiver that a design arrived and who sent it. No text from the sender is included.
     Only one DM per sender and receiver per hour, so nobody can be spammed. Never raises."""
     try:
+        target = _web_user(to_id) or {}
+        if target.get("bot_dms") is False or target.get("inbox_notify") is False:
+            return  # the receiver turned these DMs off with /settings
         if not DISCORD_BOT_TOKEN or not _rate_ok(_DM_LOG, f"{from_id}>{to_id}", 1, 3600):
             return
         headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
@@ -860,6 +863,7 @@ def index():
     is_premium = False
     if user and user.get("id") and not _web_user(user["id"]):
         remember_web_user(user["id"], user.get("username"), user.get("username"), user.get("avatar"))  # for people who logged in before
+    personal_theme = ((_web_user(user["id"]) or {}).get("theme_mode") if user and user.get("id") else "") or ""
     pending_share = session.get("pending_share", "") if user else ""
     if pending_share:
         session.pop("pending_share", None)
@@ -882,7 +886,7 @@ def index():
         is_premium=is_premium,
         discord_client_id=DISCORD_CLIENT_ID,
         subscription_price=get_subscription_price(),
-        site_theme=get_site_theme(),
+        site_theme=(personal_theme if personal_theme in ("dark", "light") else get_site_theme()),
         free_mode=get_free_mode(),
         pending_share=pending_share,
         roblox_store_url=os.environ.get("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()

@@ -131,6 +131,9 @@ from cogs.features import (
     extend_user_premium,
     set_staff_role,
     get_staff_role,
+    get_user_settings,
+    set_user_settings,
+    remove_inbox_from,
 )
 
 # -------------------------------------------------------------
@@ -143,7 +146,7 @@ STAFF_COMMANDS = {"staff", "premiums"}  # only HARDCODED_STAFF may run these
 
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox", "gameinfo", "timestamp", "remind",
-    "afk", "info", "redeem", "promo", "shop", "daily",
+    "afk", "info", "redeem", "promo", "shop", "daily", "settings",
 }
 ADMIN_COMMANDS = {
     "groupcheck", "nick", "role", "send", "mod", "channel", "cases", "giveaway", "greeting", "messagelog", "backup", "analyze", "ticket",
@@ -798,6 +801,132 @@ def backup_embed(backup: dict, title: str, description: str, color: int = COLOR_
     embed.add_field(name="Saved", value="\n".join(f"\u2022 {x}" for x in BACKUP_SAVED), inline=False)
     embed.add_field(name="Not Saved", value="\n".join(f"\u2022 {x}" for x in BACKUP_NOT_SAVED), inline=False)
     return embed
+
+
+THEME_LABELS = {"default": "Server default (seasonal)", "dark": "Dark", "light": "Light"}
+
+
+class SettingsView(discord.ui.View):
+    """Personal settings window for /settings. Only the person who opened it can use it."""
+
+    def __init__(self, bot, user_id: int):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.user_id = user_id
+
+    async def _name(self, uid: str) -> str:
+        user = self.bot.get_user(int(uid))
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(int(uid))
+            except Exception:
+                user = None
+        return f"{user.name}" if user else f"User {uid[-4:]}"
+
+    async def build_embed(self, s: dict) -> discord.Embed:
+        embed = discord.Embed(title="Your Settings", description="Change how the bot and the website treat you. Only you can see this.", color=COLOR_GOLD)
+        embed.add_field(
+            name="Bot Messages",
+            value=f"`{'On' if s['bot_dms'] else 'Off'}`\nBoost notices, build finished notes and limit notices by DM.",
+            inline=True
+        )
+        embed.add_field(
+            name="Inbox Notifications",
+            value=f"`{'On' if s['inbox_notify'] else 'Off'}`\nA DM when someone sends you a design." + ("" if s["bot_dms"] else "\nNeeds Bot Messages turned on."),
+            inline=True
+        )
+        embed.add_field(name="Website Theme", value=f"`{THEME_LABELS[s['theme_mode']]}`\nOnly changes the website for you.", inline=False)
+        if s["blocked"]:
+            shown = ", ".join(f"<@{b}>" for b in s["blocked"][:15])
+            more = f" and `{len(s['blocked']) - 15}` more" if len(s["blocked"]) > 15 else ""
+            embed.add_field(name=f"Blocked on the Website ({len(s['blocked'])})", value=shown + more, inline=False)
+        else:
+            embed.add_field(name="Blocked on the Website", value="`No one`", inline=False)
+        embed.set_footer(text="Payment, moderation and reminder DMs are always sent.")
+        return embed
+
+    async def build_items(self, s: dict):
+        self.clear_items()
+        dms = discord.ui.Button(label=f"Bot Messages: {'On' if s['bot_dms'] else 'Off'}",
+                                style=discord.ButtonStyle.success if s["bot_dms"] else discord.ButtonStyle.secondary, row=0)
+        dms.callback = self.toggle_dms
+        notify = discord.ui.Button(label=f"Inbox Notifications: {'On' if s['inbox_notify'] else 'Off'}",
+                                   style=discord.ButtonStyle.success if s["inbox_notify"] else discord.ButtonStyle.secondary, row=0)
+        notify.callback = self.toggle_notify
+        self.add_item(dms)
+        self.add_item(notify)
+
+        theme = discord.ui.Select(placeholder="Website theme (only for you)", row=1, options=[
+            discord.SelectOption(label=label, value=key, default=(key == s["theme_mode"]),
+                                 description="Seasonal themes can show up" if key == "default" else "No seasonal themes for you")
+            for key, label in THEME_LABELS.items()
+        ])
+        theme.callback = self.pick_theme
+        self.add_item(theme)
+
+        block = discord.ui.UserSelect(placeholder="Block someone on the website", min_values=1, max_values=5, row=2)
+        block.callback = self.block_users
+        self.add_item(block)
+
+        if s["blocked"]:
+            names = [await self._name(b) for b in s["blocked"][:25]]
+            unblock = discord.ui.Select(placeholder="Unblock someone", row=3, options=[
+                discord.SelectOption(label=names[i][:100], value=b) for i, b in enumerate(s["blocked"][:25])
+            ])
+            unblock.callback = self.unblock_user
+            self.add_item(unblock)
+            clear = discord.ui.Button(label="Unblock everyone", style=discord.ButtonStyle.danger, row=4)
+            clear.callback = self.unblock_all
+            self.add_item(clear)
+
+    async def refresh(self, interaction: discord.Interaction):
+        s = get_user_settings(self.user_id)
+        await self.build_items(s)
+        await interaction.response.edit_message(embed=await self.build_embed(s), view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("These are not your settings. Run `/settings` yourself.", ephemeral=True)
+            return False
+        return True
+
+    async def toggle_dms(self, interaction: discord.Interaction):
+        set_user_settings(self.user_id, bot_dms=not get_user_settings(self.user_id)["bot_dms"])
+        await self.refresh(interaction)
+
+    async def toggle_notify(self, interaction: discord.Interaction):
+        set_user_settings(self.user_id, inbox_notify=not get_user_settings(self.user_id)["inbox_notify"])
+        await self.refresh(interaction)
+
+    async def pick_theme(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        if value in THEME_LABELS:
+            set_user_settings(self.user_id, theme_mode=value)
+        await self.refresh(interaction)
+
+    async def block_users(self, interaction: discord.Interaction):
+        s = get_user_settings(self.user_id)
+        blocked = list(s["blocked"])
+        added = []
+        for user in interaction.data.get("values", []):
+            uid = str(user)
+            if uid != str(self.user_id) and uid not in blocked and len(blocked) < 200:
+                blocked.append(uid)
+                added.append(uid)
+        if added:
+            set_user_settings(self.user_id, blocked=blocked)
+            remove_inbox_from(self.user_id, added)
+        await self.refresh(interaction)
+
+    async def unblock_user(self, interaction: discord.Interaction):
+        target = interaction.data["values"][0]
+        s = get_user_settings(self.user_id)
+        set_user_settings(self.user_id, blocked=[b for b in s["blocked"] if b != target])
+        await self.refresh(interaction)
+
+    async def unblock_all(self, interaction: discord.Interaction):
+        set_user_settings(self.user_id, blocked=[])
+        await self.refresh(interaction)
 
 
 class BackupConfirmView(discord.ui.View):
@@ -2361,6 +2490,13 @@ class CommandsCog(commands.Cog):
         if not entries:
             pages = [embed_info(f"Moderation Log | {user.name}", f"{user.mention} has no moderation records.")]
         await send_pages(interaction, pages, ephemeral=True)
+
+    @app_commands.command(name="settings", description="Your personal settings: bot messages, inbox notifications, blocked users and website theme.")
+    async def settings_cmd(self, interaction: discord.Interaction):
+        view = SettingsView(self.bot, interaction.user.id)
+        s = get_user_settings(interaction.user.id)
+        await view.build_items(s)
+        await interaction.response.send_message(embed=await view.build_embed(s), view=view, ephemeral=True)
 
     # =============================================================
     # MERGED COMMANDS: one command, many actions

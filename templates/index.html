@@ -75,6 +75,50 @@ function checkAuthStatus() {
 --mono: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
+/* Personal light theme: chosen with /settings in the bot. It only affects that person. */
+[data-theme="light"] {
+--bg-base: #e8eff6;
+--grid-minor: rgba(30, 70, 120, 0.07);
+--grid-major: rgba(30, 70, 120, 0.15);
+--panel-bg: #ffffff;
+--panel-border: #5f86ad;
+--glass-inner-bg: #f0f5fa;
+--glass-inner-border: #b6cbe0;
+--input-bg: #ffffff;
+--input-border: #98b4cf;
+--discord-dark: #dde7f1;
+--discord-sidebar: #e3ecf5;
+--discord-channel: #35577a;
+--discord-hover: rgba(212, 88, 15, 0.14);
+--text-title: #0d2238;
+--text-sub: #35546f;
+--text-muted: #5f7b97;
+--accent-purple: #d4580f;
+--accent-purple-glow: rgba(212, 88, 15, 0.35);
+--accent-soft: rgba(212, 88, 15, 0.18);
+--accent-soft-2: rgba(212, 88, 15, 0.1);
+--accent-soft-3: rgba(212, 88, 15, 0.08);
+--accent-edge: #8a3a06;
+--on-accent: #ffffff;
+--card-bg: #f6f9fc;
+--card-border: #b6cbe0;
+--gold-glass-bg: rgba(201, 150, 43, 0.12);
+--gold-glass-border: #b8862a;
+--gold-glass-glow: 4px 4px 0 rgba(13, 34, 56, 0.15);
+}
+[data-theme="light"] body,
+[data-theme="light"] .form-control,
+[data-theme="light"] .form-control option,
+[data-theme="light"] .discord-channel-item:hover,
+[data-theme="light"] .discord-channel-item.active,
+[data-theme="light"] .add-btn-inline:hover { color: var(--text-title); }
+[data-theme="light"] .form-control option { background: #ffffff; }
+[data-theme="light"] .btn-discord,
+[data-theme="light"] .btn-discord *,
+[data-theme="light"] .inbox-badge,
+[data-theme="light"] .new-tag,
+[data-theme="light"] .chat-msg.user { color: #ffffff !important; }
+
 /* Seasonal themes: picked with the bot's /theme command. Only colors change, never the layout. */
 [data-theme="winter"] {
 --bg-base: #07131f;
