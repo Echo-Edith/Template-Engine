@@ -14,8 +14,24 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET", "").strip()
 if not app.secret_key:
     # No hard-coded secret (anyone could forge logins with it). Set SESSION_SECRET in production.
-    print("[Warning] SESSION_SECRET is not set. Using a random key: logins reset on every restart.")
-    app.secret_key = secrets.token_hex(32)
+    # Without it, use a key made from the Discord client secret, so logins survive restarts and serverless cold starts.
+    _base = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
+    if _base:
+        import hashlib
+        app.secret_key = hashlib.sha256(("te-session|" + _base).encode()).hexdigest()
+        print("[Warning] SESSION_SECRET is not set. Using a key made from DISCORD_CLIENT_SECRET.")
+    else:
+        print("[Warning] SESSION_SECRET is not set. Using a random key: logins reset on every restart.")
+        app.secret_key = secrets.token_hex(32)
+
+# Stay logged in: the login cookie lasts 30 days (it is refreshed every visit)
+from datetime import timedelta as _td
+app.permanent_session_lifetime = _td(days=30)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("DISCORD_REDIRECT_URI", "").strip().startswith("https://"),
+)
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "").strip()
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
@@ -190,6 +206,10 @@ def login():
         f"https://discord.com/api/oauth2/authorize?client_id={DISCORD_CLIENT_ID}"
         f"&redirect_uri={requests.utils.quote(DISCORD_REDIRECT_URI)}&response_type=code&scope={scope}"
     )
+    # prompt=none: if this Discord account already allowed the site, Discord signs in at once with no screen.
+    # First time (or after the person removed access), Discord sends them back with an error and we ask normally.
+    if not request.args.get("force"):
+        discord_auth_url += "&prompt=none"
     return redirect(discord_auth_url)
 
 
@@ -197,6 +217,9 @@ def login():
 def callback():
     code = request.args.get("code")
     if not code:
+        # prompt=none cannot sign in silently (never allowed before, or Discord needs a login): show the normal screen
+        if request.args.get("error") in ("interaction_required", "login_required", "consent_required"):
+            return redirect(url_for("login", force=1))
         return redirect(url_for("index"))
 
     data = {
@@ -226,6 +249,7 @@ def callback():
         user_id = user_data.get("id")
         avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_id}.png" if avatar_id else "https://cdn.discordapp.com/embed/avatars/0.png"
 
+        session.permanent = True
         session["user"] = {
             "id": user_id,
             "username": user_data.get("username"),
