@@ -682,11 +682,11 @@ gap: 6px;
 .tpl-card .tpl-name { font-weight: 700; }
 .tpl-card .tpl-desc, .tpl-card .tpl-meta, .hist-meta { font-size: 0.78rem; color: var(--text-sub); }
 .tpl-card button { margin-top: auto; padding: 10px; }
-.hist-item { background: var(--card-bg); border: 2px solid var(--card-border); border-radius: 2px; padding: 12px 14px; margin-bottom: 10px; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.hist-item { background: var(--card-bg); border: 2px solid var(--card-border); border-radius: 2px; padding: 12px 14px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 10px; align-items: stretch; min-width: 0; }
 .hist-title { font-weight: 600; word-break: break-word; }
 .hist-kind { font-size: 0.68rem; letter-spacing: 1px; text-transform: uppercase; color: var(--accent-purple); font-weight: 700; }
-.hist-actions { display: flex; gap: 8px; }
-.hist-actions button { width: auto; padding: 8px 14px; font-size: 0.82rem; }
+.hist-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 8px; width: 100%; }
+.hist-actions button { width: 100%; min-width: 0; padding: 9px 6px; font-size: 0.74rem; white-space: nowrap; }
 .editor-card {
 background: var(--card-bg);
 border: 2px solid var(--card-border);
