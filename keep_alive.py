@@ -61,6 +61,16 @@ def get_subscription_price() -> int:
 SITE_THEMES = {"blueprint", "winter", "halloween", "christmas", "spring", "summer", "stpatrick"}
 
 
+def get_free_mode() -> bool:
+    """True while the owner has turned on /free in the bot (same database)."""
+    if db_settings is not None:
+        try:
+            return bool((db_settings.find_one({"_id": "free_mode"}) or {}).get("on", False))
+        except Exception as e:
+            print(f"[Free Mode Read Error] {e}")
+    return False
+
+
 def get_site_theme() -> str:
     """Theme chosen with the bot's /theme command (same database). Falls back to the default."""
     if db_settings is not None:
@@ -127,6 +137,7 @@ def index():
         discord_client_id=DISCORD_CLIENT_ID,
         subscription_price=get_subscription_price(),
         site_theme=get_site_theme(),
+        free_mode=get_free_mode(),
         roblox_store_url=os.environ.get("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
     )
 

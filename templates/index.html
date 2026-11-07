@@ -1078,7 +1078,7 @@ background: var(--accent-purple-glow) !important;
 <i class="fa-solid fa-circle-check fa-3x" style="color: var(--accent-green); margin-bottom: 18px;"></i>
 <div class="brand-header">
 <h1 id="final-title-heading">Blueprint Submitted!</h1>
-<p id="final-desc-text">Your blueprint has been sent to the bot. It will be built automatically once your payment (Robux or points) is verified.</p>
+<p id="final-desc-text">{% if free_mode %}Your blueprint has been sent to the bot. It will be built automatically.{% else %}Your blueprint has been sent to the bot. It will be built automatically once your payment (Robux or points) is verified.{% endif %}</p>
 </div>
 <button class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="resetBuilder()" style="margin-top: 10px;">
 Start New Layout
@@ -1116,11 +1116,17 @@ Continue in 5s
 </h3>
 <i class="fa-solid fa-xmark" onclick="closeRobuxNoticeModal()" style="cursor:pointer; font-size:1.2rem;"></i>
 </div>
+{% if free_mode %}
+<div class="robux-badge" style="border-color: var(--accent-green); color: var(--accent-green);">
+<strong>Free right now:</strong> Building a server layout needs no payment at the moment. Submit your design and the bot builds it.
+</div>
+{% else %}
 <div class="robux-badge">
 <strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout costs Robux or server points, unless you have an active <strong>TE Premium</strong> subscription ({{ subscription_price }} Robux/mo).
 </div>
+{% endif %}
 <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
-Submitting this design sends your blueprint to the bot. The bot then DMs you the ways to pay (Robux, server points or TE Premium) and builds your server automatically once your payment is verified. No staff review is needed.
+{% if free_mode %}Submitting this design sends your blueprint to the bot. It builds your server automatically. No staff review is needed.{% else %}Submitting this design sends your blueprint to the bot. The bot then DMs you the ways to pay (Robux, server points or TE Premium) and builds your server automatically once your payment is verified. No staff review is needed.{% endif %}
 </p>
 <div style="display:flex; gap:10px;">
 <button class="btn-glass btn-secondary" onclick="closeRobuxNoticeModal()">

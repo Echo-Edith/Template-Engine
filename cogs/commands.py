@@ -12,6 +12,8 @@ from discord.ext import commands
 from discord import app_commands
 
 from cogs.features import (
+    is_free_mode,
+    set_free_mode,
     user_has_premium,
     SITE_THEMES,
     WEBSITE_URL,
@@ -2675,6 +2677,33 @@ class CommandsCog(commands.Cog):
     async def _ac_delete(self, interaction: discord.Interaction, current: str):
         return await self._giveaway_choices(interaction, current)
 
+
+    # =============================================================
+    # FREE MODE: /free (on, off, status)
+    # =============================================================
+    @app_commands.command(name="free", description="Make server builds free for everyone, or turn it off again (owner only).")
+    @app_commands.describe(action="Turn free mode on, off, or check it.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Turn On (builds are free)", value="on"),
+        app_commands.Choice(name="Turn Off (back to paid)", value="off"),
+        app_commands.Choice(name="Status", value="status"),
+    ])
+    async def free_cmd(self, interaction: discord.Interaction, action: app_commands.Choice[str]):
+        await interaction.response.defer(ephemeral=True)
+        if action.value == "status":
+            on = is_free_mode()
+            await interaction.followup.send(embed=embed_info("Free Mode", f"Free mode is **{'ON' if on else 'OFF'}**.", COLOR_GOLD if on else COLOR_GRAY), ephemeral=True)
+            return
+        want = action.value == "on"
+        saved = set_free_mode(want, str(interaction.user.id))
+        if want:
+            embed = embed_ok("Free Mode Is ON", "Server builds need **no payment** now. Standard members are built right away, with no DM and no points.")
+        else:
+            embed = embed_ok("Free Mode Is OFF", "Builds are paid again (Robux, points or TE Premium).")
+        embed.add_field(name="Change It Back", value="`/free`", inline=False)
+        if not saved:
+            embed.add_field(name="Warning", value="It could not be saved to the database, so the website may not show the change.", inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # =============================================================
     # WEBSITE THEME: /theme set, /theme view

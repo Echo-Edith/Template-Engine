@@ -1605,6 +1605,37 @@ async def sync_boost_rewards(bot: commands.Bot) -> int:
     return changed
 
 
+# =====================================================================
+# FREE MODE (/free): server builds need no payment while it is on.
+# =====================================================================
+LOCAL_FREE_MODE = {"on": False}
+
+
+def is_free_mode() -> bool:
+    on = LOCAL_FREE_MODE["on"]
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "free_mode"}) or {}
+            on = bool(doc.get("on", False))
+        except Exception as e:
+            print(f"[Free Mode Read Error] {e}")
+    return on
+
+
+def set_free_mode(on: bool, by: str = "") -> bool:
+    """Turns free mode on or off. Returns False if it could not be saved to the database."""
+    LOCAL_FREE_MODE["on"] = bool(on)
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": "free_mode"}, {"$set": {"on": bool(on), "changed_by": str(by),
+                                   "changed_at": datetime.now(timezone.utc).timestamp()}}, upsert=True)
+            return True
+        except Exception as e:
+            print(f"[Free Mode Save Error] {e}")
+            return False
+    return False
+
+
 DESIGN_DONE: set = set()  # design messages already handled (so the DM is sent once)
 LOCAL_PRICES: Dict[str, int] = {}
 
@@ -3863,11 +3894,11 @@ class FeaturesCog(commands.Cog):
             await self.notify_build_denied(submitting_user_id, guild.name, reason)
             return
 
-        if not is_premium_submission and str(getattr(channel, 'id', 0)) != str(PREMIUM_DESIGN_CHANNEL_ID):
+        if not is_premium_submission and str(getattr(channel, 'id', 0)) != str(PREMIUM_DESIGN_CHANNEL_ID) and not is_free_mode():
             print(f"[Frontend Direct DM] Initiating direct DM with 5 retries to submitter {submitting_user_id} before logging...")
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, channel)
         else:
-            print(f"[Auto-Build] Premium deployment for {guild.name} ({guild.id})")
+            print(f"[Auto-Build] {'Free mode' if is_free_mode() and not is_premium_submission else 'Premium'} deployment for {guild.name} ({guild.id})")
             await self.execute_auto_build(guild, layout)
 
     async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None):
