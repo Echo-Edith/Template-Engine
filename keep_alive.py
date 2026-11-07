@@ -700,7 +700,7 @@ def api_design_send(design_id):
         layout = json.loads(json.dumps(doc["layout"]))
         layout.pop("build_meta", None)
         item = {"_id": uuid.uuid4().hex, "to": to, "from": me, "from_name": str(user.get("username", "User"))[:40],
-                "layout": layout, "created_at": datetime.now(timezone.utc).timestamp()}
+                "read": False, "layout": layout, "created_at": datetime.now(timezone.utc).timestamp()}
         if db_inbox is not None:
             db_inbox.insert_one(item)
         else:
@@ -741,13 +741,33 @@ def api_inbox():
         for i in _inbox_items(me):
             cats, chans, roles = _count_layout(i.get("layout", {}))
             items.append({"id": i["_id"], "from_name": i.get("from_name", "User"), "created_at": i["created_at"],
-                          "categories": cats, "channels": chans, "roles": roles})
+                          "categories": cats, "channels": chans, "roles": roles, "unread": not i.get("read", False)})
         me_doc = _web_user(me) or {}
-        return jsonify({"success": True, "items": items, "accepts": me_doc.get("accepts") is not False,
+        return jsonify({"success": True, "items": items, "unread": sum(1 for i in items if i["unread"]),
+                        "accepts": me_doc.get("accepts") is not False,
                         "blocked_count": len(me_doc.get("blocked") or [])})
     except Exception as e:
         print(f"[Inbox Error] {e}")
         return jsonify({"success": False, "error": "Could not load your inbox."}), 500
+
+
+@app.route("/api/inbox/mark-read", methods=["POST"])
+def api_inbox_mark_read():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    me = str(user["id"])
+    try:
+        if db_inbox is not None:
+            db_inbox.update_many({"to": me, "read": {"$ne": True}}, {"$set": {"read": True}})
+        else:
+            for i in LOCAL_INBOX:
+                if i["to"] == me:
+                    i["read"] = True
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"[Inbox Read Error] {e}")
+        return jsonify({"success": False, "error": "Something went wrong."}), 500
 
 
 @app.route("/api/inbox/<item_id>/<action>", methods=["POST"])

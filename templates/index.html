@@ -661,13 +661,16 @@ gap: 6px;
 
 .page-nav { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
 .page-nav .btn-glass { margin-top: 0; }
-.landing-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+.landing-links { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 12px; }
 .landing-links .btn-glass { padding: 12px 6px; font-size: 0.72rem; }
 .usage-meter { margin-top: 14px; display: grid; gap: 8px; }
 .usage-row { font-size: 0.8rem; color: var(--text-sub); }
 .usage-row b { color: inherit; }
 .usage-bar { height: 8px; background: var(--card-border); border-radius: 1px; margin-top: 4px; overflow: hidden; }
 .usage-bar > span { display: block; height: 100%; background: var(--accent-purple); }
+.inbox-btn { position: relative; }
+.inbox-badge { background: #f43f5e; color: #fff; border-radius: 999px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 0.68rem; line-height: 18px; text-align: center; margin-left: 6px; display: inline-block; }
+.new-tag { background: #f43f5e; color: #fff; border-radius: 2px; padding: 1px 6px; font-size: 0.62rem; margin-left: 6px; letter-spacing: 1px; }
 .person-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid var(--card-border); }
 .person-row img { width:32px; height:32px; border-radius:50%; margin-right:10px; vertical-align:middle; }
 .lb-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--card-border); font-size:0.9rem; }
@@ -970,8 +973,9 @@ background: var(--accent-purple-glow) !important;
 {% if user %}
 <div class="landing-links">
 <button class="btn-glass btn-secondary-link" onclick="openTemplates()"><i class="fa-solid fa-table-cells-large"></i> Templates</button>
-<button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs<span class="inbox-badge"></span></button>
+<button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs</button>
 <button class="btn-glass btn-secondary-link" onclick="openPoints()"><i class="fa-solid fa-coins"></i> My Points</button>
+<button class="btn-glass btn-secondary-link inbox-btn" onclick="openInbox()"><i class="fa-solid fa-inbox"></i> Inbox<span class="inbox-badge" style="display:none;"></span></button>
 </div>
 <div class="usage-meter" id="usage-meter-landing"></div>
 {% endif %}
@@ -1003,17 +1007,13 @@ background: var(--accent-purple-glow) !important;
 <button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
 </div>
 
-<!-- PAGE: MY DESIGNS -->
-<div id="page-history" class="page">
+<!-- PAGE: INBOX -->
+<div id="page-inbox" class="page">
 <div class="brand-header">
-<h1>My Designs</h1>
-<p>Everything you made on this site. Open any item to keep working on it.</p>
+<h1>Inbox</h1>
+<p>Designs other people sent you. Only designs can be sent, never text.</p>
 </div>
-<div id="inbox-section" style="display:none; margin-bottom:18px;">
-<div class="label-heading">INBOX: DESIGNS PEOPLE SENT YOU</div>
-<div id="inbox-list"></div>
-</div>
-<div id="history-list"></div>
+<div id="inbox-list"><p style="color:var(--text-sub);">Loading...</p></div>
 <div class="editor-card" style="margin-top:16px;">
 <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
 <input type="checkbox" id="accept-shares" style="margin-top:4px;" onchange="saveShareSettings()">
@@ -1023,6 +1023,17 @@ background: var(--accent-purple-glow) !important;
 <span id="blocked-count"></span> <a href="#" onclick="clearBlocked(); return false;" style="color:var(--accent-purple);">Unblock everyone</a>
 </div>
 </div>
+<button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
+</div>
+
+<!-- PAGE: MY DESIGNS -->
+<div id="page-history" class="page">
+<div class="brand-header">
+<h1>My Designs</h1>
+<p>Everything you made on this site. Open any item to keep working on it.</p>
+</div>
+<div id="history-list"></div>
+
 <button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
 </div>
 
@@ -1496,20 +1507,18 @@ async function sendDesignTo(userId, btn) {
 }
 
 // ---------- inbox ----------
-async function refreshInbox() {
+async function refreshInbox(markRead) {
     if (!IS_USER_LOGGED_IN) return;
     try {
         const res = await fetch('/api/inbox');
         const d = await res.json();
         if (!res.ok || !d.success) return;
-        const section = document.getElementById('inbox-section');
         const list = document.getElementById('inbox-list');
         if (list) {
-            section.style.display = d.items.length ? 'block' : 'none';
-            list.innerHTML = d.items.map(i => `
+            list.innerHTML = d.items.length ? d.items.map(i => `
                 <div class="hist-item" id="inbox-${i.id}">
                     <div>
-                        <div class="hist-kind">From @${escapeHtml(i.from_name)}</div>
+                        <div class="hist-kind">From @${escapeHtml(i.from_name)}${i.unread ? '<span class="new-tag">NEW</span>' : ''}</div>
                         <div class="hist-title">Shared design</div>
                         <div class="hist-meta">${new Date(i.created_at * 1000).toLocaleString()} \u2022 ${i.categories} categories, ${i.channels} channels, ${i.roles} roles</div>
                     </div>
@@ -1518,7 +1527,7 @@ async function refreshInbox() {
                         <button class="btn-glass btn-secondary-link" onclick="inboxAction('${i.id}', 'decline')">Decline</button>
                         <button class="btn-glass btn-secondary-link" onclick="inboxAction('${i.id}', 'block')">Block</button>
                     </div>
-                </div>`).join('');
+                </div>`).join('') : '<p style="color:var(--text-sub);">No designs yet. When someone sends you a design, it shows up here.</p>';
         }
         const box = document.getElementById('accept-shares');
         if (box) box.checked = d.accepts;
@@ -1527,7 +1536,14 @@ async function refreshInbox() {
             info.style.display = d.blocked_count ? 'block' : 'none';
             document.getElementById('blocked-count').textContent = `You blocked ${d.blocked_count} ${d.blocked_count === 1 ? 'person' : 'people'}.`;
         }
-        document.querySelectorAll('.inbox-badge').forEach(el => { el.textContent = d.items.length ? ` (${d.items.length})` : ''; });
+        const shownUnread = markRead ? 0 : d.unread;
+        document.querySelectorAll('.inbox-badge').forEach(el => {
+            el.textContent = shownUnread;
+            el.style.display = shownUnread > 0 ? 'inline-block' : 'none';
+        });
+        if (markRead && d.unread > 0) {
+            fetch('/api/inbox/mark-read', { method: 'POST' }).catch(() => {});
+        }
     } catch (e) { /* optional */ }
 }
 
@@ -1538,9 +1554,7 @@ async function inboxAction(id, action) {
         const d = await res.json();
         if (!res.ok || !d.success) { alert(d.error || 'Something went wrong.'); refreshInbox(); return; }
         if (action === 'accept') { loadLayoutIntoEditor(d.blueprint); }
-        refreshInbox();
-        if (action === 'accept') return;
-        openHistory();
+        refreshInbox(true);
     } catch (e) {
         alert('Could not reach the server. Please try again.');
     }
@@ -1557,7 +1571,7 @@ async function clearBlocked() {
     if (!confirm('Unblock everyone?')) return;
     try {
         await fetch('/api/share-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear_blocked: true }) });
-        refreshInbox();
+        refreshInbox(true);
     } catch (e) { alert('Could not save. Please try again.'); }
 }
 
@@ -1667,9 +1681,13 @@ async function useTemplate(id, btn) {
 
 const HISTORY_KIND_LABELS = { generated: 'AI Generated', ai_edit: 'AI Edit', template: 'Template', submitted: 'Submitted', shared: 'Shared With Me' };
 
+function openInbox() {
+    navigateTo('page-inbox');
+    refreshInbox(true);  // shows NEW marks first, then marks everything as read
+}
+
 async function openHistory() {
     navigateTo('page-history');
-    refreshInbox();
     const list = document.getElementById('history-list');
     list.innerHTML = '<p style="color:var(--text-sub);">Loading...</p>';
     try {
