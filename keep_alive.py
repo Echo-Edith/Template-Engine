@@ -48,6 +48,7 @@ db_premium = None
 db_users = None
 db_settings = None
 db_designs = None
+db_shop = None
 LOCAL_DESIGNS = []  # used only when there is no database
 
 if MONGO_URI:
@@ -61,6 +62,7 @@ if MONGO_URI:
         db_users = db["persistent_users"]
         db_settings = db["settings"]
         db_designs = db["web_designs"]
+        db_shop = db["shop_items"]
     except Exception as e:
         print(f"[MongoDB Warning in Flask] {e}")
 
@@ -321,7 +323,7 @@ def api_template_use(template_id):
 # -------------------------------------------------------------
 # MY DESIGNS: everything a member did (no limit)
 # -------------------------------------------------------------
-DESIGN_KINDS = {"generated", "ai_edit", "template", "submitted"}
+DESIGN_KINDS = {"generated", "ai_edit", "template", "submitted", "shared"}
 
 
 def save_design(user_id: str, kind: str, title: str, layout: dict, extra: Optional[dict] = None):
@@ -394,11 +396,199 @@ def api_design_one(design_id):
         return jsonify({"success": False, "error": "Something went wrong."}), 500
 
 
+
+# -------------------------------------------------------------
+# SHARE A DESIGN: a link anyone can open (after logging in) to copy the layout
+# -------------------------------------------------------------
+@app.route("/api/designs/<design_id>/share", methods=["POST"])
+def api_design_share(design_id):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    uid = str(user["id"])
+    try:
+        if db_designs is not None:
+            doc = db_designs.find_one({"_id": design_id, "user_id": uid})
+        else:
+            doc = next((d for d in LOCAL_DESIGNS if d["_id"] == design_id and d["user_id"] == uid), None)
+        if not doc:
+            return jsonify({"success": False, "error": "Design not found."}), 404
+        share_id = doc.get("share_id") or uuid.uuid4().hex[:10]
+        if db_designs is not None:
+            db_designs.update_one({"_id": design_id}, {"$set": {"share_id": share_id}})
+        else:
+            doc["share_id"] = share_id
+        return jsonify({"success": True, "url": request.host_url.rstrip("/") + "/s/" + share_id})
+    except Exception as e:
+        print(f"[Share Error] {e}")
+        return jsonify({"success": False, "error": "Could not create the link."}), 500
+
+
+def _find_shared(share_id: str):
+    if db_designs is not None:
+        return db_designs.find_one({"share_id": share_id})
+    return next((d for d in LOCAL_DESIGNS if d.get("share_id") == share_id), None)
+
+
+@app.route("/s/<share_id>")
+def shared_link(share_id):
+    session["pending_share"] = share_id[:20]
+    return redirect(url_for("index"))
+
+
+@app.route("/api/shared/<share_id>")
+def api_shared(share_id):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    try:
+        doc = _find_shared(share_id)
+        if not doc:
+            return jsonify({"success": False, "error": "This link is not valid anymore."}), 404
+        layout = json.loads(json.dumps(doc["layout"]))
+        layout.pop("build_meta", None)
+        save_design(str(user["id"]), "shared", doc.get("title", "Shared design"), layout)
+        return jsonify({"success": True, "blueprint": layout})
+    except Exception as e:
+        print(f"[Shared Open Error] {e}")
+        return jsonify({"success": False, "error": "Something went wrong."}), 500
+
+
+# -------------------------------------------------------------
+# USAGE METER, POINTS PAGE, BUILD PROGRESS
+# -------------------------------------------------------------
+def _jst_week_key_and_reset():
+    now = datetime.now(JST)
+    iso = now.isocalendar()
+    monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return f"{iso[0]}-W{iso[1]:02d}", int((monday + timedelta(days=7)).timestamp())
+
+
+def _limit_settings() -> dict:
+    limits = {"ai_per_day": DEFAULT_AI_PER_DAY, "builds_per_week": 1}
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "limits"}) or {}
+            for key in limits:
+                value = doc.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    limits[key] = value
+        except Exception as e:
+            print(f"[Limits Read Error] {e}")
+    return limits
+
+
+def _builds_used(user_id: str) -> int:
+    week, _ = _jst_week_key_and_reset()
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": f"usage:{user_id}"}) or {}
+            return int(doc.get("build_count", 0)) if doc.get("build_week") == week else 0
+        except Exception as e:
+            print(f"[Usage Read Error] {e}")
+    return 0
+
+
+@app.route("/api/usage")
+def api_usage():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    uid = str(user["id"])
+    premium = is_user_premium(uid)
+    limits = _limit_settings()
+    now = datetime.now(JST)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return jsonify({
+        "success": True,
+        "premium": premium,
+        "free_mode": get_free_mode(),
+        "ai": {"used": ai_used_today(uid), "limit": limits["ai_per_day"], "resets": int(tomorrow.timestamp())},
+        "builds": {"used": _builds_used(uid), "limit": limits["builds_per_week"], "resets": _jst_week_key_and_reset()[1]},
+    })
+
+
+_NAME_CACHE = {}
+
+
+def _discord_name(user_id: str) -> str:
+    cached = _NAME_CACHE.get(user_id)
+    if cached and cached[1] > datetime.now().timestamp():
+        return cached[0]
+    name = f"User {user_id[-4:]}"
+    if DISCORD_BOT_TOKEN:
+        try:
+            r = requests.get(f"https://discord.com/api/v10/users/{user_id}", headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=4)
+            if r.status_code == 200:
+                j = r.json()
+                name = j.get("global_name") or j.get("username") or name
+        except Exception as e:
+            print(f"[Name Lookup Error] {e}")
+    _NAME_CACHE[user_id] = (name, datetime.now().timestamp() + 3600)
+    return name
+
+
+@app.route("/api/points")
+def api_points():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    uid = str(user["id"])
+    premium = is_user_premium(uid)
+    points, board, shop = 0, [], []
+    try:
+        if db_users is not None:
+            doc = db_users.find_one({"discord_id": uid}) or {}
+            points = int(doc.get("points", 0))
+            for row in db_users.find({"points": {"$gt": 0}}).sort("points", -1).limit(10):
+                rid = str(row.get("discord_id"))
+                board.append({"name": _discord_name(rid), "points": int(row.get("points", 0)), "you": rid == uid})
+        if db_shop is not None:
+            for item in db_shop.find({}, {"_id": 0}):
+                price = int(item.get("price", 0))
+                discount = int(item.get("premium_discount") or 0)
+                your_price = max(1, round(price * (100 - discount) / 100)) if (premium and discount > 0) else price
+                stock = item.get("stock")
+                shop.append({
+                    "name": item.get("name", "Item"), "price": price, "your_price": your_price, "discount": discount,
+                    "stock": "Unlimited" if stock is None else ("Sold out" if stock <= 0 else f"{stock} left"),
+                    "reward": ("Lifetime TE Premium" if item.get("permanent") else f"{int(item.get('premium_days', 0))} days TE Premium") if item.get("reward") == "premium"
+                              else ("Discord role" if item.get("reward") == "role" else "Delivered by staff"),
+                })
+            shop.sort(key=lambda i: (i["price"], i["name"].lower()))
+        return jsonify({"success": True, "points": points, "premium": premium, "leaderboard": board, "shop": shop})
+    except Exception as e:
+        print(f"[Points Page Error] {e}")
+        return jsonify({"success": False, "error": "Could not load your points."}), 500
+
+
+@app.route("/api/build-status/<build_id>")
+def api_build_status(build_id):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    stage = {"stage": "sent", "detail": "Waiting for the bot to pick it up...", "done": 0, "total": 0}
+    try:
+        if db_settings is not None:
+            doc = db_settings.find_one({"_id": f"build:{build_id}"})
+            if doc:
+                if str(doc.get("user_id")) != str(user["id"]):
+                    return jsonify({"success": False, "error": "Not your build."}), 403
+                stage = {k: doc.get(k) for k in ("stage", "detail", "done", "total")}
+        return jsonify({"success": True, **stage})
+    except Exception as e:
+        print(f"[Build Status Error] {e}")
+        return jsonify({"success": False, "error": "Could not read the status."}), 500
+
+
 @app.route("/")
 def index():
     user = session.get("user")
     roblox_user = session.get("roblox_user")
     is_premium = False
+    pending_share = session.get("pending_share", "") if user else ""
+    if pending_share:
+        session.pop("pending_share", None)
 
     if user and user.get("id"):
         is_premium = is_user_premium(user["id"])
@@ -420,6 +610,7 @@ def index():
         subscription_price=get_subscription_price(),
         site_theme=get_site_theme(),
         free_mode=get_free_mode(),
+        pending_share=pending_share,
         roblox_store_url=os.environ.get("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
     )
 
@@ -645,6 +836,7 @@ def submit_design_endpoint():
     json_bytes = json.dumps(attachment_data, indent=2).encode("utf-8")
 
     delivered = False
+    build_id = ""
     delivery_error = "The bot token is not configured on the server."
 
     if DISCORD_BOT_TOKEN:
@@ -664,6 +856,10 @@ def submit_design_endpoint():
             res = requests.post(url, headers=headers, files=files, timeout=20)
             if res.status_code in (200, 201):
                 delivered = True
+                try:
+                    build_id = str(res.json().get("id", ""))
+                except Exception:
+                    build_id = ""
             else:
                 delivery_error = f"Discord rejected the submission (HTTP {res.status_code})."
                 print(f"[Discord API Log Drop] Status {res.status_code}: {res.text}")
@@ -682,6 +878,7 @@ def submit_design_endpoint():
     return jsonify({
         "success": True,
         "is_premium": is_premium,
+        "build_id": build_id,
         "message": "Design submitted successfully!"
     }), 200
 

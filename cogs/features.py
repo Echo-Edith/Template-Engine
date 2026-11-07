@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import json
 import random
 import io
@@ -1731,6 +1732,28 @@ def record_build(user_id: str):
             print(f"[Usage Save Error] {e}")
 
 
+# -------------------------------------------------------------
+# BUILD PROGRESS: the website reads this to show a live progress screen
+# -------------------------------------------------------------
+LOCAL_BUILD_STATUS: Dict[str, dict] = {}
+
+
+def set_build_status(build_id, user_id, stage: str, detail: str = "", done: int = 0, total: int = 0):
+    """stage: received, waiting_payment, building, done, failed. Never raises."""
+    if not build_id:
+        return
+    doc = {"user_id": str(user_id), "stage": stage, "detail": detail[:300], "done": int(done), "total": int(total),
+           "updated_at": datetime.now(timezone.utc).timestamp()}
+    LOCAL_BUILD_STATUS[str(build_id)] = doc
+    if len(LOCAL_BUILD_STATUS) > 300:
+        LOCAL_BUILD_STATUS.pop(next(iter(LOCAL_BUILD_STATUS)))
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": f"build:{build_id}"}, {"$set": doc}, upsert=True)
+        except Exception as e:
+            print(f"[Build Status Error] {e}")
+
+
 def build_limit_embed(limit: int, reset_unix: int) -> discord.Embed:
     embed = discord.Embed(
         title="Weekly Build Limit Reached",
@@ -3182,9 +3205,10 @@ class PremiumMissingBotView(discord.ui.View):
 # INTERACTIVE UI FOR NON-PREMIUM VERIFICATION & POINTS PURCHASE
 # -------------------------------------------------------------
 class NonPremiumDeploymentView(discord.ui.View):
-    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, points_cost: int = 100):
+    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, points_cost: int = 100, build_id: str = ""):
         super().__init__(timeout=None)
         self.bot = bot
+        self.build_id = str(build_id or "")
         # The price shown in the DM is the price charged, even if /change price runs later
         self.points_cost = int(points_cost)
         self.use_points_btn.label = f"Use Points ({self.points_cost:,} Pts)"
@@ -3266,7 +3290,7 @@ class NonPremiumDeploymentView(discord.ui.View):
 
         cog = bot_inst.get_cog("FeaturesCog")
         if cog:
-            await cog.execute_auto_build(guild, self.layout)
+            await cog.execute_auto_build(guild, self.layout, "rebuild", self.build_id, self.submitting_user_id)
 
 
 
@@ -3875,12 +3899,15 @@ class FeaturesCog(commands.Cog):
 
         submitting_user_id = str(payload.get("submitting_user_id", "0"))
         target_guild_id = str(payload.get("target_server_id", "0")).strip()
+        build_id = str(message_id)
+        set_build_status(build_id, submitting_user_id, "received", "The bot got your design.")
         layout = payload.get("layout", {})
         is_premium_submission = payload.get("is_premium", False)
         build_mode = "add" if (is_premium_submission and payload.get("build_mode") == "add") else "rebuild"
 
         if not target_guild_id or target_guild_id == "0":
             print("[Auto-Build Error] Target server ID is missing or 0.")
+            set_build_status(build_id, submitting_user_id, "failed", "The Server ID is missing.")
             return
 
         # Fetch target guild
@@ -3893,11 +3920,13 @@ class FeaturesCog(commands.Cog):
                 guild = None
 
         if not guild:
+            set_build_status(build_id, submitting_user_id, "failed", "The bot is not in your server yet. Add the bot, then submit again.")
             await self.notify_missing_bot(submitting_user_id, target_guild_id, layout)
             return
 
         allowed, reason = await can_build_in_guild(guild, submitting_user_id)
         if not allowed:
+            set_build_status(build_id, submitting_user_id, "failed", "The bot could not build in this server. Check your Discord DMs.")
             await self.notify_build_denied(submitting_user_id, guild.name, reason)
             return
 
@@ -3906,12 +3935,14 @@ class FeaturesCog(commands.Cog):
         if is_standard:
             ok, limit, _used, reset_unix = check_build_limit(submitting_user_id)
             if not ok:
+                set_build_status(build_id, submitting_user_id, "failed", "You used your free builds for this week. Check your Discord DMs.")
                 await self.send_limit_dm(submitting_user_id, limit, reset_unix)
                 return
 
         if is_standard and not is_free_mode():
+            set_build_status(build_id, submitting_user_id, "waiting_payment", "Open your Discord DMs and choose how to pay (points or TE Premium).")
             print(f"[Frontend Direct DM] Initiating direct DM with 5 retries to submitter {submitting_user_id} before logging...")
-            await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, channel)
+            await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, channel, build_id)
         else:
             print(f"[Auto-Build] {'Free mode' if is_standard else 'Premium'} deployment for {guild.name} ({guild.id})")
             safety_backup = None
@@ -3923,7 +3954,7 @@ class FeaturesCog(commands.Cog):
                     safety_backup = make_auto_backup(guild, submitting_user_id)
                 except Exception as e:
                     print(f"[Auto Backup Error] {e!r}")
-            await self.execute_auto_build(guild, layout, build_mode)
+            await self.execute_auto_build(guild, layout, build_mode, build_id, submitting_user_id)
             if safety_backup:
                 await self.send_backup_dm(submitting_user_id, guild.name, safety_backup["backup_id"])
 
@@ -3952,7 +3983,7 @@ class FeaturesCog(commands.Cog):
         except Exception as e:
             print(f"[Limit DM Error] {e}")
 
-    async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None):
+    async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None, build_id: str = ""):
         user_pts = get_user_points(user_id)
         prices = get_prices()
         points_cost = prices["points_cost"]
@@ -4008,7 +4039,8 @@ class FeaturesCog(commands.Cog):
             submitting_user_id=user_id,
             target_guild_id=target_guild_id,
             layout=layout,
-            points_cost=points_cost
+            points_cost=points_cost,
+            build_id=build_id
         )
 
         dm_sent = False
@@ -4145,10 +4177,23 @@ class FeaturesCog(commands.Cog):
 
         print(f"[Nuke] {guild.name}: {failed} channels and {role_failed} roles could not be deleted.")
 
-    async def execute_auto_build(self, guild: discord.Guild, layout: dict, mode: str = "rebuild"):
+    async def execute_auto_build(self, guild: discord.Guild, layout: dict, mode: str = "rebuild", build_id: str = "", user_id: str = "0"):
         """mode "rebuild": delete everything, then build. mode "add" (TE Premium): keep the server, only add what is missing."""
         add_mode = mode == "add"
+        total_steps = len(layout.get("roles", [])) + len(layout.get("categories", [])) + sum(
+            len(c.get("channels", []) or []) for c in layout.get("categories", []))
+        progress = {"done": 0, "last": 0.0}
+
+        def tick(text: str):
+            """Counts one finished step and tells the website (at most every 1.5 seconds)."""
+            progress["done"] += 1
+            now = time.monotonic()
+            if now - progress["last"] >= 1.5:
+                progress["last"] = now
+                set_build_status(build_id, user_id, "building", text, progress["done"], total_steps)
+
         try:
+            set_build_status(build_id, user_id, "building", "Clearing the old layout..." if not add_mode else "Getting ready...", 0, total_steps)
             if not add_mode:
                 await self.nuke_guild_structure(guild)
 
@@ -4166,6 +4211,7 @@ class FeaturesCog(commands.Cog):
                 role_name = strip_emojis(r_info.get("name", "Role"))
                 if not role_name:
                     role_name = str(r_info.get("name", "Role"))
+                tick(f"Creating role: {role_name}")
                 if add_mode and any(same_name(role_name, n) for n in created_roles):
                     continue  # this role is already in the server
                 color_hex = str(r_info.get("color", "#8b5cf6")).lstrip('#')
@@ -4201,6 +4247,7 @@ class FeaturesCog(commands.Cog):
             for cat_data in categories:
                 cat_raw_name = cat_data.get("name", "CATEGORY")
                 cat_clean_name = strip_emojis(cat_raw_name) or cat_raw_name
+                tick(f"Creating category: {cat_clean_name}")
 
                 try:
                     category = None
@@ -4223,6 +4270,7 @@ class FeaturesCog(commands.Cog):
                     chan_label = str(chan.get("name") or chan.get("clean_name") or "channel")
                     try:
                         chan_clean_name = format_channel_name(chan_label)
+                        tick(f"Creating channel: {chan_clean_name}")
                         chan_type = chan.get("type", "text")
                         chan_topic = chan.get("topic", "")
                         if add_mode and any(same_name(c.name, chan_clean_name) for c in category.channels):
@@ -4248,8 +4296,10 @@ class FeaturesCog(commands.Cog):
                         await asyncio.sleep(0.2)
                     except Exception as e:
                         print(f"[Auto-Build Channel Error] {chan_label}: {e}")
+            set_build_status(build_id, user_id, "done", "Your server is ready.", total_steps, total_steps)
         except Exception as top_err:
             print(f"[Auto-Build Execution Error] {top_err}")
+            set_build_status(build_id, user_id, "failed", "The build stopped because of an error. Check the bot's permissions.", progress["done"], total_steps)
 
 
 async def setup(bot: commands.Bot):

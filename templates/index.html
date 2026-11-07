@@ -13,6 +13,8 @@
 const DISCORD_CLIENT_ID = "{{ discord_client_id or '' }}".trim();
 const IS_USER_LOGGED_IN = {{ 'true' if user else 'false' }};
 const IS_TE_PREMIUM = {{ 'true' if is_premium else 'false' }};
+const PENDING_SHARE = {{ (pending_share or '')|tojson }};
+const FREE_MODE = {{ 'true' if free_mode else 'false' }};
 
 function checkAuthStatus() {
     const btn = document.getElementById('verify-continue-btn');
@@ -657,7 +659,20 @@ justify-content: center;
 gap: 6px;
 }
 
-.landing-links { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.landing-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+.landing-links .btn-glass { padding: 12px 6px; font-size: 0.72rem; }
+.usage-meter { margin-top: 14px; display: grid; gap: 8px; }
+.usage-row { font-size: 0.8rem; color: var(--text-sub); }
+.usage-row b { color: inherit; }
+.usage-bar { height: 8px; background: var(--card-border); border-radius: 1px; margin-top: 4px; overflow: hidden; }
+.usage-bar > span { display: block; height: 100%; background: var(--accent-purple); }
+.lb-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--card-border); font-size:0.9rem; }
+.lb-row.you { font-weight:700; color: var(--accent-purple); }
+.points-big { font-size: 2.2rem; font-weight: 800; }
+.build-step { display:flex; gap:10px; align-items:center; padding:8px 0; text-align:left; font-size:0.9rem; color: var(--text-sub); }
+.build-step.active { color: inherit; font-weight:600; }
+.build-step.done { color: var(--accent-green); }
+.build-step.error { color: #f43f5e; font-weight:600; }
 .btn-secondary-link { background: transparent; color: var(--text-main, inherit); border: 2px solid var(--card-border); }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .tpl-card { background: var(--card-bg); border: 2px solid var(--card-border); border-radius: 2px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
@@ -950,9 +965,11 @@ background: var(--accent-purple-glow) !important;
 </button>
 {% if user %}
 <div class="landing-links">
-<button class="btn-glass btn-secondary-link" onclick="openTemplates()"><i class="fa-solid fa-table-cells-large"></i> Template Gallery</button>
+<button class="btn-glass btn-secondary-link" onclick="openTemplates()"><i class="fa-solid fa-table-cells-large"></i> Templates</button>
 <button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs</button>
+<button class="btn-glass btn-secondary-link" onclick="openPoints()"><i class="fa-solid fa-coins"></i> My Points</button>
 </div>
+<div class="usage-meter" id="usage-meter-landing"></div>
 {% endif %}
 </div>
 
@@ -963,6 +980,22 @@ background: var(--accent-purple-glow) !important;
 <p>Pick a ready layout. You can edit everything before you build it.</p>
 </div>
 <div id="template-grid" class="card-grid"></div>
+<button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
+</div>
+
+<!-- PAGE: MY POINTS -->
+<div id="page-points" class="page">
+<div class="brand-header">
+<h1>My Points</h1>
+<p>Earn points in the Discord server. Spend them in the shop with <code>/shop</code>.</p>
+</div>
+<div class="editor-card" style="text-align:center;">
+<div class="label-heading">YOUR BALANCE</div>
+<div class="points-big" id="points-balance">-</div>
+</div>
+<div class="editor-card"><div class="label-heading">TOP 10</div><div id="points-board"></div></div>
+<div class="editor-card"><div class="label-heading">SHOP</div><div id="points-shop"></div>
+<p style="font-size:0.75rem; color:var(--text-sub); margin-top:10px;">To buy something, use <code>/shop</code> in the Discord server.</p></div>
 <button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
 </div>
 
@@ -994,6 +1027,7 @@ background: var(--accent-purple-glow) !important;
 <label class="label-heading">SERVER INVITE LINK <span class="required">*</span></label>
 <input type="text" id="gen-server-link" class="form-control" placeholder="https://discord.gg/yourcode">
 </div>
+<div class="usage-meter" id="usage-meter-gen"></div>
 <button id="generate-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" style="margin-top: 24px;" onclick="handleAIGeneration()">
 <i class="fa-solid fa-wand-magic-sparkles"></i> <span>Generate Server Layout</span>
 </button>
@@ -1131,6 +1165,12 @@ background: var(--accent-purple-glow) !important;
 <h1 id="final-title-heading">Blueprint Submitted!</h1>
 <p id="final-desc-text">{% if free_mode %}Your blueprint has been sent to the bot. It will be built automatically.{% else %}Your blueprint has been sent to the bot. It will be built automatically once your payment (points or TE Premium) is verified.{% endif %}</p>
 </div>
+<div class="editor-card" id="build-progress-card" style="display:none; text-align:left;">
+<div class="label-heading">BUILD PROGRESS</div>
+<div id="build-steps"></div>
+<div class="usage-bar" style="margin-top:10px;"><span id="build-bar" style="width:0%"></span></div>
+<div id="build-detail" class="usage-row" style="margin-top:8px;"></div>
+</div>
 <button class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="resetBuilder()" style="margin-top: 10px;">
 Start New Layout
 </button>
@@ -1193,6 +1233,8 @@ Confirm & Submit
 <script>
 document.addEventListener("DOMContentLoaded", () => {
     checkAuthStatus();
+    refreshUsage();
+    openPendingShare();
     applyPremiumTheme();
     updateBotInviteLink();
 
@@ -1277,6 +1319,129 @@ function proceedToGenerator() {
     }, 1000);
 }
 
+// ---------- usage meter ----------
+function usageRow(label, used, limit, resets) {
+    if (limit <= 0) return `<div class="usage-row"><b>${label}:</b> no limit</div>`;
+    const pct = Math.min(100, Math.round(used / limit * 100));
+    const reset = resets ? ` \u2022 resets ${new Date(resets * 1000).toLocaleString([], {weekday:'short', hour:'2-digit', minute:'2-digit'})}` : '';
+    return `<div class="usage-row"><b>${label}:</b> ${used}/${limit}${reset}<div class="usage-bar"><span style="width:${pct}%"></span></div></div>`;
+}
+
+async function refreshUsage() {
+    if (!IS_USER_LOGGED_IN) return;
+    try {
+        const res = await fetch('/api/usage');
+        const d = await res.json();
+        if (!res.ok || !d.success) return;
+        let html;
+        if (d.premium) {
+            html = '<div class="usage-row"><b>TE Premium:</b> no limits on AI or builds</div>';
+        } else {
+            html = usageRow('AI generations today', d.ai.used, d.ai.limit, d.ai.resets)
+                 + usageRow('Builds this week', d.builds.used, d.builds.limit, d.builds.resets)
+                 + '<div class="usage-row">TE Premium has no limits.</div>';
+        }
+        document.querySelectorAll('.usage-meter').forEach(el => el.innerHTML = html);
+    } catch (e) { /* the meter is optional */ }
+}
+
+// ---------- points page ----------
+async function openPoints() {
+    navigateTo('page-points');
+    document.getElementById('points-balance').textContent = '...';
+    try {
+        const res = await fetch('/api/points');
+        const d = await res.json();
+        if (!res.ok || !d.success) { document.getElementById('points-balance').textContent = '-'; alert(d.error || 'Could not load points.'); return; }
+        document.getElementById('points-balance').textContent = d.points.toLocaleString() + ' pts';
+        document.getElementById('points-board').innerHTML = d.leaderboard.length
+            ? d.leaderboard.map((r, i) => `<div class="lb-row ${r.you ? 'you' : ''}"><span>${i + 1}. ${escapeHtml(r.name)}</span><span>${r.points.toLocaleString()} pts</span></div>`).join('')
+            : '<p style="color:var(--text-sub);">No one has points yet.</p>';
+        document.getElementById('points-shop').innerHTML = d.shop.length
+            ? d.shop.map(i => `<div class="lb-row"><span>${escapeHtml(i.name)}<br><small style="color:var(--text-sub);">${escapeHtml(i.reward)} \u2022 ${escapeHtml(i.stock)}</small></span><span>${i.discount > 0 && i.your_price !== i.price ? `<s>${i.price.toLocaleString()}</s> ${i.your_price.toLocaleString()}` : i.price.toLocaleString()} pts</span></div>`).join('')
+            : '<p style="color:var(--text-sub);">The shop is empty right now.</p>';
+    } catch (e) {
+        alert('Could not reach the server. Please try again.');
+    }
+}
+
+// ---------- share link ----------
+async function shareSavedDesign(id) {
+    try {
+        const res = await fetch('/api/designs/' + encodeURIComponent(id) + '/share', { method: 'POST' });
+        const d = await res.json();
+        if (!res.ok || !d.success) { alert(d.error || 'Could not create the link.'); return; }
+        try { await navigator.clipboard.writeText(d.url); alert('Link copied!\n' + d.url); }
+        catch (e) { prompt('Copy this link:', d.url); }
+    } catch (e) {
+        alert('Could not reach the server. Please try again.');
+    }
+}
+
+async function openPendingShare() {
+    if (!PENDING_SHARE || !IS_USER_LOGGED_IN) return;
+    try {
+        const res = await fetch('/api/shared/' + encodeURIComponent(PENDING_SHARE));
+        const d = await res.json();
+        if (res.ok && d.success) { loadLayoutIntoEditor(d.blueprint); }
+        else { alert(d.error || 'This shared link could not be opened.'); }
+    } catch (e) {
+        alert('Could not open the shared link. Please try again.');
+    }
+}
+
+// ---------- build progress ----------
+let buildPollTimer = null;
+
+function renderBuildProgress(st, isPremium) {
+    const order = ['sent', 'received', 'waiting_payment', 'building', 'done'];
+    const needsPayment = !isPremium && !FREE_MODE;
+    const steps = [
+        ['sent', 'Design sent'],
+        ['received', 'Bot received it'],
+        ...(needsPayment ? [['waiting_payment', 'Payment (check your Discord DMs)']] : []),
+        ['building', 'Building your server'],
+        ['done', 'Done'],
+    ];
+    const failed = st.stage === 'failed';
+    const idx = failed ? order.indexOf('building') : Math.max(0, order.indexOf(st.stage));
+    const html = steps.map(([key, label]) => {
+        const pos = order.indexOf(key);
+        let cls = '', icon = 'fa-regular fa-circle';
+        if (st.stage === 'done' || pos < idx) { cls = 'done'; icon = 'fa-solid fa-circle-check'; }
+        else if (pos === idx && !failed) { cls = 'active'; icon = 'fa-solid fa-spinner fa-spin'; }
+        else if (pos === idx && failed) { cls = 'error'; icon = 'fa-solid fa-circle-xmark'; }
+        return `<div class="build-step ${cls}"><i class="${icon}"></i> ${label}</div>`;
+    }).join('');
+    document.getElementById('build-steps').innerHTML = html;
+    const pct = st.stage === 'done' ? 100 : (st.total > 0 ? Math.round(st.done / st.total * 100) : 0);
+    document.getElementById('build-bar').style.width = pct + '%';
+    const countText = (st.stage === 'building' && st.total > 0) ? ` (${st.done}/${st.total})` : '';
+    document.getElementById('build-detail').textContent = (st.detail || '') + countText;
+}
+
+function startBuildProgress(buildId, isPremium) {
+    const card = document.getElementById('build-progress-card');
+    if (buildPollTimer) { clearInterval(buildPollTimer); buildPollTimer = null; }
+    if (!buildId) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    renderBuildProgress({ stage: 'sent', detail: 'Waiting for the bot...', done: 0, total: 0 }, isPremium);
+    const startedAt = Date.now();
+    const poll = async () => {
+        try {
+            const res = await fetch('/api/build-status/' + encodeURIComponent(buildId));
+            const st = await res.json();
+            if (res.ok && st.success) {
+                renderBuildProgress(st, isPremium);
+                if (st.stage === 'done' || st.stage === 'failed') { clearInterval(buildPollTimer); buildPollTimer = null; refreshUsage(); }
+            }
+        } catch (e) { /* try again on the next tick */ }
+        if (Date.now() - startedAt > 20 * 60 * 1000 && buildPollTimer) { clearInterval(buildPollTimer); buildPollTimer = null; }
+    };
+    buildPollTimer = setInterval(poll, 3000);
+    poll();
+}
+
 function escapeHtml(str) {
     return String(str == null ? '' : str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -1329,7 +1494,7 @@ async function useTemplate(id, btn) {
     }
 }
 
-const HISTORY_KIND_LABELS = { generated: 'AI Generated', ai_edit: 'AI Edit', template: 'Template', submitted: 'Submitted' };
+const HISTORY_KIND_LABELS = { generated: 'AI Generated', ai_edit: 'AI Edit', template: 'Template', submitted: 'Submitted', shared: 'Shared With Me' };
 
 async function openHistory() {
     navigateTo('page-history');
@@ -1358,7 +1523,8 @@ async function openHistory() {
                 </div>
                 <div class="hist-actions">
                     <button class="btn-glass" onclick="openSavedDesign('${d.id}', this)">Open</button>
-                    <button class="btn-glass btn-secondary-link" onclick="deleteSavedDesign('${d.id}')"><i class="fa-solid fa-trash"></i></button>
+                    <button class="btn-glass btn-secondary-link" title="Copy share link" onclick="shareSavedDesign('${d.id}')"><i class="fa-solid fa-share-nodes"></i> Share</button>
+                    <button class="btn-glass btn-secondary-link" onclick="deleteSavedDesign('${d.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
                 </div>
             </div>`;
         }).join('');
@@ -1481,8 +1647,10 @@ async function handleAIGeneration() {
             activeChanIdx = 0;
             renderDashboard();
             navigateTo('page-layout');
+            refreshUsage();
         } else {
             alert(result.error || 'AI layout generation failed. Please try again.');
+            refreshUsage();
         }
     } catch (err) {
         console.error('AI endpoint request error:', err);
@@ -1920,6 +2088,7 @@ async function handleSubmitDesign() {
 
         if (response.ok && resData.success) {
             succeeded = true;
+            startBuildProgress(resData.build_id, resData.is_premium);
             const heading = document.getElementById('final-title-heading');
             const desc = document.getElementById('final-desc-text');
             if (resData.is_premium) {
@@ -1949,6 +2118,7 @@ async function handleSubmitDesign() {
 }
 
 function resetBuilder() {
+    if (buildPollTimer) { clearInterval(buildPollTimer); buildPollTimer = null; }
     document.getElementById('gen-prompt').value = '';
     document.getElementById('gen-server-id').value = '';
     document.getElementById('gen-server-link').value = '';
