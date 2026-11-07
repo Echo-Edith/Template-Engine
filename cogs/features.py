@@ -3842,6 +3842,7 @@ class FeaturesCog(commands.Cog):
         target_guild_id = str(payload.get("target_server_id", "0")).strip()
         layout = payload.get("layout", {})
         is_premium_submission = payload.get("is_premium", False)
+        build_mode = "add" if (is_premium_submission and payload.get("build_mode") == "add") else "rebuild"
 
         if not target_guild_id or target_guild_id == "0":
             print("[Auto-Build Error] Target server ID is missing or 0.")
@@ -3880,7 +3881,7 @@ class FeaturesCog(commands.Cog):
             print(f"[Auto-Build] {'Free mode' if is_standard else 'Premium'} deployment for {guild.name} ({guild.id})")
             if is_standard:
                 record_build(submitting_user_id)
-            await self.execute_auto_build(guild, layout)
+            await self.execute_auto_build(guild, layout, build_mode)
 
     async def send_limit_dm(self, user_id: str, limit: int, reset_unix: int):
         try:
@@ -4082,17 +4083,29 @@ class FeaturesCog(commands.Cog):
 
         print(f"[Nuke] {guild.name}: {failed} channels and {role_failed} roles could not be deleted.")
 
-    async def execute_auto_build(self, guild: discord.Guild, layout: dict):
+    async def execute_auto_build(self, guild: discord.Guild, layout: dict, mode: str = "rebuild"):
+        """mode "rebuild": delete everything, then build. mode "add" (TE Premium): keep the server, only add what is missing."""
+        add_mode = mode == "add"
         try:
-            await self.nuke_guild_structure(guild)
+            if not add_mode:
+                await self.nuke_guild_structure(guild)
+
+            def same_name(a: str, b: str) -> bool:
+                return (strip_emojis(a) or a).strip().lower() == (strip_emojis(b) or b).strip().lower()
 
             created_roles = {}
+            if add_mode:
+                for existing_role in guild.roles:
+                    if not existing_role.is_default():
+                        created_roles[existing_role.name] = existing_role
             roles_data = layout.get("roles", [])
 
             for r_info in roles_data:
                 role_name = strip_emojis(r_info.get("name", "Role"))
                 if not role_name:
                     role_name = str(r_info.get("name", "Role"))
+                if add_mode and any(same_name(role_name, n) for n in created_roles):
+                    continue  # this role is already in the server
                 color_hex = str(r_info.get("color", "#8b5cf6")).lstrip('#')
                 try:
                     color_int = int(color_hex, 16)
@@ -4128,12 +4141,18 @@ class FeaturesCog(commands.Cog):
                 cat_clean_name = strip_emojis(cat_raw_name) or cat_raw_name
 
                 try:
-                    category_overwrites = collect_overwrites(guild, created_roles, cat_data.get("permissions"))
-                    cat_kwargs = {"name": cat_clean_name, "reason": "Template Engine Auto-Build"}
-                    if category_overwrites:
-                        cat_kwargs["overwrites"] = category_overwrites
-                    category = await create_with_overwrite_fallback(guild.create_category, cat_clean_name, **cat_kwargs)
-                    await asyncio.sleep(0.2)
+                    category = None
+                    if add_mode:
+                        category = next((c for c in guild.categories if same_name(c.name, cat_clean_name)), None)
+                    if category is not None:
+                        category_overwrites = dict(category.overwrites)
+                    else:
+                        category_overwrites = collect_overwrites(guild, created_roles, cat_data.get("permissions"))
+                        cat_kwargs = {"name": cat_clean_name, "reason": "Template Engine Auto-Build"}
+                        if category_overwrites:
+                            cat_kwargs["overwrites"] = category_overwrites
+                        category = await create_with_overwrite_fallback(guild.create_category, cat_clean_name, **cat_kwargs)
+                        await asyncio.sleep(0.2)
                 except Exception as e:
                     print(f"[Auto-Build Cat Error] {cat_clean_name}: {e}")
                     continue
@@ -4144,6 +4163,8 @@ class FeaturesCog(commands.Cog):
                         chan_clean_name = format_channel_name(chan_label)
                         chan_type = chan.get("type", "text")
                         chan_topic = chan.get("topic", "")
+                        if add_mode and any(same_name(c.name, chan_clean_name) for c in category.channels):
+                            continue  # this channel is already in the category
 
                         # Category permissions first, then this channel's own permissions on top
                         overwrites = collect_overwrites(

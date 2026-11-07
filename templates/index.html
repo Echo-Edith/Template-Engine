@@ -1052,6 +1052,19 @@ background: var(--accent-purple-glow) !important;
 <div id="roles-editor-list"></div>
 <button class="add-btn-inline" onclick="addNewRole()" style="padding:12px; margin-top:8px;">+ Add New Role</button>
 </div>
+{% if is_premium %}
+<div class="editor-card" id="build-mode-card" style="margin-top:16px;">
+<label class="label-heading">HOW SHOULD THE BOT BUILD IT? <span style="color:var(--gold, #C9962B);">TE PREMIUM</span></label>
+<label style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;cursor:pointer;">
+<input type="radio" name="build-mode" value="rebuild" checked style="margin-top:4px;">
+<span><strong>Rebuild</strong><br><small>Deletes the current channels and roles, then builds the new layout.</small></span>
+</label>
+<label style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;cursor:pointer;">
+<input type="radio" name="build-mode" value="add" style="margin-top:4px;">
+<span><strong>Add to existing</strong><br><small>Keeps everything in your server. Only adds the roles, categories and channels that are missing.</small></span>
+</label>
+</div>
+{% endif %}
 <button id="submit-design-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="handleInitialSubmitClick()">
 <i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit Design</span>
 </button>
@@ -1660,7 +1673,8 @@ async function handleSubmitDesign() {
         categories_count: (currentLayout.categories || []).length,
         channels_count: channelCount,
         roles_count: (currentLayout.roles || []).length,
-        layout: currentLayout
+        layout: currentLayout,
+        build_mode: (document.querySelector('input[name="build-mode"]:checked') || {}).value || 'rebuild'
     };
 
     let succeeded = false;

@@ -316,6 +316,8 @@ def submit_design_endpoint():
     channels_count = payload.get("channels_count", 0)
     roles_count = payload.get("roles_count", 0)
     layout = payload.get("layout", {})
+    # Only TE Premium can pick "add to my server". Everyone else always rebuilds.
+    build_mode = "add" if (is_premium and payload.get("build_mode") == "add") else "rebuild"
 
     account_age = ai_brain.calculate_account_age(user_id)
 
@@ -335,6 +337,7 @@ def submit_design_endpoint():
             ("Categories", categories_count),
             ("Channels", channels_count),
             ("Roles", roles_count),
+            ("Build Mode", "Add to existing server" if build_mode == "add" else "Rebuild from scratch"),
             ("Prompt", prompt_text[:900] if len(str(prompt_text)) > 80 else prompt_text),
         ]),
         "color": embed_color,
@@ -349,6 +352,7 @@ def submit_design_endpoint():
         "invite_link": invite_link,
         "prompt": prompt_text,
         "is_premium": is_premium,
+        "build_mode": build_mode,
         "layout": layout
     }
 
