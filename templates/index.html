@@ -936,14 +936,6 @@ background: var(--accent-purple-glow) !important;
 </div>
 <i class="fa-solid fa-circle-check" style="color: #2ecc71;"></i>
 </div>
-{% else %}
-{% if user %}
-<div class="editor-card" style="margin-bottom: 12px; text-align:center; background: var(--card-bg);">
-<i class="fa-solid fa-link" style="color: var(--accent-purple); font-size: 1.2rem; margin-bottom: 8px;"></i>
-<span style="font-weight: 600; font-size: 0.88rem; display:block; margin-bottom: 4px;">Roblox Account (Optional)</span>
-<p style="font-size:0.78rem; color: var(--text-sub);">You only need Roblox to pay with Robux. No Roblox account? You can pay with server points instead. To pay with Robux, go to the Template Engine Discord server and sync your profile in <code>#account-sync</code>.</p>
-</div>
-{% endif %}
 {% endif %}
 
 <!-- AUTHENTICATION & PREMIUM ACTIONS GRID -->
@@ -1128,7 +1120,7 @@ Continue in 5s
 <strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout costs Robux or server points, unless you have an active <strong>TE Premium</strong> subscription ({{ subscription_price }} Robux/mo).
 </div>
 <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
-Submitting this design sends your blueprint to the bot. Your server is built automatically once your payment (Robux or points) is verified. No staff review is needed.
+Submitting this design sends your blueprint to the bot. The bot then DMs you the ways to pay (Robux, server points or TE Premium) and builds your server automatically once your payment is verified. No staff review is needed.
 </p>
 <div style="display:flex; gap:10px;">
 <button class="btn-glass btn-secondary" onclick="closeRobuxNoticeModal()">

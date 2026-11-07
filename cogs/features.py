@@ -3034,6 +3034,12 @@ class NonPremiumDeploymentView(discord.ui.View):
 
         final_url = dev_product_url or "https://www.roblox.com/games/6094950399/Template-Engine#!/store"
         self.add_item(discord.ui.Button(label="Buy Roblox Dev Product", url=final_url, style=discord.ButtonStyle.link))
+        premium_url = os.getenv("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
+        if premium_url:
+            self.add_item(discord.ui.Button(label="Get TE Premium", url=premium_url, style=discord.ButtonStyle.link))
+        invite_url = os.getenv("DISCORD_SERVER_INVITE", "").strip()
+        if invite_url.startswith("http"):
+            self.add_item(discord.ui.Button(label="Join Our Server", url=invite_url, style=discord.ButtonStyle.link))
 
     @discord.ui.button(label="Verify Purchase", style=discord.ButtonStyle.success, custom_id="btn_verify_dev_product")
     async def verify_purchase_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3877,16 +3883,37 @@ class FeaturesCog(commands.Cog):
             color=0x8B5CF6
         )
         embed.add_field(
-            name="Option 1: Buy Dev Product",
+            name="Option 1: Single Build with Robux",
             value=(
-                f"Purchase the single-use Roblox Developer Product (**{dev_price:,} Robux**), then click **Verify Purchase**. Needs a Roblox account."
-                if dev_price else "Purchase the single-use Roblox Developer Product, then click **Verify Purchase**. Needs a Roblox account."
+                f"Buy the one-time Roblox Developer Product (**{dev_price:,} Robux**), then click **Verify Purchase**.\n"
+                if dev_price else
+                "Buy the one-time Roblox Developer Product, then click **Verify Purchase**.\n"
+            ) + "Needs a Roblox account that is synced (see below).",
+            inline=False
+        )
+        embed.add_field(
+            name="Option 2: Server Points",
+            value=f"No Roblox account needed. Click **Use Points ({points_cost:,} Pts)** to build right now.\nYour points: `{user_pts:,} pts`\nEarn points by chatting, with `/daily`, in giveaways, and in `/shop` deals.",
+            inline=False
+        )
+        embed.add_field(
+            name="Option 3: TE Premium",
+            value=(
+                f"Subscribe on Roblox (**{prices['subscription_robux']:,} Robux/mo**) "
+                "for instant automatic builds every time, or get it free for 30 days while you boost our server.\n"
+                "The subscription needs a synced Roblox account (see below)."
             ),
             inline=False
         )
         embed.add_field(
-            name="Option 2: Redeem Points",
-            value=f"No Roblox account? Use **{points_cost:,} server points** to deploy immediately.\nYour Points: {user_pts:,} pts",
+            name="How to Sync Your Roblox Account",
+            value=(
+                "Only Option 1 and the Roblox part of Option 3 need this.\n"
+                "1. Join the Template Engine Discord server.\n"
+                "2. Open the `#account-sync` channel.\n"
+                "3. Follow the steps there to link your Roblox account.\n"
+                "4. Come back here and click **Verify Purchase**."
+            ),
             inline=False
         )
 
