@@ -2593,7 +2593,9 @@ class CommandsCog(commands.Cog):
                            luck="Optional. How much more likely luck-role members are to win.",
                            luck_role="Role that gets the luck boost (needs luck).",
                            luck_role_2="Another role that gets the luck boost.",
-                           luck_role_3="Another role that gets the luck boost.")
+                           luck_role_3="Another role that gets the luck boost.",
+                           ping_everyone="True pings @everyone when the giveaway starts (default False).",
+                           host_message="A message from the host, shown on the giveaway.")
     @app_commands.choices(luck=[
         app_commands.Choice(name="2x luck", value=2), app_commands.Choice(name="3x luck", value=3),
         app_commands.Choice(name="5x luck", value=5), app_commands.Choice(name="10x luck", value=10),
@@ -2606,7 +2608,9 @@ class CommandsCog(commands.Cog):
         luck: Optional[app_commands.Choice[int]] = None,
         luck_role: Optional[discord.Role] = None,
         luck_role_2: Optional[discord.Role] = None,
-        luck_role_3: Optional[discord.Role] = None
+        luck_role_3: Optional[discord.Role] = None,
+        ping_everyone: Optional[bool] = False,
+        host_message: Optional[app_commands.Range[str, 1, 500]] = None
     ):
         luck_roles = list(dict.fromkeys(r.id for r in (luck_role, luck_role_2, luck_role_3) if r is not None))
         if bool(luck) != bool(luck_roles):
@@ -2623,6 +2627,9 @@ class CommandsCog(commands.Cog):
         perms = channel.permissions_for(interaction.guild.me)
         if not (perms.send_messages and perms.embed_links):
             await interaction.response.send_message(embed=embed_err("Missing Permission", f"I need `Send Messages` and `Embed Links` in {channel.mention}."), ephemeral=True)
+            return
+        if ping_everyone and not perms.mention_everyone:
+            await interaction.response.send_message(embed=embed_err("Missing Permission", f"I need `Mention Everyone` in {channel.mention} to ping @everyone. Give me the permission or set `ping_everyone` to False."), ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -2641,6 +2648,7 @@ class CommandsCog(commands.Cog):
             "reward_premium_days": int(reward_premium_days or 0),
             "luck": int(luck.value) if luck else 1,
             "luck_roles": [str(r) for r in luck_roles],
+            "host_message": host_message or "",
         }
         try:
             msg = await channel.send(allowed_mentions=NO_PINGS, **giveaway_payload(gw))
@@ -2649,11 +2657,19 @@ class CommandsCog(commands.Cog):
             return
         gw["message_id"] = str(msg.id)
         save_giveaway(gw)
+        if ping_everyone:
+            try:
+                await channel.send("@everyone", allowed_mentions=discord.AllowedMentions(everyone=True))
+            except Exception as e:
+                print(f"[Giveaway Ping Error] {e!r}")
         embed = embed_ok("Giveaway Created", f"Posted in {channel.mention}.\n[Jump to giveaway]({msg.jump_url})")
         if giveaway_reward_text(gw):
             embed.add_field(name="Auto Reward", value=f"`{giveaway_reward_text(gw)}` for each winner", inline=False)
         if giveaway_luck_text(gw):
             embed.add_field(name="Luck Boost", value=giveaway_luck_text(gw).replace("**Luck:** ", ""), inline=False)
+        if host_message:
+            embed.add_field(name="Message From Host", value=host_message, inline=False)
+        embed.add_field(name="Ping", value="`@everyone`" if ping_everyone else "`No ping`", inline=True)
         embed.add_field(name="Message ID", value=f"`{msg.id}`", inline=True)
         embed.add_field(name="Ends", value=f"<t:{int(gw['end_ts'])}:R>", inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)

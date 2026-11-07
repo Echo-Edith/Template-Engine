@@ -949,6 +949,8 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
             description=f"**Hosted by:** {host}\n**{label}:** {winners_text}",
             color=COLOR_GRAY
         )
+        if gw.get("host_message"):
+            embed.add_field(name="Message from Host", value=gw["host_message"], inline=False)
         embed.set_footer(text=f"{len(gw['entries'])} entries | Giveaway ended")
     else:
         embed = discord.Embed(
@@ -963,6 +965,8 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
             ),
             color=COLOR_PURPLE
         )
+        if gw.get("host_message"):
+            embed.add_field(name="Message from Host", value=gw["host_message"], inline=False)
     return embed
 
 
@@ -1068,6 +1072,9 @@ if HAS_CARD_LAYOUT:
                 winners_text = ", ".join(f"<@{w}>" for w in winner_ids) if winner_ids else "No valid entries"
                 container.add_item(discord.ui.Separator())
                 container.add_item(discord.ui.TextDisplay(f"**Hosted by:** {host}\n**{label}:** {winners_text}"))
+                if gw.get("host_message"):
+                    container.add_item(discord.ui.Separator())
+                    container.add_item(discord.ui.TextDisplay(f"**Message from Host**\n{gw['host_message']}"))
             else:
                 container.add_item(discord.ui.TextDisplay(f"Ends <t:{end_ts}:R> \u2022 <t:{end_ts}:F>"))
                 container.add_item(discord.ui.Separator())
@@ -1075,6 +1082,9 @@ if HAS_CARD_LAYOUT:
                     f"**Hosted by:** {host}\n**Entries:** {len(gw['entries'])}\n**Winners:** {int(gw['winners'])}"
                     + (f"\n{giveaway_luck_text(gw)}" if giveaway_luck_text(gw) else "")
                 ))
+                if gw.get("host_message"):
+                    container.add_item(discord.ui.Separator())
+                    container.add_item(discord.ui.TextDisplay(f"**Message from Host**\n{gw['host_message']}"))
             row = discord.ui.ActionRow()
             row.add_item(_GiveawayEnterButton(disabled=ended))
             row.add_item(_GiveawayEntriesButton(len(gw["entries"]), disabled=ended))
