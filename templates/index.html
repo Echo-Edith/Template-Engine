@@ -1003,6 +1003,18 @@ background: var(--accent-purple-glow) !important;
 <input type="checkbox" id="edit-chan-readonly" style="width:18px; height:18px; accent-color: var(--accent-purple);" onchange="updateActiveChannel()">
 </div>
 </div>
+{% if is_premium %}
+<div class="editor-card" id="ai-edit-card" style="margin-top:16px;">
+<label class="label-heading">EDIT WITH AI <span style="color:var(--gold, #C9962B);">TE PREMIUM</span></label>
+<input type="text" id="ai-edit-input" class="form-control" maxlength="500" placeholder="Example: add a gaming category with 3 channels">
+<button id="ai-edit-btn" class="btn-glass btn-premium" style="margin-top:10px;" onclick="handleAIEdit()">
+<i class="fa-solid fa-wand-magic-sparkles"></i> <span>Apply Change</span>
+</button>
+<button id="ai-edit-undo-btn" class="btn-glass" style="margin-top:8px; display:none;" onclick="undoAIEdit()">
+<i class="fa-solid fa-rotate-left"></i> <span>Undo Last AI Edit</span>
+</button>
+</div>
+{% endif %}
 <button id="next-page-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="goToPermissionsPage()">
 <span>Next Page: Permissions</span> <i class="fa-solid fa-arrow-right"></i>
 </button>
@@ -1309,6 +1321,53 @@ async function handleAIGeneration() {
         btn.disabled = false;
         btn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> <span>Generate Server Layout</span>`;
     }
+}
+
+let previousLayout = null;
+
+async function handleAIEdit() {
+    const input = document.getElementById('ai-edit-input');
+    const instruction = input.value.trim();
+    if (!instruction) { alert('Write what you want to change first.'); return; }
+    const btn = document.getElementById('ai-edit-btn');
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span> Editing...`;
+    try {
+        const response = await fetch('/edit-blueprint', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instruction: instruction, layout: currentLayout })
+        });
+        let result = {};
+        try { result = await response.json(); } catch (e) { result = {}; }
+        if (response.ok && result.success && result.blueprint) {
+            previousLayout = JSON.parse(JSON.stringify(currentLayout));
+            currentLayout = result.blueprint;
+            activeCatIdx = 0;
+            activeChanIdx = 0;
+            renderDashboard();
+            input.value = '';
+            document.getElementById('ai-edit-undo-btn').style.display = 'block';
+        } else {
+            alert(result.error || 'The AI edit failed. Please try again.');
+        }
+    } catch (err) {
+        console.error('AI edit error:', err);
+        alert('An error occurred during the AI edit. Please check your connection.');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> <span>Apply Change</span>`;
+    }
+}
+
+function undoAIEdit() {
+    if (!previousLayout) return;
+    currentLayout = previousLayout;
+    previousLayout = null;
+    activeCatIdx = 0;
+    activeChanIdx = 0;
+    renderDashboard();
+    document.getElementById('ai-edit-undo-btn').style.display = 'none';
 }
 
 function renderDashboard() {

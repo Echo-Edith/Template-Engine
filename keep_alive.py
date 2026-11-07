@@ -295,6 +295,39 @@ def generate_blueprint_endpoint():
         return jsonify({"success": False, "error": f"Generation failed: {str(e)}"}), 500
 
 
+@app.route("/edit-blueprint", methods=["POST"])
+def edit_blueprint_endpoint():
+    """TE Premium only: change an existing layout with a short instruction."""
+    try:
+        user = session.get("user")
+        if not user:
+            return jsonify({"success": False, "error": "Unauthorized. Please log in with Discord."}), 401
+        if not is_user_premium(str(user.get("id", "0"))):
+            return jsonify({"success": False, "error": "Edit with AI is a TE Premium feature."}), 403
+
+        data = request.get_json() or {}
+        instruction = str(data.get("instruction", "")).strip()
+        layout = data.get("layout")
+        if not instruction or len(instruction) > 500:
+            return jsonify({"success": False, "error": "Write what you want to change (up to 500 characters)."}), 400
+        if not isinstance(layout, dict) or len(json.dumps(layout)) > 150000:
+            return jsonify({"success": False, "error": "The layout is missing or too big."}), 400
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(ai_brain.edit_server_layout(layout, instruction))
+        finally:
+            loop.close()
+
+        if not result.get("success"):
+            return jsonify({"success": False, "error": result.get("error", "Edit failed.")}), 500
+        return jsonify({"success": True, "blueprint": result["data"]}), 200
+    except Exception as e:
+        print(f"[Edit Blueprint Error] {e}")
+        return jsonify({"success": False, "error": f"Edit failed: {str(e)}"}), 500
+
+
 @app.route("/api/submit-design", methods=["POST"])
 def submit_design_endpoint():
     user = session.get("user")

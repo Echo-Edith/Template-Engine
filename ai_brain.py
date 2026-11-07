@@ -322,6 +322,76 @@ async def generate_server_layout(
     }
 
 
+# --- EDIT WITH AI (TE Premium): change a layout the member already has ---
+async def edit_server_layout(layout: dict, instruction: str, channel_separator: str = "│") -> dict:
+    """Gives Gemini the current layout and a change request. Returns the full updated layout."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "The AI is not set up on the server."}
+    client = genai.Client(api_key=api_key)
+
+    current = {k: layout.get(k) for k in ("server_name", "roles", "categories") if k in layout}
+    system_instruction = (
+        "You are an expert Discord Community Infrastructure Architect. You receive an existing server layout (JSON) "
+        "and a change request. Apply ONLY the requested change and keep everything else exactly the same. "
+        "Return the complete updated layout in the same format. Keep names lower-case and without emojis in name fields, "
+        "keep a single emoji in each emoji field, and mark rules/announcement channels read_only."
+    )
+    query = f"Current layout:\n{json.dumps(current, ensure_ascii=False)}\n\nChange request:\n\"{instruction}\""
+
+    layout_data, all_errors = None, []
+    for model_name in GEMINI_MODELS:
+        for attempt in range(2):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=query,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=ServerLayoutSchema,
+                        temperature=0.4,
+                    ),
+                )
+                layout_data = json.loads(response.text)
+                break
+            except Exception as e:
+                if attempt == 0 and is_busy_error(e):
+                    await asyncio.sleep(2)
+                    continue
+                all_errors.append(f"{model_name}: {short_error(e)}")
+                break
+        if layout_data:
+            break
+
+    if not layout_data:
+        return {"success": False, "error": "The AI could not edit the layout. " + " | ".join(all_errors)}
+
+    sep = channel_separator.strip() if channel_separator else ""
+    for category in layout_data.get("categories", []):
+        cat_name = category.get("name", "")
+        category["name"] = strip_emojis(cat_name) or cat_name
+        for channel in category.get("channels", []):
+            raw_name = channel.get("name") or channel.get("clean_name") or channel.get("title") or ""
+            clean_name = strip_emojis(raw_name) or raw_name.lower().replace(" ", "-")
+            emoji = channel.get("emoji", "💬")
+            channel["name"] = clean_name
+            if channel.get("read_only"):
+                if not channel.get("permissions"):
+                    channel["permissions"] = {"view": True, "send": False, "embed": True, "attach": True}
+                else:
+                    channel["permissions"]["send"] = False
+            if sep and emoji:
+                channel["formatted_name"] = f"{emoji} {sep} {clean_name}"
+            elif emoji:
+                channel["formatted_name"] = f"{emoji} {clean_name}"
+            else:
+                channel["formatted_name"] = clean_name
+    layout_data["build_meta"] = layout.get("build_meta") or {}
+    return {"success": True, "data": layout_data}
+
+
 # --- AI SERVER CONSULTANT (/analyze) ---
 class AnalysisProblem(BaseModel):
     title: str = Field(description="Short name of the problem, e.g. 'Everyone can mention @everyone'")
