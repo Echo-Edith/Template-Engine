@@ -1634,12 +1634,13 @@ async def sync_boost_rewards(bot: commands.Bot) -> int:
 # =====================================================================
 PREMIUM_ROLE_GUILD_ID = int(os.getenv("PREMIUM_ROLE_GUILD_ID", "1284513257574629458"))
 PREMIUM_ROLE_NAME = os.getenv("PREMIUM_ROLE_NAME", "TE Premium")
+PREMIUM_ROLE_DEFAULT_ID = "1563842016985489420"  # the TE Premium role (PREMIUM_ROLE_ID overrides it)
 PREMIUM_ROLE_SYNC = {"last": 0.0, "warned": False}
 
 
 async def get_premium_role(guild: discord.Guild) -> Optional[discord.Role]:
     """Finds the TE Premium role (PREMIUM_ROLE_ID, or by name). Creates it if it does not exist."""
-    role_id = os.getenv("PREMIUM_ROLE_ID", "").strip()
+    role_id = os.getenv("PREMIUM_ROLE_ID", "1563842016985489420").strip()
     role = guild.get_role(int(role_id)) if role_id.isdigit() else None
     if role is None:
         role = discord.utils.find(lambda r: r.name.strip().lower() == PREMIUM_ROLE_NAME.lower(), guild.roles)
