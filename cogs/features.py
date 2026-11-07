@@ -955,6 +955,7 @@ def build_giveaway_embed(gw: dict) -> discord.Embed:
                 f"**Hosted by:** {host}\n"
                 f"**Entries:** {len(gw['entries'])}\n"
                 f"**Winners:** {int(gw['winners'])}"
+                + (f"\n{giveaway_luck_text(gw)}" if giveaway_luck_text(gw) else "")
             ),
             color=COLOR_PURPLE
         )
@@ -1068,6 +1069,7 @@ if HAS_CARD_LAYOUT:
                 container.add_item(discord.ui.Separator())
                 container.add_item(discord.ui.TextDisplay(
                     f"**Hosted by:** {host}\n**Entries:** {len(gw['entries'])}\n**Winners:** {int(gw['winners'])}"
+                    + (f"\n{giveaway_luck_text(gw)}" if giveaway_luck_text(gw) else "")
                 ))
             row = discord.ui.ActionRow()
             row.add_item(_GiveawayEnterButton(disabled=ended))
@@ -1175,6 +1177,37 @@ async def valid_giveaway_entries(bot: commands.Bot, gw: dict, exclude: tuple = (
         if member and not member.bot:
             valid.append(uid)
     return valid
+
+
+def giveaway_luck_text(gw: dict) -> str:
+    """Short text for the giveaway message, for example: 2x luck for @VIP, @Booster. Empty if no luck is set."""
+    luck = int(gw.get("luck") or 1)
+    roles = gw.get("luck_roles") or []
+    if luck <= 1 or not roles:
+        return ""
+    return f"**Luck:** {luck}x for " + ", ".join(f"<@&{r}>" for r in roles)
+
+
+async def pick_giveaway_winners(bot: commands.Bot, gw: dict, valid: List[str], count: int) -> List[str]:
+    """Picks winners at random. Members with a luck role are `luck` times more likely to win (everyone else counts once)."""
+    count = min(int(count), len(valid))
+    if count <= 0:
+        return []
+    luck = int(gw.get("luck") or 1)
+    luck_roles = {int(r) for r in (gw.get("luck_roles") or [])}
+    if luck <= 1 or not luck_roles:
+        return random.sample(valid, count)
+    guild = bot.get_guild(int(gw["guild_id"]))
+    keyed = []
+    for uid in valid:
+        weight = 1
+        member = await _resolve_member(guild, uid) if guild else None
+        if member and any(role.id in luck_roles for role in member.roles):
+            weight = luck
+        # weighted random without repeats: a higher weight gives a better chance of a high key
+        keyed.append((random.random() ** (1.0 / weight), uid))
+    keyed.sort(reverse=True)
+    return [uid for _, uid in keyed[:count]]
 
 
 async def get_giveaway_message(bot: commands.Bot, gw: dict) -> Optional[discord.Message]:
@@ -1309,7 +1342,7 @@ async def finish_giveaway(bot: commands.Bot, gw: dict, ended_early: bool = False
     except asyncio.TimeoutError:
         print(f"[Giveaway Warning] {mid}: member check timed out. Using all entries.")
         valid = list(gw["entries"])
-    winners = random.sample(valid, min(int(gw["winners"]), len(valid))) if valid else []
+    winners = await pick_giveaway_winners(bot, gw, valid, int(gw["winners"])) if valid else []
 
     gw["ended"] = True
     gw["winner_ids"] = winners
@@ -1378,7 +1411,7 @@ async def reroll_giveaway(bot: commands.Bot, gw: dict, count: Optional[int] = No
     if not valid:
         return None
     pick = int(count or gw["winners"])
-    winners = random.sample(valid, min(pick, len(valid)))
+    winners = await pick_giveaway_winners(bot, gw, valid, pick)
     gw["past_winners"] = past
     revoke_giveaway_rewards(gw, list(gw.get("winner_ids", [])))  # first winners lose the reward
     gw["winner_ids"] = winners
