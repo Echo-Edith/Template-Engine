@@ -1035,19 +1035,12 @@ background: var(--accent-purple-glow) !important;
 <textarea id="gen-prompt" class="form-control" rows="3" placeholder="e.g. Create a professional gaming server layout with VIP tiers, media channels, and staff areas..."></textarea>
 </div>
 <div class="form-group">
-<label class="label-heading">TARGET DISCORD SERVER ID <span class="required">*</span></label>
+<label class="label-heading">TARGET DISCORD SERVER ID <span style="opacity:.6;">(you can enter it later)</span></label>
 <input type="text" id="gen-server-id" class="form-control" placeholder="e.g. 123456789012345678" oninput="updateBotInviteLink()">
-</div>
-<div class="form-group">
-<label class="label-heading">SERVER INVITE LINK <span class="required">*</span></label>
-<input type="text" id="gen-server-link" class="form-control" placeholder="https://discord.gg/yourcode">
 </div>
 <div class="usage-meter" id="usage-meter-gen"></div>
 <button id="generate-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" style="margin-top: 24px;" onclick="handleAIGeneration()">
 <i class="fa-solid fa-wand-magic-sparkles"></i> <span>Generate Server Layout</span>
-</button>
-<button id="gen-back-layout-btn" class="btn-glass btn-secondary-link" style="margin-top: 10px; display:none;" onclick="navigateTo('page-layout')">
-<i class="fa-solid fa-arrow-left"></i> Back to My Layout
 </button>
 </div>
 
@@ -1213,6 +1206,23 @@ Continue in 5s
 </div>
 </div>
 
+<!-- SERVER ID MODAL -->
+<div id="server-id-modal" class="modal-backdrop">
+<div class="modal-card">
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+<h3 style="font-size:1.1rem; font-weight:700;"><i class="fa-solid fa-server"></i> Server ID Needed</h3>
+<i class="fa-solid fa-xmark" onclick="closeServerIdModal()" style="cursor:pointer; font-size:1.2rem;"></i>
+</div>
+<p style="font-size:0.85rem; color:var(--text-sub); margin-bottom:12px; line-height:1.5;">Enter the ID of the server where the bot should build this design. In Discord, turn on Developer Mode, then right-click your server and choose <b>Copy Server ID</b>.</p>
+<input type="text" id="server-id-modal-input" class="form-control" placeholder="e.g. 123456789012345678" inputmode="numeric" autocomplete="off">
+<p id="server-id-modal-error" style="display:none; color:#f43f5e; font-size:0.8rem; margin-top:8px;">That does not look like a server ID. It is a number with 17 to 20 digits.</p>
+<div style="display:flex; gap:10px; margin-top:16px;">
+<button class="btn-glass btn-secondary-link" onclick="closeServerIdModal()">Cancel</button>
+<button class="btn-glass" onclick="confirmServerIdModal()">Continue</button>
+</div>
+</div>
+</div>
+
 <!-- SEND DESIGN MODAL -->
 <div id="send-modal" class="modal-backdrop">
 <div class="modal-card">
@@ -1315,11 +1325,6 @@ const DISCORD_PERMISSIONS_LIST = [
 ];
 
 let botNoticeTimer = null;
-
-function showBackToLayoutButton() {
-    const btn = document.getElementById('gen-back-layout-btn');
-    if (btn) btn.style.display = 'block';
-}
 
 function proceedToGenerator() {
     const modal = document.getElementById('bot-notice-modal');
@@ -1771,11 +1776,10 @@ function formatDiscordChannelName(name) {
 
 async function handleAIGeneration() {
     const serverId = document.getElementById('gen-server-id').value.trim();
-    const serverLink = document.getElementById('gen-server-link').value.trim();
     const promptVal = document.getElementById('gen-prompt').value.trim();
 
-    if (!serverId || !serverLink || !promptVal) {
-        alert('Please fill in all required fields (Prompt, Server ID, and Invite Link).');
+    if (!promptVal) {
+        alert('Please describe the server you want first.');
         return;
     }
 
@@ -2180,13 +2184,37 @@ function updateBotInviteLink() {
 
 function handleInitialSubmitClick() {
     const serverId = document.getElementById('gen-server-id').value.trim();
-    const serverLink = document.getElementById('gen-server-link').value.trim();
-    if (!serverId || !serverLink) {
-        alert('Enter your Server ID and Invite Link first. Then press "Back to My Layout" to continue.');
-        showBackToLayoutButton();
-        navigateTo('page-generator');
+    if (!/^\d{17,20}$/.test(serverId)) {
+        openServerIdModal();  // every design must have a Server ID before it can be sent
         return;
     }
+    continueSubmit();
+}
+
+function openServerIdModal() {
+    const modal = document.getElementById('server-id-modal');
+    document.getElementById('server-id-modal-input').value = document.getElementById('gen-server-id').value.trim();
+    document.getElementById('server-id-modal-error').style.display = 'none';
+    modal.style.display = 'flex';
+}
+
+function closeServerIdModal() {
+    document.getElementById('server-id-modal').style.display = 'none';
+}
+
+function confirmServerIdModal() {
+    const value = document.getElementById('server-id-modal-input').value.trim();
+    if (!/^\d{17,20}$/.test(value)) {
+        document.getElementById('server-id-modal-error').style.display = 'block';
+        return;
+    }
+    document.getElementById('gen-server-id').value = value;
+    updateBotInviteLink();
+    closeServerIdModal();
+    continueSubmit();
+}
+
+function continueSubmit() {
     if (!IS_TE_PREMIUM) {
         document.getElementById('payment-notice-modal').style.display = 'flex';
     } else {
@@ -2205,8 +2233,7 @@ function confirmNonPremiumSubmission() {
 
 async function handleSubmitDesign() {
     const serverId = document.getElementById('gen-server-id').value.trim();
-    const serverLink = document.getElementById('gen-server-link').value.trim();
-    const promptVal = document.getElementById('gen-prompt').value.trim();
+    const promptVal = document.getElementById('gen-prompt').value.trim() || 'Design from the editor';
     const btn = document.getElementById('submit-design-btn');
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner"></span> Dispatching Design...`;
@@ -2220,7 +2247,6 @@ async function handleSubmitDesign() {
     const payload = {
         target_server_id: serverId,
         server_name: currentLayout.server_name || "Custom Server",
-        invite_link: serverLink,
         prompt: promptVal,
         categories_count: (currentLayout.categories || []).length,
         channels_count: channelCount,
@@ -2274,7 +2300,6 @@ function resetBuilder() {
     if (buildPollTimer) { clearInterval(buildPollTimer); buildPollTimer = null; }
     document.getElementById('gen-prompt').value = '';
     document.getElementById('gen-server-id').value = '';
-    document.getElementById('gen-server-link').value = '';
     currentLayout = {
         server_name: "New Server",
         roles: [],

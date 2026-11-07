@@ -1008,7 +1008,9 @@ def submit_design_endpoint():
     target_channel_id = PREMIUM_DESIGN_CHANNEL_ID if is_premium else NON_PREMIUM_DESIGN_CHANNEL_ID
 
     target_server_id = payload.get("target_server_id", "Not Provided")
-    invite_link = payload.get("invite_link", "Not Provided")
+    if not _re.fullmatch(r"\d{17,20}", str(target_server_id).strip()):
+        return jsonify({"success": False, "error": "Enter your Server ID (a number with 17 to 20 digits) before submitting."}), 400
+    target_server_id = str(target_server_id).strip()
     prompt_text = payload.get("prompt", "No prompt description provided.")
     server_name = payload.get("server_name", "Custom Server")
 
@@ -1033,7 +1035,6 @@ def submit_design_endpoint():
             ("User ID", user_id),
             ("Account Age", account_age),
             ("Target Server ID", target_server_id),
-            ("Invite Link", invite_link),
             ("Categories", categories_count),
             ("Channels", channels_count),
             ("Roles", roles_count),
@@ -1049,7 +1050,6 @@ def submit_design_endpoint():
         "submitting_user_id": user_id,
         "target_server_id": target_server_id,
         "server_name": server_name,
-        "invite_link": invite_link,
         "prompt": prompt_text,
         "is_premium": is_premium,
         "build_mode": build_mode,
