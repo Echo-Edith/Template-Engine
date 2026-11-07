@@ -178,8 +178,12 @@ def parse_duration_to_timedelta(duration_str: str) -> timedelta:
     return timedelta(days=30)
 
 
+PREMIUM_ROLE_DIRTY: set = set()  # users whose TE Premium role must be checked soon
+
+
 def set_user_premium(user_id: str, duration_td: timedelta):
     """Saves premium status into MongoDB or local fallback storage."""
+    PREMIUM_ROLE_DIRTY.add(str(user_id))
     exp_date = datetime.now(timezone.utc) + duration_td
     iso_exp = exp_date.isoformat()
     if db_premium is not None:
@@ -290,6 +294,7 @@ def extend_user_premium(user_id: str, days: int) -> datetime:
     """Adds days of premium. If the user already has premium, the days are added after it ends.
     Returns the new end date."""
     uid = str(user_id)
+    PREMIUM_ROLE_DIRTY.add(uid)
     now = datetime.now(timezone.utc)
     current = None
     raw = None
@@ -389,6 +394,7 @@ def list_premium_users() -> List[str]:
 def reduce_user_premium(user_id: str, days: int):
     """Takes days of premium away. If nothing is left, premium is removed."""
     uid = str(user_id)
+    PREMIUM_ROLE_DIRTY.add(uid)
     raw = None
     if db_premium is not None:
         try:
@@ -419,6 +425,7 @@ def reduce_user_premium(user_id: str, days: int):
 
 def remove_user_premium(user_id: str):
     """Removes premium status from MongoDB or local storage."""
+    PREMIUM_ROLE_DIRTY.add(str(user_id))
     if db_premium is not None:
         try:
             db_premium.delete_one({"discord_id": str(user_id)})
@@ -1617,6 +1624,79 @@ async def sync_boost_rewards(bot: commands.Bot) -> int:
             await user.send(embed=embed_info("Server Boost Reward", text))
         except Exception:
             pass
+    return changed
+
+
+# =====================================================================
+# TE PREMIUM ROLE: everyone with TE Premium (any way) gets the role in the main server.
+# This checks the premium list, so it covers the shop, promo codes, giveaways, boosts,
+# /premium set, the Roblox subscription and anything else that saves premium.
+# =====================================================================
+PREMIUM_ROLE_GUILD_ID = int(os.getenv("PREMIUM_ROLE_GUILD_ID", "1284513257574629458"))
+PREMIUM_ROLE_NAME = os.getenv("PREMIUM_ROLE_NAME", "TE Premium")
+PREMIUM_ROLE_SYNC = {"last": 0.0, "warned": False}
+
+
+async def get_premium_role(guild: discord.Guild) -> Optional[discord.Role]:
+    """Finds the TE Premium role (PREMIUM_ROLE_ID, or by name). Creates it if it does not exist."""
+    role_id = os.getenv("PREMIUM_ROLE_ID", "").strip()
+    role = guild.get_role(int(role_id)) if role_id.isdigit() else None
+    if role is None:
+        role = discord.utils.find(lambda r: r.name.strip().lower() == PREMIUM_ROLE_NAME.lower(), guild.roles)
+    if role is None:
+        try:
+            role = await guild.create_role(name=PREMIUM_ROLE_NAME, colour=discord.Colour(0xC9962B), hoist=True,
+                                           reason="TE Premium role for premium members")
+        except Exception as e:
+            print(f"[Premium Role] Could not create the role: {e!r}")
+            return None
+    if role >= guild.me.top_role and not PREMIUM_ROLE_SYNC["warned"]:
+        PREMIUM_ROLE_SYNC["warned"] = True
+        print(f"[Premium Role] Move my bot role above '{role.name}' in Server Settings > Roles, or I can not give it.")
+    return role
+
+
+async def apply_premium_role(member: discord.Member, role: discord.Role, should_have: bool) -> bool:
+    """Adds or removes the role if needed. Returns True if something changed."""
+    has = role in member.roles
+    try:
+        if should_have and not has:
+            await member.add_roles(role, reason="TE Premium active")
+            return True
+        if not should_have and has:
+            await member.remove_roles(role, reason="TE Premium ended")
+            return True
+    except Exception as e:
+        print(f"[Premium Role] {member} ({member.id}): {e!r}")
+    return False
+
+
+async def sync_premium_roles(bot: commands.Bot, only_users: Optional[set] = None) -> int:
+    """Makes the role match the premium list. only_users = check just these people (fast path)."""
+    guild = bot.get_guild(PREMIUM_ROLE_GUILD_ID)
+    if guild is None:
+        return 0
+    role = await get_premium_role(guild)
+    if role is None:
+        return 0
+    premium = set(list_premium_users())
+    changed = 0
+    if only_users is not None:
+        for uid in only_users:
+            member = guild.get_member(int(uid))
+            if member and not member.bot and await apply_premium_role(member, role, uid in premium):
+                changed += 1
+                await asyncio.sleep(0.3)
+        return changed
+    # Full check. If the member list is not loaded yet, do nothing (nobody loses the role by mistake).
+    if not guild.chunked or len(guild.members) < 0.9 * (guild.member_count or 0):
+        return 0
+    for member in list(guild.members):
+        if member.bot:
+            continue
+        if await apply_premium_role(member, role, str(member.id) in premium):
+            changed += 1
+            await asyncio.sleep(0.3)
     return changed
 
 
@@ -3340,6 +3420,20 @@ class FeaturesCog(commands.Cog):
                 await asyncio.wait_for(sync_boost_rewards(self.bot), timeout=60)
             except Exception as e:
                 print(f"[Boost Sync Error] {e!r}")
+        # TE Premium role: check people whose premium just changed, and everyone every 5 minutes
+        try:
+            now_ts = datetime.now(timezone.utc).timestamp()
+            if now_ts - PREMIUM_ROLE_SYNC["last"] >= 300:
+                PREMIUM_ROLE_SYNC["last"] = now_ts
+                PREMIUM_ROLE_DIRTY.clear()
+                GIVEAWAY_DEBUG["stage"] = "premium role"
+                await asyncio.wait_for(sync_premium_roles(self.bot), timeout=120)
+            elif PREMIUM_ROLE_DIRTY:
+                dirty = set(PREMIUM_ROLE_DIRTY)
+                PREMIUM_ROLE_DIRTY.difference_update(dirty)
+                await asyncio.wait_for(sync_premium_roles(self.bot, dirty), timeout=60)
+        except Exception as e:
+            print(f"[Premium Role Sync Error] {e!r}")
         GIVEAWAY_DEBUG["stage"] = "idle"
         GIVEAWAY_DEBUG["last_tick"] = datetime.now(timezone.utc).timestamp()
 
@@ -3735,6 +3829,8 @@ class FeaturesCog(commands.Cog):
             return
         add_user_points(str(member.id), 20)
         print(f"[Welcome Bonus] Awarded 20 points to new member: {member.name} ({member.id})")
+        if member.guild.id == PREMIUM_ROLE_GUILD_ID and user_has_premium(str(member.id)):
+            PREMIUM_ROLE_DIRTY.add(str(member.id))
 
     # -------------------------------------------------------------
     # LISTEN FOR MESSAGES & PREMIUM AUTO-BUILD LOG MESSAGES
