@@ -598,6 +598,37 @@ SEND_LIMIT_PER_HOUR = 10
 INBOX_MAX = 50
 _SEND_LOG = {}
 _SEARCH_LOG = {}
+_DM_LOG = {}
+
+
+def notify_design_received(to_id: str, from_id: str, from_name: str, counts: tuple):
+    """DMs the receiver that a design arrived and who sent it. No text from the sender is included.
+    Only one DM per sender and receiver per hour, so nobody can be spammed. Never raises."""
+    try:
+        if not DISCORD_BOT_TOKEN or not _rate_ok(_DM_LOG, f"{from_id}>{to_id}", 1, 3600):
+            return
+        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+        site = (os.environ.get("WEBSITE_URL") or request.host_url).strip().rstrip("/")
+        cats, chans, roles = counts
+        embed = {
+            "title": "New Design Received",
+            "description": f"<@{from_id}> (`{from_name}`) sent you a server design.\nOpen the **Inbox** on the website to accept, decline or block.",
+            "color": 0xC9962B,
+            "fields": [
+                {"name": "Categories", "value": f"`{cats}`", "inline": True},
+                {"name": "Channels", "value": f"`{chans}`", "inline": True},
+                {"name": "Roles", "value": f"`{roles}`", "inline": True},
+            ],
+            "footer": {"text": "Only designs can be sent, never text. You can block senders in the Inbox."},
+        }
+        dm = requests.post("https://discord.com/api/v10/users/@me/channels", headers=headers, json={"recipient_id": str(to_id)}, timeout=5)
+        if dm.status_code not in (200, 201):
+            return
+        components = [{"type": 1, "components": [{"type": 2, "style": 5, "label": "Open Inbox", "url": site}]}]
+        requests.post(f"https://discord.com/api/v10/channels/{dm.json()['id']}/messages", headers=headers,
+                      json={"embeds": [embed], "components": components}, timeout=5)
+    except Exception as e:
+        print(f"[Design DM Error] {e}")
 
 
 def _rate_ok(log: dict, key: str, limit: int, window: int) -> bool:
@@ -705,6 +736,7 @@ def api_design_send(design_id):
             db_inbox.insert_one(item)
         else:
             LOCAL_INBOX.append(item)
+        notify_design_received(to, me, item["from_name"], _count_layout(layout))
         return jsonify({"success": True})
     except Exception as e:
         print(f"[Send Design Error] {e}")
