@@ -1698,7 +1698,9 @@ async function handleSubmitDesign() {
                 if (desc) desc.innerText = "Your layout blueprint has been sent directly to the bot for auto-deployment!";
             } else {
                 if (heading) heading.innerText = "Blueprint Submitted!";
-                if (desc) desc.innerText = "Your blueprint has been sent to the bot. It will be built automatically once your Robux payment is verified.";
+                if (desc) desc.innerText = {{ 'true' if free_mode else 'false' }}
+                    ? "Your blueprint has been sent to the bot. It will be built automatically."
+                    : "Your blueprint has been sent to the bot. It will be built automatically once your payment (Robux, points or TE Premium) is verified.";
             }
         } else if (response.status === 401) {
             alert('Your login has expired. Please log in with Discord again, then submit.');
