@@ -49,6 +49,10 @@ db_users = None
 db_settings = None
 db_designs = None
 db_shop = None
+db_web_users = None
+db_inbox = None
+LOCAL_WEB_USERS = {}
+LOCAL_INBOX = []
 LOCAL_DESIGNS = []  # used only when there is no database
 
 if MONGO_URI:
@@ -63,6 +67,8 @@ if MONGO_URI:
         db_settings = db["settings"]
         db_designs = db["web_designs"]
         db_shop = db["shop_items"]
+        db_web_users = db["web_users"]
+        db_inbox = db["web_inbox"]
     except Exception as e:
         print(f"[MongoDB Warning in Flask] {e}")
 
@@ -581,11 +587,227 @@ def api_build_status(build_id):
         return jsonify({"success": False, "error": "Could not read the status."}), 500
 
 
+
+# -------------------------------------------------------------
+# SEND A DESIGN TO A PERSON (designs only, no text, so nobody can be harassed)
+# Safety: people must opt in to being found, can block senders, sends are rate limited,
+# and the sender's own text is never shown (no title, no message).
+# -------------------------------------------------------------
+import re as _re
+SEND_LIMIT_PER_HOUR = 10
+INBOX_MAX = 50
+_SEND_LOG = {}
+_SEARCH_LOG = {}
+
+
+def _rate_ok(log: dict, key: str, limit: int, window: int) -> bool:
+    now = datetime.now().timestamp()
+    hits = [t for t in log.get(key, []) if now - t < window]
+    if len(hits) >= limit:
+        log[key] = hits
+        return False
+    hits.append(now)
+    log[key] = hits
+    return True
+
+
+def remember_web_user(user_id, display_name, username, avatar):
+    """Saves who logged in, so other people can search for them (if they allow it)."""
+    try:
+        uid = str(user_id)
+        fields = {"name": str(display_name or username or "User")[:40], "username": str(username or "")[:40],
+                  "username_lower": str(username or "").lower()[:40], "avatar": avatar}
+        if db_web_users is not None:
+            db_web_users.update_one({"_id": uid}, {"$set": fields, "$setOnInsert": {"accepts": True, "blocked": []}}, upsert=True)
+        else:
+            doc = LOCAL_WEB_USERS.setdefault(uid, {"_id": uid, "accepts": True, "blocked": []})
+            doc.update(fields)
+    except Exception as e:
+        print(f"[Web User Save Error] {e}")
+
+
+def _web_user(user_id: str):
+    if db_web_users is not None:
+        return db_web_users.find_one({"_id": str(user_id)})
+    return LOCAL_WEB_USERS.get(str(user_id))
+
+
+def _web_user_update(user_id: str, changes: dict):
+    if db_web_users is not None:
+        db_web_users.update_one({"_id": str(user_id)}, {"$set": changes}, upsert=True)
+    else:
+        LOCAL_WEB_USERS.setdefault(str(user_id), {"_id": str(user_id), "accepts": True, "blocked": []}).update(changes)
+
+
+@app.route("/api/people/search")
+def api_people_search():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    me = str(user["id"])
+    q = str(request.args.get("q", "")).strip().lower().lstrip("@")
+    if len(q) < 3:
+        return jsonify({"success": True, "people": []})
+    if not _rate_ok(_SEARCH_LOG, me, 30, 60):
+        return jsonify({"success": False, "error": "Too many searches. Wait a minute."}), 429
+    try:
+        if db_web_users is not None:
+            if q.isdigit():
+                rows = list(db_web_users.find({"_id": q}).limit(1))
+            else:
+                rows = list(db_web_users.find({"username_lower": {"$regex": "^" + _re.escape(q)}}).limit(15))
+        else:
+            rows = [u for u in LOCAL_WEB_USERS.values() if u["_id"] == q or u.get("username_lower", "").startswith(q)]
+        people = []
+        for u in rows:
+            if u["_id"] == me or u.get("accepts") is False or me in (u.get("blocked") or []):
+                continue
+            people.append({"id": u["_id"], "name": u.get("name", "User"), "username": u.get("username", ""), "avatar": u.get("avatar")})
+            if len(people) >= 5:
+                break
+        return jsonify({"success": True, "people": people})
+    except Exception as e:
+        print(f"[People Search Error] {e}")
+        return jsonify({"success": False, "error": "Search failed."}), 500
+
+
+@app.route("/api/designs/<design_id>/send", methods=["POST"])
+def api_design_send(design_id):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    me = str(user["id"])
+    to = str((request.get_json() or {}).get("to", "")).strip()
+    if not to.isdigit() or to == me:
+        return jsonify({"success": False, "error": "Pick another person."}), 400
+    if not _rate_ok(_SEND_LOG, me, SEND_LIMIT_PER_HOUR, 3600):
+        return jsonify({"success": False, "error": f"You can send {SEND_LIMIT_PER_HOUR} designs per hour. Try again later."}), 429
+    try:
+        if db_designs is not None:
+            doc = db_designs.find_one({"_id": design_id, "user_id": me})
+        else:
+            doc = next((d for d in LOCAL_DESIGNS if d["_id"] == design_id and d["user_id"] == me), None)
+        if not doc:
+            return jsonify({"success": False, "error": "Design not found."}), 404
+        target = _web_user(to)
+        if not target or target.get("accepts") is False:
+            return jsonify({"success": False, "error": "This person can not receive designs."}), 404
+        if me in (target.get("blocked") or []):
+            return jsonify({"success": True})  # looks the same, so a blocked person is not told
+        pending = (db_inbox.count_documents({"to": to}) if db_inbox is not None else len([i for i in LOCAL_INBOX if i["to"] == to]))
+        if pending >= INBOX_MAX:
+            return jsonify({"success": False, "error": "This person's inbox is full."}), 409
+        layout = json.loads(json.dumps(doc["layout"]))
+        layout.pop("build_meta", None)
+        item = {"_id": uuid.uuid4().hex, "to": to, "from": me, "from_name": str(user.get("username", "User"))[:40],
+                "layout": layout, "created_at": datetime.now(timezone.utc).timestamp()}
+        if db_inbox is not None:
+            db_inbox.insert_one(item)
+        else:
+            LOCAL_INBOX.append(item)
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"[Send Design Error] {e}")
+        return jsonify({"success": False, "error": "Could not send the design."}), 500
+
+
+def _inbox_items(me: str) -> list:
+    if db_inbox is not None:
+        return list(db_inbox.find({"to": me}).sort("created_at", -1))
+    return sorted([i for i in LOCAL_INBOX if i["to"] == me], key=lambda i: i["created_at"], reverse=True)
+
+
+def _inbox_get(me: str, item_id: str):
+    if db_inbox is not None:
+        return db_inbox.find_one({"_id": item_id, "to": me})
+    return next((i for i in LOCAL_INBOX if i["_id"] == item_id and i["to"] == me), None)
+
+
+def _inbox_delete(item: dict):
+    if db_inbox is not None:
+        db_inbox.delete_one({"_id": item["_id"]})
+    elif item in LOCAL_INBOX:
+        LOCAL_INBOX.remove(item)
+
+
+@app.route("/api/inbox")
+def api_inbox():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    me = str(user["id"])
+    try:
+        items = []
+        for i in _inbox_items(me):
+            cats, chans, roles = _count_layout(i.get("layout", {}))
+            items.append({"id": i["_id"], "from_name": i.get("from_name", "User"), "created_at": i["created_at"],
+                          "categories": cats, "channels": chans, "roles": roles})
+        me_doc = _web_user(me) or {}
+        return jsonify({"success": True, "items": items, "accepts": me_doc.get("accepts") is not False,
+                        "blocked_count": len(me_doc.get("blocked") or [])})
+    except Exception as e:
+        print(f"[Inbox Error] {e}")
+        return jsonify({"success": False, "error": "Could not load your inbox."}), 500
+
+
+@app.route("/api/inbox/<item_id>/<action>", methods=["POST"])
+def api_inbox_action(item_id, action):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    me = str(user["id"])
+    if action not in ("accept", "decline", "block"):
+        return jsonify({"success": False, "error": "Unknown action."}), 400
+    try:
+        item = _inbox_get(me, item_id)
+        if not item:
+            return jsonify({"success": False, "error": "This design is not in your inbox anymore."}), 404
+        if action == "accept":
+            layout = item["layout"]
+            save_design(me, "shared", f"From {item.get('from_name', 'a friend')}", layout)
+            _inbox_delete(item)
+            return jsonify({"success": True, "blueprint": layout})
+        if action == "block":
+            sender = item["from"]
+            blocked = list((_web_user(me) or {}).get("blocked") or [])
+            if sender not in blocked:
+                blocked.append(sender)
+            _web_user_update(me, {"blocked": blocked})
+            for other in [i for i in _inbox_items(me) if i["from"] == sender]:
+                _inbox_delete(other)
+            return jsonify({"success": True})
+        _inbox_delete(item)
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"[Inbox Action Error] {e}")
+        return jsonify({"success": False, "error": "Something went wrong."}), 500
+
+
+@app.route("/api/share-settings", methods=["POST"])
+def api_share_settings():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    me = str(user["id"])
+    data = request.get_json() or {}
+    try:
+        if "accepts" in data:
+            _web_user_update(me, {"accepts": bool(data["accepts"])})
+        if data.get("clear_blocked"):
+            _web_user_update(me, {"blocked": []})
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"[Share Settings Error] {e}")
+        return jsonify({"success": False, "error": "Could not save."}), 500
+
+
 @app.route("/")
 def index():
     user = session.get("user")
     roblox_user = session.get("roblox_user")
     is_premium = False
+    if user and user.get("id") and not _web_user(user["id"]):
+        remember_web_user(user["id"], user.get("username"), user.get("username"), user.get("avatar"))  # for people who logged in before
     pending_share = session.get("pending_share", "") if user else ""
     if pending_share:
         session.pop("pending_share", None)
@@ -668,6 +890,7 @@ def callback():
         avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_id}.png" if avatar_id else "https://cdn.discordapp.com/embed/avatars/0.png"
 
         session.permanent = True
+        remember_web_user(user_id, user_data.get("global_name") or user_data.get("username"), user_data.get("username"), avatar_url)
         session["user"] = {
             "id": user_id,
             "username": user_data.get("username"),

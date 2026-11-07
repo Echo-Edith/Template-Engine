@@ -666,6 +666,8 @@ gap: 6px;
 .usage-row b { color: inherit; }
 .usage-bar { height: 8px; background: var(--card-border); border-radius: 1px; margin-top: 4px; overflow: hidden; }
 .usage-bar > span { display: block; height: 100%; background: var(--accent-purple); }
+.person-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid var(--card-border); }
+.person-row img { width:32px; height:32px; border-radius:50%; margin-right:10px; vertical-align:middle; }
 .lb-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--card-border); font-size:0.9rem; }
 .lb-row.you { font-weight:700; color: var(--accent-purple); }
 .points-big { font-size: 2.2rem; font-weight: 800; }
@@ -966,7 +968,7 @@ background: var(--accent-purple-glow) !important;
 {% if user %}
 <div class="landing-links">
 <button class="btn-glass btn-secondary-link" onclick="openTemplates()"><i class="fa-solid fa-table-cells-large"></i> Templates</button>
-<button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs</button>
+<button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs<span class="inbox-badge"></span></button>
 <button class="btn-glass btn-secondary-link" onclick="openPoints()"><i class="fa-solid fa-coins"></i> My Points</button>
 </div>
 <div class="usage-meter" id="usage-meter-landing"></div>
@@ -1005,7 +1007,20 @@ background: var(--accent-purple-glow) !important;
 <h1>My Designs</h1>
 <p>Everything you made on this site. Open any item to keep working on it.</p>
 </div>
+<div id="inbox-section" style="display:none; margin-bottom:18px;">
+<div class="label-heading">INBOX: DESIGNS PEOPLE SENT YOU</div>
+<div id="inbox-list"></div>
+</div>
 <div id="history-list"></div>
+<div class="editor-card" style="margin-top:16px;">
+<label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+<input type="checkbox" id="accept-shares" style="margin-top:4px;" onchange="saveShareSettings()">
+<span><strong>Let people find me and send me designs</strong><br><small style="color:var(--text-sub);">People can only send a design (no text). You can decline or block anyone.</small></span>
+</label>
+<div id="blocked-info" style="display:none; margin-top:10px; font-size:0.8rem; color:var(--text-sub);">
+<span id="blocked-count"></span> <a href="#" onclick="clearBlocked(); return false;" style="color:var(--accent-purple);">Unblock everyone</a>
+</div>
+</div>
 <button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
 </div>
 
@@ -1198,6 +1213,19 @@ Continue in 5s
 </div>
 </div>
 
+<!-- SEND DESIGN MODAL -->
+<div id="send-modal" class="modal-backdrop">
+<div class="modal-card">
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+<h3 style="font-size:1.1rem; font-weight:700;"><i class="fa-solid fa-paper-plane"></i> Send Design</h3>
+<i class="fa-solid fa-xmark" onclick="closeSendModal()" style="cursor:pointer; font-size:1.2rem;"></i>
+</div>
+<p style="font-size:0.82rem; color:var(--text-sub); margin-bottom:12px;">Search by Discord username or user ID. Only your design is sent, with no text.</p>
+<input type="text" id="send-search" class="form-control" placeholder="Discord username or ID" oninput="onSendSearchInput()" autocomplete="off">
+<div id="send-results" style="margin-top:12px;"></div>
+</div>
+</div>
+
 <!-- NON-PREMIUM PAYMENT NOTICE MODAL -->
 <div id="payment-notice-modal" class="modal-backdrop">
 <div class="modal-card" style="text-align: center;">
@@ -1234,6 +1262,7 @@ Confirm & Submit
 document.addEventListener("DOMContentLoaded", () => {
     checkAuthStatus();
     refreshUsage();
+    refreshInbox();
     openPendingShare();
     applyPremiumTheme();
     updateBotInviteLink();
@@ -1390,6 +1419,128 @@ async function openPendingShare() {
     }
 }
 
+// ---------- send a design to a person ----------
+let sendDesignId = null;
+let sendSearchTimer = null;
+
+function openSendModal(id) {
+    sendDesignId = id;
+    document.getElementById('send-search').value = '';
+    document.getElementById('send-results').innerHTML = '';
+    document.getElementById('send-modal').style.display = 'flex';
+}
+
+function closeSendModal() {
+    document.getElementById('send-modal').style.display = 'none';
+    sendDesignId = null;
+}
+
+function onSendSearchInput() {
+    clearTimeout(sendSearchTimer);
+    sendSearchTimer = setTimeout(runSendSearch, 350);
+}
+
+async function runSendSearch() {
+    const q = document.getElementById('send-search').value.trim();
+    const box = document.getElementById('send-results');
+    if (q.replace('@', '').length < 3) { box.innerHTML = '<p style="color:var(--text-sub); font-size:0.82rem;">Type at least 3 characters.</p>'; return; }
+    try {
+        const res = await fetch('/api/people/search?q=' + encodeURIComponent(q));
+        const d = await res.json();
+        if (!res.ok || !d.success) { box.innerHTML = `<p style="color:var(--text-sub);">${escapeHtml(d.error || 'Search failed.')}</p>`; return; }
+        if (!d.people.length) { box.innerHTML = '<p style="color:var(--text-sub); font-size:0.82rem;">No one found. They need to have logged in on this site, and allow designs.</p>'; return; }
+        box.innerHTML = d.people.map(p => `
+            <div class="person-row">
+                <span><img src="${escapeHtml(p.avatar || '')}" alt=""> ${escapeHtml(p.name)} <small style="color:var(--text-sub);">@${escapeHtml(p.username)}</small></span>
+                <button class="btn-glass" style="width:auto; padding:8px 14px; font-size:0.82rem;" onclick="sendDesignTo('${p.id}', this)">Send</button>
+            </div>`).join('');
+    } catch (e) {
+        box.innerHTML = '<p style="color:var(--text-sub);">Could not search. Please try again.</p>';
+    }
+}
+
+async function sendDesignTo(userId, btn) {
+    if (!sendDesignId) return;
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/designs/' + encodeURIComponent(sendDesignId) + '/send', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: userId })
+        });
+        const d = await res.json();
+        if (res.ok && d.success) { btn.textContent = 'Sent'; }
+        else { btn.disabled = false; alert(d.error || 'Could not send.'); }
+    } catch (e) {
+        btn.disabled = false;
+        alert('Could not reach the server. Please try again.');
+    }
+}
+
+// ---------- inbox ----------
+async function refreshInbox() {
+    if (!IS_USER_LOGGED_IN) return;
+    try {
+        const res = await fetch('/api/inbox');
+        const d = await res.json();
+        if (!res.ok || !d.success) return;
+        const section = document.getElementById('inbox-section');
+        const list = document.getElementById('inbox-list');
+        if (list) {
+            section.style.display = d.items.length ? 'block' : 'none';
+            list.innerHTML = d.items.map(i => `
+                <div class="hist-item" id="inbox-${i.id}">
+                    <div>
+                        <div class="hist-kind">From @${escapeHtml(i.from_name)}</div>
+                        <div class="hist-title">Shared design</div>
+                        <div class="hist-meta">${new Date(i.created_at * 1000).toLocaleString()} \u2022 ${i.categories} categories, ${i.channels} channels, ${i.roles} roles</div>
+                    </div>
+                    <div class="hist-actions">
+                        <button class="btn-glass" onclick="inboxAction('${i.id}', 'accept')">Accept</button>
+                        <button class="btn-glass btn-secondary-link" onclick="inboxAction('${i.id}', 'decline')">Decline</button>
+                        <button class="btn-glass btn-secondary-link" onclick="inboxAction('${i.id}', 'block')">Block</button>
+                    </div>
+                </div>`).join('');
+        }
+        const box = document.getElementById('accept-shares');
+        if (box) box.checked = d.accepts;
+        const info = document.getElementById('blocked-info');
+        if (info) {
+            info.style.display = d.blocked_count ? 'block' : 'none';
+            document.getElementById('blocked-count').textContent = `You blocked ${d.blocked_count} ${d.blocked_count === 1 ? 'person' : 'people'}.`;
+        }
+        document.querySelectorAll('.inbox-badge').forEach(el => { el.textContent = d.items.length ? ` (${d.items.length})` : ''; });
+    } catch (e) { /* optional */ }
+}
+
+async function inboxAction(id, action) {
+    if (action === 'block' && !confirm('Block this person? They will not be able to send you designs.')) return;
+    try {
+        const res = await fetch(`/api/inbox/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+        const d = await res.json();
+        if (!res.ok || !d.success) { alert(d.error || 'Something went wrong.'); refreshInbox(); return; }
+        if (action === 'accept') { loadLayoutIntoEditor(d.blueprint); }
+        refreshInbox();
+        if (action === 'accept') return;
+        openHistory();
+    } catch (e) {
+        alert('Could not reach the server. Please try again.');
+    }
+}
+
+async function saveShareSettings() {
+    try {
+        await fetch('/api/share-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accepts: document.getElementById('accept-shares').checked }) });
+    } catch (e) { alert('Could not save. Please try again.'); }
+}
+
+async function clearBlocked() {
+    if (!confirm('Unblock everyone?')) return;
+    try {
+        await fetch('/api/share-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear_blocked: true }) });
+        refreshInbox();
+    } catch (e) { alert('Could not save. Please try again.'); }
+}
+
 // ---------- build progress ----------
 let buildPollTimer = null;
 
@@ -1498,6 +1649,7 @@ const HISTORY_KIND_LABELS = { generated: 'AI Generated', ai_edit: 'AI Edit', tem
 
 async function openHistory() {
     navigateTo('page-history');
+    refreshInbox();
     const list = document.getElementById('history-list');
     list.innerHTML = '<p style="color:var(--text-sub);">Loading...</p>';
     try {
@@ -1523,6 +1675,7 @@ async function openHistory() {
                 </div>
                 <div class="hist-actions">
                     <button class="btn-glass" onclick="openSavedDesign('${d.id}', this)">Open</button>
+                    <button class="btn-glass btn-secondary-link" title="Send to a Discord user" onclick="openSendModal('${d.id}')"><i class="fa-solid fa-paper-plane"></i> Send</button>
                     <button class="btn-glass btn-secondary-link" title="Copy share link" onclick="shareSavedDesign('${d.id}')"><i class="fa-solid fa-share-nodes"></i> Share</button>
                     <button class="btn-glass btn-secondary-link" onclick="deleteSavedDesign('${d.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
                 </div>
