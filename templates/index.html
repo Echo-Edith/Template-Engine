@@ -77,6 +77,9 @@ function checkAuthStatus() {
 
 /* Personal light theme: chosen with /settings in the bot. It only affects that person. */
 [data-theme="light"] {
+--accent-gold: #8a6100;
+--accent-green: #1f7a42;
+--accent-red: #b42323;
 --bg-base: #e8eff6;
 --grid-minor: rgba(30, 70, 120, 0.07);
 --grid-major: rgba(30, 70, 120, 0.15);
@@ -113,6 +116,7 @@ function checkAuthStatus() {
 [data-theme="light"] .discord-channel-item.active,
 [data-theme="light"] .add-btn-inline:hover { color: var(--text-title); }
 [data-theme="light"] .form-control option { background: #ffffff; }
+[data-theme="light"] .logout-link { color: #b42323; }
 [data-theme="light"] .btn-discord,
 [data-theme="light"] .btn-discord *,
 [data-theme="light"] .inbox-badge,
@@ -731,7 +735,7 @@ gap: 6px;
 .build-step { display:flex; gap:10px; align-items:center; padding:8px 0; text-align:left; font-size:0.9rem; color: var(--text-sub); }
 .build-step.active { color: inherit; font-weight:600; }
 .build-step.done { color: var(--accent-green); }
-.build-step.error { color: #f43f5e; font-weight:600; }
+.build-step.error { color: var(--accent-red); font-weight:600; }
 .btn-secondary-link { background: transparent; color: var(--text-main, inherit); border: 2px solid var(--card-border); }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .tpl-card { background: var(--card-bg); border: 2px solid var(--card-border); border-radius: 2px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
@@ -1294,7 +1298,7 @@ Continue in 5s
 </div>
 <p style="font-size:0.85rem; color:var(--text-sub); margin-bottom:12px; line-height:1.5;">Enter the ID of the server where the bot should build this design. In Discord, turn on Developer Mode, then right-click your server and choose <b>Copy Server ID</b>.</p>
 <input type="text" id="server-id-modal-input" class="form-control" placeholder="e.g. 123456789012345678" inputmode="numeric" autocomplete="off">
-<p id="server-id-modal-error" style="display:none; color:#f43f5e; font-size:0.8rem; margin-top:8px;">That does not look like a server ID. It is a number with 17 to 20 digits.</p>
+<p id="server-id-modal-error" style="display:none; color:var(--accent-red); font-size:0.8rem; margin-top:8px;">That does not look like a server ID. It is a number with 17 to 20 digits.</p>
 <div style="display:flex; gap:10px; margin-top:16px;">
 <button class="btn-glass btn-secondary-link" onclick="closeServerIdModal()">Cancel</button>
 <button class="btn-glass" onclick="confirmServerIdModal()">Continue</button>
@@ -2205,7 +2209,7 @@ function populateMultiSelectChannelList() {
     (currentLayout.categories || []).forEach((cat, cIdx) => {
         const catKey = `cat-${cIdx}`;
         const catName = escapeHtml(stripEmoji(cat.name || `Category ${cIdx + 1}`));
-        syncContainer.innerHTML += `<label class="sync-item"> <input type="checkbox" value="${catKey}" class="target-perm-cb"> <span style="font-weight:700; color:#fff;">📁 CATEGORY: ${catName}</span> </label>`;
+        syncContainer.innerHTML += `<label class="sync-item"> <input type="checkbox" value="${catKey}" class="target-perm-cb"> <span style="font-weight:700; color:var(--text-title);">📁 CATEGORY: ${catName}</span> </label>`;
         (cat.channels || []).forEach((chan, chIdx) => {
             const chanKey = `chan-${cIdx}-${chIdx}`;
             const cName = formatDiscordChannelName(chan.name);
