@@ -32,6 +32,7 @@ from cogs.features import (
     MAX_REMINDERS_PER_USER,
     COLOR_PURPLE,
     COLOR_GOLD,
+    COLOR_GRAY,
     get_roblox_cookie_header,
     get_user_points,
     add_user_points,
