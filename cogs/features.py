@@ -711,7 +711,7 @@ def next_case_id(guild_id) -> int:
     return LOCAL_CASE_COUNTERS[gid]
 
 
-def add_case(guild_id, user_id, action: str, reason: str, moderator_id, duration: Optional[str] = None) -> dict:
+def add_case(guild_id, user_id, action: str, reason: str, moderator_id, duration: Optional[str] = None, moderator_message: Optional[str] = None) -> dict:
     case = {
         "guild_id": str(guild_id),
         "case_id": next_case_id(guild_id),
@@ -720,6 +720,7 @@ def add_case(guild_id, user_id, action: str, reason: str, moderator_id, duration
         "reason": reason,
         "moderator_id": str(moderator_id),
         "duration": duration,
+        "moderator_message": moderator_message,
         "created_at": datetime.now(timezone.utc).timestamp(),
     }
     if db_cases is not None:
@@ -793,8 +794,9 @@ def delete_case(guild_id, case_id) -> bool:
 
 
 async def dm_moderation_notice(user, guild: discord.Guild, action: str, reason: str,
-                               case_id: Optional[int] = None, duration: Optional[str] = None) -> bool:
-    """DMs the moderated user. The moderator is never included (privacy). Returns True if delivered."""
+                               case_id: Optional[int] = None, duration: Optional[str] = None,
+                               moderator_message: Optional[str] = None) -> bool:
+    """DMs the moderated user. The moderator's name is never included (privacy), but the moderator's message is. Returns True if delivered."""
     titles = {
         "warn": "You were warned",
         "mute": "You were muted",
@@ -804,6 +806,8 @@ async def dm_moderation_notice(user, guild: discord.Guild, action: str, reason: 
     }
     embed = discord.Embed(title=f"{titles.get(action, 'Moderation notice')} in {guild.name}", color=COLOR_RED)
     embed.add_field(name="Reason", value=(reason or "No reason provided")[:1000], inline=False)
+    if moderator_message:
+        embed.add_field(name="Message From Moderator", value=moderator_message[:1000], inline=False)
     if duration:
         embed.add_field(name="Duration", value=f"`{duration}`", inline=True)
     if case_id:

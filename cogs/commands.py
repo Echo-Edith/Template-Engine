@@ -142,12 +142,10 @@ STAFF_COMMANDS = {"staff", "premiums"}  # only HARDCODED_STAFF may run these
 
 PUBLIC_COMMANDS = {
     "points", "leaderboard", "roblox", "gameinfo", "timestamp", "remind",
-    "afk", "whois", "permissions", "rolelist", "channelstats", "redeem", "promo", "shop", "daily",
+    "afk", "info", "redeem", "promo", "shop", "daily",
 }
 ADMIN_COMMANDS = {
-    "groupcheck", "slowmode", "nick", "role", "say", "embed", "announce",
-    "warn", "clear", "purge", "mute", "unmute", "kick", "ban", "unban",
-    "lock", "unlock", "modlog", "giveaway", "greeting", "messagelog", "backup", "analyze", "ticket",
+    "groupcheck", "nick", "role", "send", "mod", "channel", "cases", "giveaway", "greeting", "messagelog", "backup", "analyze", "ticket",
 }
 
 
@@ -1910,9 +1908,6 @@ class CommandsCog(commands.Cog):
         embed.add_field(name="Unix Time", value=f"`{ts}`", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="whois", description="Show information about a member.")
-    @app_commands.describe(user="The member to look up (defaults to you).")
-    @app_commands.guild_only()
     async def whois_cmd(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
         member = user or interaction.user
         embed = discord.Embed(title=str(member), description=member.mention, color=member.color if member.color.value else COLOR_PURPLE)
@@ -1938,9 +1933,6 @@ class CommandsCog(commands.Cog):
             embed.add_field(name="Key Permission", value="`Administrator`", inline=True)
         await interaction.response.send_message(embed=embed, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="permissions", description="Show a member's permissions in this channel.")
-    @app_commands.describe(user="The member to check (defaults to you).")
-    @app_commands.guild_only()
     async def permissions_cmd(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
         member = user or interaction.user
         perms = interaction.channel.permissions_for(member)
@@ -1954,16 +1946,12 @@ class CommandsCog(commands.Cog):
         embed.add_field(name=f"Denied ({len(denied)})", value="```\n" + ("\n".join(denied) or "None")[:950] + "\n```", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="rolelist", description="List every role in the server, one per line.")
-    @app_commands.guild_only()
     async def rolelist_cmd(self, interaction: discord.Interaction):
         roles = [r for r in reversed(interaction.guild.roles) if not r.is_default()]
         lines = [f"{r.mention} | `{r.id}` | {len(r.members)} members" for r in roles]
         pages = build_pages(f"Roles in {interaction.guild.name}", lines, per_page=20, header=f"Total roles: `{len(roles)}`\n\n")
         await send_pages(interaction, pages, ephemeral=False)
 
-    @app_commands.command(name="channelstats", description="Show channel counts for this server.")
-    @app_commands.guild_only()
     async def channelstats_cmd(self, interaction: discord.Interaction):
         guild = interaction.guild
         channel = interaction.channel
@@ -1990,10 +1978,6 @@ class CommandsCog(commands.Cog):
     # =============================================================
     # ADMIN UTILITY COMMANDS
     # =============================================================
-    @app_commands.command(name="slowmode", description="Set slowmode for a channel. Use off or 0 to disable.")
-    @app_commands.describe(duration="e.g. 5s, 30s, 2m, 1h (max 6h) or off.", channel="Channel (defaults to this one).")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def slowmode_cmd(self, interaction: discord.Interaction, duration: str, channel: Optional[discord.TextChannel] = None):
         channel = channel or interaction.channel
         if not isinstance(channel, discord.TextChannel):
@@ -2085,10 +2069,6 @@ class CommandsCog(commands.Cog):
             return
         await interaction.response.send_message(embed=embed_ok("Role Removed", f"Removed {role.mention} from {user.mention}."), ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="say", description="Send a message as the bot.")
-    @app_commands.describe(message="What the bot should say.", channel="Channel (defaults to this one).")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def say_cmd(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 2000], channel: Optional[discord.TextChannel] = None):
         channel = channel or interaction.channel
         try:
@@ -2098,22 +2078,9 @@ class CommandsCog(commands.Cog):
             return
         await interaction.response.send_message(embed=embed_ok("Message Sent", f"Posted in {channel.mention}."), ephemeral=True)
 
-    @app_commands.command(name="embed", description="Create and send a custom embed.")
-    @app_commands.describe(channel="Channel to send the embed to (defaults to this one).")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def embed_cmd(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
         await interaction.response.send_modal(EmbedBuilderModal(channel or interaction.channel))
 
-    @app_commands.command(name="announce", description="Send an announcement embed, with an optional ping.")
-    @app_commands.describe(channel="Where to post the announcement.", ping="Optional @everyone or @here ping.", role="Optional role to ping.")
-    @app_commands.choices(ping=[
-        app_commands.Choice(name="No ping", value="none"),
-        app_commands.Choice(name="@everyone", value="everyone"),
-        app_commands.Choice(name="@here", value="here"),
-    ])
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def announce_cmd(
         self,
         interaction: discord.Interaction,
@@ -2137,27 +2104,19 @@ class CommandsCog(commands.Cog):
             embed.set_footer(text="User was notified by DM." if dm_sent else "Could not DM the user (DMs are closed).")
         return embed
 
-    @app_commands.command(name="warn", description="Warn a member. They get a DM and the warning is logged.")
-    @app_commands.describe(user="The member to warn.", reason="Why they are being warned.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
-    async def warn_cmd(self, interaction: discord.Interaction, user: discord.Member, reason: app_commands.Range[str, 1, 500]):
+    async def warn_cmd(self, interaction: discord.Interaction, user: discord.Member, reason: str, moderator_message: Optional[str] = None):
         problem = check_hierarchy(interaction, user)
         if problem:
             await interaction.response.send_message(embed=embed_err("Cannot Warn", problem), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        case = add_case(interaction.guild.id, user.id, "warn", reason, interaction.user.id)
-        dm_sent = await dm_moderation_notice(user, interaction.guild, "warn", reason, case["case_id"])
+        case = add_case(interaction.guild.id, user.id, "warn", reason, interaction.user.id, moderator_message=moderator_message)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "warn", reason, case["case_id"], moderator_message=moderator_message)
         await interaction.followup.send(embed=self._mod_result("Member Warned", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="mute", description="Time out a member for a set duration.")
-    @app_commands.describe(user="The member to mute.", duration="e.g. 10m, 2h, 1d (max 28d).", reason="Why they are being muted.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def mute_cmd(
         self, interaction: discord.Interaction, user: discord.Member, duration: str,
-        reason: Optional[app_commands.Range[str, 1, 500]] = "No reason provided"
+        reason: str = "No reason provided", moderator_message: Optional[str] = None
     ):
         delta = parse_duration_strict(duration)
         if delta is None or delta > timedelta(days=28):
@@ -2175,19 +2134,15 @@ class CommandsCog(commands.Cog):
             await interaction.followup.send(embed=embed_err("Missing Permission", "I need the `Moderate Members` permission."), ephemeral=True)
             return
 
-        case = add_case(interaction.guild.id, user.id, "mute", reason, interaction.user.id, duration=format_timedelta(delta))
-        dm_sent = await dm_moderation_notice(user, interaction.guild, "mute", reason, case["case_id"], duration=format_timedelta(delta))
+        case = add_case(interaction.guild.id, user.id, "mute", reason, interaction.user.id, duration=format_timedelta(delta), moderator_message=moderator_message)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "mute", reason, case["case_id"], duration=format_timedelta(delta), moderator_message=moderator_message)
         until = int((datetime.now(timezone.utc) + delta).timestamp())
         await interaction.followup.send(
             embed=self._mod_result("Member Muted", user, case, dm_sent, {"Duration": f"`{format_timedelta(delta)}`", "Ends": f"<t:{until}:R>"}),
             ephemeral=True, allowed_mentions=NO_PINGS
         )
 
-    @app_commands.command(name="unmute", description="Remove a member's timeout.")
-    @app_commands.describe(user="The member to unmute.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
-    async def unmute_cmd(self, interaction: discord.Interaction, user: discord.Member):
+    async def unmute_cmd(self, interaction: discord.Interaction, user: discord.Member, moderator_message: Optional[str] = None):
         if not user.is_timed_out():
             await interaction.response.send_message(embed=embed_err("Not Muted", f"{user.mention} is not muted."), ephemeral=True, allowed_mentions=NO_PINGS)
             return
@@ -2197,15 +2152,11 @@ class CommandsCog(commands.Cog):
         except discord.Forbidden:
             await interaction.followup.send(embed=embed_err("Missing Permission", "I need the `Moderate Members` permission."), ephemeral=True)
             return
-        case = add_case(interaction.guild.id, user.id, "unmute", "Mute removed", interaction.user.id)
-        dm_sent = await dm_moderation_notice(user, interaction.guild, "unmute", "Your mute was removed.", case["case_id"])
+        case = add_case(interaction.guild.id, user.id, "unmute", "Mute removed", interaction.user.id, moderator_message=moderator_message)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "unmute", "Your mute was removed.", case["case_id"], moderator_message=moderator_message)
         await interaction.followup.send(embed=self._mod_result("Member Unmuted", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="kick", description="Kick a member. They get a DM first.")
-    @app_commands.describe(user="The member to kick.", reason="Why they are being kicked.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
-    async def kick_cmd(self, interaction: discord.Interaction, user: discord.Member, reason: Optional[app_commands.Range[str, 1, 500]] = "No reason provided"):
+    async def kick_cmd(self, interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided", moderator_message: Optional[str] = None):
         problem = check_hierarchy(interaction, user)
         if problem:
             await interaction.response.send_message(embed=embed_err("Cannot Kick", problem), ephemeral=True)
@@ -2214,9 +2165,9 @@ class CommandsCog(commands.Cog):
 
         case_id = None
         # DM first: after a kick the bot may no longer be able to reach the user
-        case = add_case(interaction.guild.id, user.id, "kick", reason, interaction.user.id)
+        case = add_case(interaction.guild.id, user.id, "kick", reason, interaction.user.id, moderator_message=moderator_message)
         case_id = case["case_id"]
-        dm_sent = await dm_moderation_notice(user, interaction.guild, "kick", reason, case_id)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "kick", reason, case_id, moderator_message=moderator_message)
         try:
             await user.kick(reason=f"{reason} | by {interaction.user} ({interaction.user.id})")
         except discord.Forbidden:
@@ -2225,14 +2176,10 @@ class CommandsCog(commands.Cog):
             return
         await interaction.followup.send(embed=self._mod_result("Member Kicked", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="ban", description="Ban a user. They get a DM first.")
-    @app_commands.describe(user="The user to ban.", reason="Why they are being banned.", delete_days="Delete their messages from the last 0-7 days.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def ban_cmd(
         self, interaction: discord.Interaction, user: discord.User,
-        reason: Optional[app_commands.Range[str, 1, 500]] = "No reason provided",
-        delete_days: Optional[app_commands.Range[int, 0, 7]] = 0
+        reason: str = "No reason provided",
+        delete_days: int = 0, moderator_message: Optional[str] = None
     ):
         member = interaction.guild.get_member(user.id)
         if member:
@@ -2245,8 +2192,8 @@ class CommandsCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        case = add_case(interaction.guild.id, user.id, "ban", reason, interaction.user.id)
-        dm_sent = await dm_moderation_notice(user, interaction.guild, "ban", reason, case["case_id"]) if member else None
+        case = add_case(interaction.guild.id, user.id, "ban", reason, interaction.user.id, moderator_message=moderator_message)
+        dm_sent = await dm_moderation_notice(user, interaction.guild, "ban", reason, case["case_id"], moderator_message=moderator_message) if member else None
         try:
             await interaction.guild.ban(
                 user, reason=f"{reason} | by {interaction.user} ({interaction.user.id})",
@@ -2258,10 +2205,6 @@ class CommandsCog(commands.Cog):
             return
         await interaction.followup.send(embed=self._mod_result("User Banned", user, case, dm_sent), ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="unban", description="Unban a user by ID or username.")
-    @app_commands.describe(user="The user ID (best) or username of the banned user.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def unban_cmd(self, interaction: discord.Interaction, user: str):
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
@@ -2289,10 +2232,6 @@ class CommandsCog(commands.Cog):
         case = add_case(guild.id, target.id, "unban", "Ban removed", interaction.user.id)
         await interaction.followup.send(embed=self._mod_result("User Unbanned", target, case, None), ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="clear", description="Remove a moderation case from the log by its case ID.")
-    @app_commands.describe(case_id="The case ID from /modlog or from the moderation result, e.g. 12.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def clear_cmd(self, interaction: discord.Interaction, case_id: app_commands.Range[int, 1, 100000000]):
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
@@ -2318,11 +2257,11 @@ class CommandsCog(commands.Cog):
             if case["action"] == "mute":
                 member = guild.get_member(uid)
                 if member and member.is_timed_out():
-                    notes.append("This user is still muted. Use `/unmute` to remove the mute.")
+                    notes.append("This user is still muted. Use `/mod action:Unmute` to remove the mute.")
             elif case["action"] == "ban":
                 try:
                     await guild.fetch_ban(discord.Object(id=uid))
-                    notes.append("This user is still banned. Use `/unban` to unban them.")
+                    notes.append("This user is still banned. Use `/mod action:Unban` to unban them.")
                 except discord.NotFound:
                     pass
         except Exception as e:
@@ -2331,10 +2270,6 @@ class CommandsCog(commands.Cog):
             embed.add_field(name="Note", value="\n".join(notes), inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True, allowed_mentions=NO_PINGS)
 
-    @app_commands.command(name="purge", description="Delete recent messages in this channel (old messages too, but slower).")
-    @app_commands.describe(amount="How many messages to delete (1-1000).", user="Only delete messages from this user.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def purge_cmd(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1, 1000], user: Optional[discord.User] = None):
         channel = interaction.channel
         if not hasattr(channel, "purge"):
@@ -2361,10 +2296,6 @@ class CommandsCog(commands.Cog):
         except Exception:
             pass  # the interaction can expire during a very long purge
 
-    @app_commands.command(name="lock", description="Stop @everyone from sending messages in a channel.")
-    @app_commands.describe(channel="Channel to lock (defaults to this one).")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def lock_cmd(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
         channel = channel or interaction.channel
         if not isinstance(channel, discord.TextChannel):
@@ -2388,10 +2319,6 @@ class CommandsCog(commands.Cog):
             except Exception:
                 pass
 
-    @app_commands.command(name="unlock", description="Let @everyone send messages in a channel again.")
-    @app_commands.describe(channel="Channel to unlock (defaults to this one).")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def unlock_cmd(self, interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
         channel = channel or interaction.channel
         if not isinstance(channel, discord.TextChannel):
@@ -2415,10 +2342,6 @@ class CommandsCog(commands.Cog):
             except Exception:
                 pass
 
-    @app_commands.command(name="modlog", description="Show all moderation logs for a user (10 per page).")
-    @app_commands.describe(user="The user to look up.")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def modlog_cmd(self, interaction: discord.Interaction, user: discord.User):
         cases = get_cases(interaction.guild.id, user.id)
         entries = []
@@ -2427,15 +2350,211 @@ class CommandsCog(commands.Cog):
             head = f"Case `#{c['case_id']}` | **{label}** | <t:{int(c['created_at'])}:R>"
             if c.get("duration"):
                 head += f" | `{c['duration']}`"
-            entries.append(f"{head}\nReason: {str(c['reason'])[:200]}\nModerator: <@{c['moderator_id']}>\n")
+            note = f"\nMessage to user: {str(c['moderator_message'])[:200]}" if c.get("moderator_message") else ""
+            entries.append(f"{head}\nReason: {str(c['reason'])[:200]}{note}\nModerator: <@{c['moderator_id']}>\n")
 
         pages = build_pages(
             f"Moderation Log | {user.name}", entries, per_page=10,
-            header=f"{user.mention} (`{user.id}`)\nTotal records: `{len(entries)}`\nRemove a record with `/clear` and its case ID.\n\n"
+            header=f"{user.mention} (`{user.id}`)\nTotal records: `{len(entries)}`\nRemove a record with `/cases action:Remove` and its case ID.\n\n"
         )
         if not entries:
             pages = [embed_info(f"Moderation Log | {user.name}", f"{user.mention} has no moderation records.")]
         await send_pages(interaction, pages, ephemeral=True)
+
+    # =============================================================
+    # MERGED COMMANDS: one command, many actions
+    # =============================================================
+    @app_commands.command(name="mod", description="Moderate a user: warn, mute, unmute, kick, ban or unban.")
+    @app_commands.describe(
+        action="What to do.",
+        user="The user.",
+        duration="Mute only: for example 10m, 2h, 1d (max 28d).",
+        reason="Why. Saved in the log and shown to the user.",
+        moderator_message="A message for the user. It is sent in their DM.",
+        delete_days="Ban only: delete their messages from the last 0-7 days."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Warn", value="warn"),
+        app_commands.Choice(name="Mute", value="mute"),
+        app_commands.Choice(name="Unmute", value="unmute"),
+        app_commands.Choice(name="Kick", value="kick"),
+        app_commands.Choice(name="Ban", value="ban"),
+        app_commands.Choice(name="Unban", value="unban"),
+    ])
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def mod_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        user: discord.User,
+        duration: Optional[str] = None,
+        reason: Optional[app_commands.Range[str, 1, 500]] = None,
+        moderator_message: Optional[app_commands.Range[str, 1, 500]] = None,
+        delete_days: Optional[app_commands.Range[int, 0, 7]] = 0
+    ):
+        act = action.value
+        if act == "unban":
+            await self.unban_cmd(interaction, str(user.id))
+            return
+        if act == "ban":
+            await self.ban_cmd(interaction, user, reason or "No reason provided", delete_days or 0, moderator_message)
+            return
+
+        member = interaction.guild.get_member(user.id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(user.id)
+            except Exception:
+                member = None
+        if member is None:
+            await interaction.response.send_message(
+                embed=embed_err("Not In Server", f"{user.mention} is not a member of this server. Only `Ban` and `Unban` work on people who are not in the server."),
+                ephemeral=True, allowed_mentions=NO_PINGS
+            )
+            return
+
+        if act == "warn":
+            if not reason:
+                await interaction.response.send_message(embed=embed_err("Reason Needed", "Warnings need a `reason`."), ephemeral=True)
+                return
+            await self.warn_cmd(interaction, member, reason, moderator_message)
+        elif act == "mute":
+            if not duration:
+                await interaction.response.send_message(embed=embed_err("Duration Needed", "Muting needs a `duration`, for example `10m`, `2h` or `1d`."), ephemeral=True)
+                return
+            await self.mute_cmd(interaction, member, duration, reason or "No reason provided", moderator_message)
+        elif act == "unmute":
+            await self.unmute_cmd(interaction, member, moderator_message)
+        else:
+            await self.kick_cmd(interaction, member, reason or "No reason provided", moderator_message)
+
+    @app_commands.command(name="channel", description="Channel tools: lock, unlock, slowmode or purge.")
+    @app_commands.describe(
+        action="What to do.",
+        channel="Channel (defaults to this one). Purge always works in this channel.",
+        duration="Slowmode only: 5s, 30s, 2m, 1h (max 6h) or off.",
+        amount="Purge only: how many messages to delete (1-1000).",
+        user="Purge only: delete only this user's messages."
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Lock", value="lock"),
+        app_commands.Choice(name="Unlock", value="unlock"),
+        app_commands.Choice(name="Slowmode", value="slowmode"),
+        app_commands.Choice(name="Purge", value="purge"),
+    ])
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def channel_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        channel: Optional[discord.TextChannel] = None,
+        duration: Optional[str] = None,
+        amount: Optional[app_commands.Range[int, 1, 1000]] = None,
+        user: Optional[discord.User] = None
+    ):
+        act = action.value
+        if act == "lock":
+            await self.lock_cmd(interaction, channel)
+        elif act == "unlock":
+            await self.unlock_cmd(interaction, channel)
+        elif act == "slowmode":
+            if not duration:
+                await interaction.response.send_message(embed=embed_err("Duration Needed", "Slowmode needs a `duration`, for example `5s`, `2m` or `off`."), ephemeral=True)
+                return
+            await self.slowmode_cmd(interaction, duration, channel)
+        else:
+            if not amount:
+                await interaction.response.send_message(embed=embed_err("Amount Needed", "Purge needs an `amount` from 1 to 1000."), ephemeral=True)
+                return
+            await self.purge_cmd(interaction, amount, user)
+
+    @app_commands.command(name="info", description="Show info: a member, their permissions, the role list or channel stats.")
+    @app_commands.describe(type="What to show.", user="Member or Permissions only: who (defaults to you).")
+    @app_commands.choices(type=[
+        app_commands.Choice(name="Member", value="member"),
+        app_commands.Choice(name="Permissions", value="permissions"),
+        app_commands.Choice(name="Roles", value="roles"),
+        app_commands.Choice(name="Channels", value="channels"),
+    ])
+    @app_commands.guild_only()
+    async def info_cmd(self, interaction: discord.Interaction, type: app_commands.Choice[str], user: Optional[discord.Member] = None):
+        if type.value == "member":
+            await self.whois_cmd(interaction, user)
+        elif type.value == "permissions":
+            await self.permissions_cmd(interaction, user)
+        elif type.value == "roles":
+            await self.rolelist_cmd(interaction)
+        else:
+            await self.channelstats_cmd(interaction)
+
+    @app_commands.command(name="cases", description="Moderation log: view a user's cases or remove a case.")
+    @app_commands.describe(action="What to do.", user="View only: the user.", case_id="Remove only: the case ID, e.g. 12.")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="View", value="view"),
+        app_commands.Choice(name="Remove", value="remove"),
+    ])
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def cases_cmd(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        user: Optional[discord.User] = None,
+        case_id: Optional[app_commands.Range[int, 1, 100000000]] = None
+    ):
+        if action.value == "view":
+            if not user:
+                await interaction.response.send_message(embed=embed_err("User Needed", "Viewing cases needs a `user`."), ephemeral=True)
+                return
+            await self.modlog_cmd(interaction, user)
+        else:
+            if not case_id:
+                await interaction.response.send_message(embed=embed_err("Case ID Needed", "Removing a case needs a `case_id`."), ephemeral=True)
+                return
+            await self.clear_cmd(interaction, case_id)
+
+    @app_commands.command(name="send", description="Send as the bot: a plain message, a custom embed or an announcement.")
+    @app_commands.describe(
+        type="What to send.",
+        channel="Where to send it (defaults to this channel).",
+        message="Message only: what the bot should say.",
+        ping="Announcement only: optional @everyone or @here ping.",
+        role="Announcement only: optional role to ping."
+    )
+    @app_commands.choices(
+        type=[
+            app_commands.Choice(name="Message", value="message"),
+            app_commands.Choice(name="Embed", value="embed"),
+            app_commands.Choice(name="Announcement", value="announce"),
+        ],
+        ping=[
+            app_commands.Choice(name="No ping", value="none"),
+            app_commands.Choice(name="@everyone", value="everyone"),
+            app_commands.Choice(name="@here", value="here"),
+        ]
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def send_cmd(
+        self,
+        interaction: discord.Interaction,
+        type: app_commands.Choice[str],
+        channel: Optional[discord.TextChannel] = None,
+        message: Optional[app_commands.Range[str, 1, 2000]] = None,
+        ping: Optional[app_commands.Choice[str]] = None,
+        role: Optional[discord.Role] = None
+    ):
+        if type.value == "message":
+            if not message:
+                await interaction.response.send_message(embed=embed_err("Message Needed", "Add the `message` the bot should say."), ephemeral=True)
+                return
+            await self.say_cmd(interaction, message, channel)
+        elif type.value == "embed":
+            await self.embed_cmd(interaction, channel)
+        else:
+            await self.announce_cmd(interaction, channel or interaction.channel, ping, role)
 
     # =============================================================
     # GIVEAWAYS
