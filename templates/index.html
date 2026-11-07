@@ -12,7 +12,6 @@
 <script>
 const DISCORD_CLIENT_ID = "{{ discord_client_id or '' }}".trim();
 const IS_USER_LOGGED_IN = {{ 'true' if user else 'false' }};
-const IS_ROBLOX_LINKED = {{ 'true' if roblox_user else 'false' }};
 const IS_TE_PREMIUM = {{ 'true' if is_premium else 'false' }};
 
 function checkAuthStatus() {
@@ -24,8 +23,6 @@ function checkAuthStatus() {
         if (label) label.innerText = "Log In with Discord First";
         return;
     }
-
-    // A Roblox account is optional: you can also pay with server points.
 
     if (btn) {
         btn.disabled = false;
@@ -829,7 +826,7 @@ height: 16px;
 accent-color: var(--accent-purple);
 }
 
-.robux-badge {
+.notice-badge {
 background: rgba(201, 150, 43, 0.1);
 border: 2px dashed var(--gold-glass-border);
 color: var(--accent-gold);
@@ -903,7 +900,7 @@ background: var(--accent-purple-glow) !important;
 <div id="page-landing" class="page active">
 <div class="brand-header">
 <h1>Template Engine</h1>
-<p>Log in with Discord to unlock the AI layout tools. No Roblox account needed.</p>
+<p>Log in with Discord to unlock the AI layout tools.</p>
 </div>
 
 <!-- DISCORD AUTH CARD -->
@@ -924,19 +921,6 @@ background: var(--accent-purple-glow) !important;
 </div>
 {% endif %}
 
-<!-- ROBLOX LINKED ACCOUNT CARD -->
-{% if roblox_user %}
-<div class="user-auth-card gold-card">
-<div class="user-info">
-<i class="fa-solid fa-gamepad fa-lg" style="color: var(--accent-gold);"></i>
-<div>
-<span style="font-weight: 600; font-size: 0.95rem; display:block;">{{ roblox_user.username }}</span>
-<span style="font-size:0.75rem; color: var(--accent-gold);">Roblox Account Auto-Synced</span>
-</div>
-</div>
-<i class="fa-solid fa-circle-check" style="color: #2ecc71;"></i>
-</div>
-{% endif %}
 
 <!-- AUTHENTICATION & PREMIUM ACTIONS GRID -->
 <div class="auth-actions-grid">
@@ -1078,7 +1062,7 @@ background: var(--accent-purple-glow) !important;
 <i class="fa-solid fa-circle-check fa-3x" style="color: var(--accent-green); margin-bottom: 18px;"></i>
 <div class="brand-header">
 <h1 id="final-title-heading">Blueprint Submitted!</h1>
-<p id="final-desc-text">{% if free_mode %}Your blueprint has been sent to the bot. It will be built automatically.{% else %}Your blueprint has been sent to the bot. It will be built automatically once your payment (Robux or points) is verified.{% endif %}</p>
+<p id="final-desc-text">{% if free_mode %}Your blueprint has been sent to the bot. It will be built automatically.{% else %}Your blueprint has been sent to the bot. It will be built automatically once your payment (points or TE Premium) is verified.{% endif %}</p>
 </div>
 <button class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="resetBuilder()" style="margin-top: 10px;">
 Start New Layout
@@ -1107,29 +1091,29 @@ Continue in 5s
 </div>
 </div>
 
-<!-- NON-PREMIUM ROBUX NOTICE MODAL -->
-<div id="robux-notice-modal" class="modal-backdrop">
+<!-- NON-PREMIUM PAYMENT NOTICE MODAL -->
+<div id="payment-notice-modal" class="modal-backdrop">
 <div class="modal-card" style="text-align: center;">
 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
 <h3 style="font-size:1.1rem; font-weight:700; color: var(--accent-gold);">
 <i class="fa-solid fa-coins"></i> Standard Build Notice
 </h3>
-<i class="fa-solid fa-xmark" onclick="closeRobuxNoticeModal()" style="cursor:pointer; font-size:1.2rem;"></i>
+<i class="fa-solid fa-xmark" onclick="closePaymentNoticeModal()" style="cursor:pointer; font-size:1.2rem;"></i>
 </div>
 {% if free_mode %}
-<div class="robux-badge" style="border-color: var(--accent-green); color: var(--accent-green);">
+<div class="notice-badge" style="border-color: var(--accent-green); color: var(--accent-green);">
 <strong>Free right now:</strong> Building a server layout needs no payment at the moment. Submit your design and the bot builds it.
 </div>
 {% else %}
-<div class="robux-badge">
-<strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout costs Robux or server points, unless you have an active <strong>TE Premium</strong> subscription ({{ subscription_price }} Robux/mo).
+<div class="notice-badge">
+<strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout costs server points, unless you have an active <strong>TE Premium</strong> subscription.
 </div>
 {% endif %}
 <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
-{% if free_mode %}Submitting this design sends your blueprint to the bot. It builds your server automatically. No staff review is needed.{% else %}Submitting this design sends your blueprint to the bot. The bot then DMs you the ways to pay (Robux, server points or TE Premium) and builds your server automatically once your payment is verified. No staff review is needed.{% endif %}
+{% if free_mode %}Submitting this design sends your blueprint to the bot. It builds your server automatically. No staff review is needed.{% else %}Submitting this design sends your blueprint to the bot. The bot then DMs you the ways to pay (server points or TE Premium) and builds your server automatically once your payment is verified. No staff review is needed.{% endif %}
 </p>
 <div style="display:flex; gap:10px;">
-<button class="btn-glass btn-secondary" onclick="closeRobuxNoticeModal()">
+<button class="btn-glass btn-secondary" onclick="closePaymentNoticeModal()">
 Cancel
 </button>
 <button class="btn-glass" onclick="confirmNonPremiumSubmission()">
@@ -1639,18 +1623,18 @@ function handleInitialSubmitClick() {
         return;
     }
     if (!IS_TE_PREMIUM) {
-        document.getElementById('robux-notice-modal').style.display = 'flex';
+        document.getElementById('payment-notice-modal').style.display = 'flex';
     } else {
         handleSubmitDesign();
     }
 }
 
-function closeRobuxNoticeModal() {
-    document.getElementById('robux-notice-modal').style.display = 'none';
+function closePaymentNoticeModal() {
+    document.getElementById('payment-notice-modal').style.display = 'none';
 }
 
 function confirmNonPremiumSubmission() {
-    closeRobuxNoticeModal();
+    closePaymentNoticeModal();
     handleSubmitDesign();
 }
 
@@ -1700,7 +1684,7 @@ async function handleSubmitDesign() {
                 if (heading) heading.innerText = "Blueprint Submitted!";
                 if (desc) desc.innerText = {{ 'true' if free_mode else 'false' }}
                     ? "Your blueprint has been sent to the bot. It will be built automatically."
-                    : "Your blueprint has been sent to the bot. It will be built automatically once your payment (Robux, points or TE Premium) is verified.";
+                    : "Your blueprint has been sent to the bot. It will be built automatically once your payment (points or TE Premium) is verified.";
             }
         } else if (response.status === 401) {
             alert('Your login has expired. Please log in with Discord again, then submit.');
