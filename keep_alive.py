@@ -1,6 +1,6 @@
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import asyncio
 import requests
@@ -112,6 +112,45 @@ def is_user_premium(discord_id: str) -> bool:
     return False
 
 
+JST = timezone(timedelta(hours=9))
+DEFAULT_AI_PER_DAY = 3
+LOCAL_AI_USAGE = {}
+
+
+def get_ai_per_day() -> int:
+    """Daily AI limit for standard members, set with /change limits in the bot. 0 = no limit."""
+    if db_settings is not None:
+        try:
+            value = (db_settings.find_one({"_id": "limits"}) or {}).get("ai_per_day")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        except Exception as e:
+            print(f"[Limits Read Error] {e}")
+    return DEFAULT_AI_PER_DAY
+
+
+def ai_used_today(user_id: str) -> int:
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    doc = LOCAL_AI_USAGE.get(str(user_id), {})
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": f"usage:{user_id}"}) or {}
+        except Exception as e:
+            print(f"[Usage Read Error] {e}")
+    return int(doc.get("ai_count", 0)) if doc.get("ai_day") == today else 0
+
+
+def record_ai_use(user_id: str):
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    used = ai_used_today(user_id) + 1
+    LOCAL_AI_USAGE[str(user_id)] = {"ai_day": today, "ai_count": used}
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": f"usage:{user_id}"}, {"$set": {"ai_day": today, "ai_count": used}}, upsert=True)
+        except Exception as e:
+            print(f"[Usage Save Error] {e}")
+
+
 @app.route("/")
 def index():
     user = session.get("user")
@@ -219,6 +258,15 @@ def generate_blueprint_endpoint():
         if not user:
             return jsonify({"success": False, "error": "Unauthorized. Please log in with Discord."}), 401
 
+        # Free limit: standard members get a few AI generations per day (TE Premium has no limit)
+        user_id = str(user.get("id", "0"))
+        limit = 0 if is_user_premium(user_id) else get_ai_per_day()
+        if limit > 0 and ai_used_today(user_id) >= limit:
+            return jsonify({
+                "success": False,
+                "error": f"You used all {limit} free AI generations for today. They come back at 00:00 Tokyo time. TE Premium members have no limit."
+            }), 429
+
         # Call ai_brain.generate_server_layout directly via asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -237,6 +285,8 @@ def generate_blueprint_endpoint():
             error_msg = ai_result.get("error") if ai_result else "AI layout generation failed."
             return jsonify({"success": False, "error": error_msg}), 500
 
+        if limit > 0:
+            record_ai_use(user_id)  # only successful generations count
         blueprint = ai_result.get("data", {})
         return jsonify({"success": True, "blueprint": blueprint}), 200
 

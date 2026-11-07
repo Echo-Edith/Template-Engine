@@ -66,6 +66,8 @@ from cogs.features import (
     COLOR_GREEN,
     get_prices,
     set_price,
+    get_limits,
+    set_limit,
     PROMO_CODE_RE,
     normalize_promo_code,
     create_promo,
@@ -2838,6 +2840,37 @@ class CommandsCog(commands.Cog):
 
         view = PriceChangeConfirmView(interaction.user.id, kind, current, new_price, api)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    @change_group.command(name="limits", description="Change the free limits for standard members (owner only).")
+    @app_commands.describe(
+        ai_per_day="AI generations per day on the website. 0 = no limit.",
+        builds_per_week="Server builds per week. 0 = no limit."
+    )
+    async def change_limits_cmd(
+        self,
+        interaction: discord.Interaction,
+        ai_per_day: Optional[app_commands.Range[int, 0, 1000]] = None,
+        builds_per_week: Optional[app_commands.Range[int, 0, 1000]] = None
+    ):
+        changed = []
+        if ai_per_day is not None:
+            set_limit("ai_per_day", ai_per_day)
+            changed.append("ai_per_day")
+        if builds_per_week is not None:
+            set_limit("builds_per_week", builds_per_week)
+            changed.append("builds_per_week")
+        limits = get_limits()
+
+        def show(v):
+            return "`no limit`" if v == 0 else f"`{v}`"
+
+        embed = discord.Embed(title="Free Limits" if not changed else "Free Limits Updated", color=COLOR_GOLD)
+        embed.add_field(name="AI Generations Per Day", value=show(limits["ai_per_day"]), inline=True)
+        embed.add_field(name="Builds Per Week", value=show(limits["builds_per_week"]), inline=True)
+        embed.add_field(name="Who", value="Standard members only. TE Premium has no limits. Days and weeks use Tokyo time.", inline=False)
+        if not changed:
+            embed.add_field(name="Change It", value="`/change limits ai_per_day:5 builds_per_week:2`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # =============================================================
     # PROMO CODES

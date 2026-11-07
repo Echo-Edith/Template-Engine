@@ -1636,6 +1636,100 @@ def set_free_mode(on: bool, by: str = "") -> bool:
     return False
 
 
+# -------------------------------------------------------------
+# FREE LIMITS: standard members get a small amount, TE Premium is unlimited.
+# 0 means "no limit". Days and weeks follow Tokyo time (JST).
+# -------------------------------------------------------------
+DEFAULT_LIMITS = {"ai_per_day": 3, "builds_per_week": 1}
+LOCAL_LIMITS: Dict[str, int] = {}
+LOCAL_USAGE: Dict[str, dict] = {}
+JST = timezone(timedelta(hours=9))
+
+
+def get_limits() -> dict:
+    limits = dict(DEFAULT_LIMITS)
+    limits.update({k: v for k, v in LOCAL_LIMITS.items() if k in limits})
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "limits"}) or {}
+            for key in limits:
+                value = doc.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    limits[key] = value
+        except Exception as e:
+            print(f"[Limits Read Error] {e}")
+    return limits
+
+
+def set_limit(key: str, value: int) -> bool:
+    if key not in DEFAULT_LIMITS:
+        return False
+    LOCAL_LIMITS[key] = int(value)
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": "limits"}, {"$set": {key: int(value)}}, upsert=True)
+        except Exception as e:
+            print(f"[Limits Save Error] {e}")
+            return False
+    return True
+
+
+def build_week_info() -> tuple:
+    """(week key, unix time when the next Monday 00:00 JST starts)"""
+    now = datetime.now(JST)
+    iso = now.isocalendar()
+    monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return f"{iso[0]}-W{iso[1]:02d}", int((monday + timedelta(days=7)).timestamp())
+
+
+def get_builds_used(user_id: str) -> int:
+    week, _ = build_week_info()
+    doc = LOCAL_USAGE.get(str(user_id), {})
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": f"usage:{user_id}"}) or {}
+        except Exception as e:
+            print(f"[Usage Read Error] {e}")
+    return int(doc.get("build_count", 0)) if doc.get("build_week") == week else 0
+
+
+def check_build_limit(user_id: str) -> tuple:
+    """(allowed, limit, used, reset_unix). TE Premium and a limit of 0 are never blocked."""
+    limit = get_limits()["builds_per_week"]
+    _, reset = build_week_info()
+    if user_has_premium(user_id) or limit <= 0:
+        return True, limit, 0, reset
+    used = get_builds_used(user_id)
+    return used < limit, limit, used, reset
+
+
+def record_build(user_id: str):
+    """Counts one build for a standard member (premium is not counted)."""
+    if user_has_premium(user_id):
+        return
+    week, _ = build_week_info()
+    used = get_builds_used(user_id) + 1
+    LOCAL_USAGE[str(user_id)] = {"build_week": week, "build_count": used}
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": f"usage:{user_id}"}, {"$set": {"build_week": week, "build_count": used}}, upsert=True)
+        except Exception as e:
+            print(f"[Usage Save Error] {e}")
+
+
+def build_limit_embed(limit: int, reset_unix: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="Weekly Build Limit Reached",
+        description=(
+            f"Standard members can build `{limit}` server{'s' if limit != 1 else ''} per week.\n"
+            f"Your limit comes back <t:{reset_unix}:R> (<t:{reset_unix}:f>).\n\n"
+            "TE Premium members have no weekly limit."
+        ),
+        color=0xF43F5E
+    )
+    return embed
+
+
 DESIGN_DONE: set = set()  # design messages already handled (so the DM is sent once)
 LOCAL_PRICES: Dict[str, int] = {}
 
@@ -3053,7 +3147,7 @@ class PremiumMissingBotView(discord.ui.View):
 # INTERACTIVE UI FOR NON-PREMIUM VERIFICATION & POINTS PURCHASE
 # -------------------------------------------------------------
 class NonPremiumDeploymentView(discord.ui.View):
-    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, dev_product_url: str = "", points_cost: int = 100):
+    def __init__(self, bot=None, submitting_user_id: str = "0", target_guild_id: str = "0", layout: dict = None, points_cost: int = 100):
         super().__init__(timeout=None)
         self.bot = bot
         # The price shown in the DM is the price charged, even if /change price runs later
@@ -3063,141 +3157,12 @@ class NonPremiumDeploymentView(discord.ui.View):
         self.target_guild_id = str(target_guild_id)
         self.layout = layout or {}
 
-        final_url = dev_product_url or "https://www.roblox.com/games/6094950399/Template-Engine#!/store"
-        self.add_item(discord.ui.Button(label="Buy Roblox Dev Product", url=final_url, style=discord.ButtonStyle.link))
         premium_url = os.getenv("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
         if premium_url:
             self.add_item(discord.ui.Button(label="Get TE Premium", url=premium_url, style=discord.ButtonStyle.link))
         invite_url = os.getenv("DISCORD_SERVER_INVITE", "").strip()
         if invite_url.startswith("http"):
             self.add_item(discord.ui.Button(label="Join Our Server", url=invite_url, style=discord.ButtonStyle.link))
-
-    @discord.ui.button(label="Verify Purchase", style=discord.ButtonStyle.success, custom_id="btn_verify_dev_product")
-    async def verify_purchase_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
-        user_id = str(interaction.user.id)
-
-        # Safety check first, so a blocked user never uses up a purchase
-        early_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
-        early_guild = await fetch_target_guild(self.bot or interaction.client, early_gid)
-        if not early_guild:
-            await interaction.followup.send("Error: The bot is no longer in the target server.", ephemeral=True)
-            return
-        allowed, reason = await can_build_in_guild(early_guild, interaction.user.id)
-        if not allowed:
-            await interaction.followup.send(embed=build_denied_embed(early_guild.name, reason), ephemeral=True)
-            return
-
-        roblox_id = None
-        if db_users is not None:
-            doc = db_users.find_one({"discord_id": user_id})
-            if doc and "roblox_data" in doc:
-                roblox_id = doc["roblox_data"].get("id")
-
-        if not roblox_id:
-            embed = discord.Embed(
-                title="Roblox Account Unlinked",
-                description="Please sync your Roblox account via the account sync channel before verifying purchases.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        dev_product_id = os.getenv("ROBLOX_DEV_PRODUCT_ID", "").strip()
-        open_cloud_key = os.getenv("ROBLOX_OPEN_CLOUD_KEY", "").strip()
-        cookie_headers = get_roblox_cookie_header()
-
-        is_verified = False
-        receipt_token = None
-
-        # 1. PRIMARY CHECK: ROBLOX COOKIE ECONOMY API SALES AUDIT
-        if cookie_headers and roblox_id:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    url = f"https://economy.roblox.com/v2/users/{roblox_id}/transaction-history?transactionType=Purchase&limit=50"
-                    async with session.get(url, headers=cookie_headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            transactions = data.get("data", [])
-                            if isinstance(transactions, list):
-                                for item in transactions:
-                                    tx_id = str(item.get("id") or item.get("transactionId") or "").strip()
-                                    details = item.get("details") or {}
-                                    item_id = str(details.get("id") or item.get("targetId") or "").strip()
-                                    created_time = item.get("created", "")
-
-                                    unique_tx_key = f"cookie_tx_{tx_id}_{created_time}"
-
-                                    if (not dev_product_id or item_id == dev_product_id) and unique_tx_key not in USED_DEV_PRODUCT_RECEIPTS:
-                                        is_verified = True
-                                        receipt_token = unique_tx_key
-                                        break
-            except Exception as cookie_err:
-                print(f"[Roblox Cookie Economy API Exception] {cookie_err}")
-
-        # 2. FALLBACK CHECK: OPEN CLOUD API
-        if not is_verified and open_cloud_key and dev_product_id:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    url = f"https://apis.roblox.com/developer-products/v1/developer-products/{dev_product_id}/purchases?userId={roblox_id}"
-                    headers = {"x-api-key": open_cloud_key}
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            purchases = data.get("purchases", [])
-                            if isinstance(purchases, list):
-                                for p in purchases:
-                                    r_id = str(p.get("purchaseToken") or p.get("receipt") or "").strip()
-                                    p_prod_id = str(p.get("developerProductId") or p.get("productId") or "").strip()
-                                    
-                                    unique_opencloud_key = f"oc_{r_id}"
-
-                                    if r_id and (not dev_product_id or p_prod_id == dev_product_id) and unique_opencloud_key not in USED_DEV_PRODUCT_RECEIPTS:
-                                        is_verified = True
-                                        receipt_token = unique_opencloud_key
-                                        break
-            except Exception as oc_err:
-                print(f"[Dev Product Verify OpenCloud Exception] {oc_err}")
-
-        if not is_verified:
-            embed = discord.Embed(
-                title="Purchase Verification Failed",
-                description="No unused Roblox purchase transaction was detected for your synced Roblox account.\n\n"
-                            "• Make sure you purchased the Developer Product on Roblox using your synced account.\n"
-                            "• Each purchase transaction can only be redeemed **ONCE** for a server deployment.",
-                color=0xF43F5E
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        if receipt_token:
-            USED_DEV_PRODUCT_RECEIPTS.add(receipt_token)
-
-        bot_inst = self.bot or interaction.client
-        target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
-
-        guild = bot_inst.get_guild(target_gid) if target_gid else None
-        if not guild and target_gid:
-            try:
-                guild = await bot_inst.fetch_guild(target_gid)
-            except Exception:
-                guild = None
-
-        if not guild:
-            await interaction.followup.send("Error: The bot is no longer in the target server.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Purchase Verified! Deploying Layout...",
-            description=f"Single-use purchase transaction verified (`{receipt_token[:18]}...`). Now building {guild.name}!",
-            color=0x2ECC71
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-        cog = bot_inst.get_cog("FeaturesCog")
-        if cog:
-            await cog.execute_auto_build(guild, self.layout)
 
     @discord.ui.button(label="Use Points (100 Pts)", style=discord.ButtonStyle.primary, custom_id="btn_use_points_build")
     async def use_points_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3216,6 +3181,11 @@ class NonPremiumDeploymentView(discord.ui.View):
             await interaction.followup.send(embed=build_denied_embed(early_guild.name, reason), ephemeral=True)
             return
 
+        ok, limit, _used, reset_unix = check_build_limit(user_id)
+        if not ok:
+            await interaction.followup.send(embed=build_limit_embed(limit, reset_unix), ephemeral=True)
+            return
+
         current_pts = get_user_points(user_id)
 
         cost = self.points_cost
@@ -3229,6 +3199,7 @@ class NonPremiumDeploymentView(discord.ui.View):
             return
 
         new_total = add_user_points(user_id, -cost)
+        record_build(user_id)
 
         bot_inst = self.bot or interaction.client
         target_gid = int(self.target_guild_id) if self.target_guild_id != "0" else 0
@@ -3894,56 +3865,77 @@ class FeaturesCog(commands.Cog):
             await self.notify_build_denied(submitting_user_id, guild.name, reason)
             return
 
-        if not is_premium_submission and str(getattr(channel, 'id', 0)) != str(PREMIUM_DESIGN_CHANNEL_ID) and not is_free_mode():
+        is_standard = not is_premium_submission and str(getattr(channel, 'id', 0)) != str(PREMIUM_DESIGN_CHANNEL_ID)
+
+        if is_standard:
+            ok, limit, _used, reset_unix = check_build_limit(submitting_user_id)
+            if not ok:
+                await self.send_limit_dm(submitting_user_id, limit, reset_unix)
+                return
+
+        if is_standard and not is_free_mode():
             print(f"[Frontend Direct DM] Initiating direct DM with 5 retries to submitter {submitting_user_id} before logging...")
             await self.send_non_premium_verification_dm(submitting_user_id, target_guild_id, layout, guild.name, channel)
         else:
-            print(f"[Auto-Build] {'Free mode' if is_free_mode() and not is_premium_submission else 'Premium'} deployment for {guild.name} ({guild.id})")
+            print(f"[Auto-Build] {'Free mode' if is_standard else 'Premium'} deployment for {guild.name} ({guild.id})")
+            if is_standard:
+                record_build(submitting_user_id)
             await self.execute_auto_build(guild, layout)
 
+    async def send_limit_dm(self, user_id: str, limit: int, reset_unix: int):
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+            await user.send(embed=build_limit_embed(limit, reset_unix))
+        except Exception as e:
+            print(f"[Limit DM Error] {e}")
+
     async def send_non_premium_verification_dm(self, user_id: str, target_guild_id: str, layout: dict, guild_name: str, fallback_channel: Optional[discord.TextChannel] = None):
-        dev_product_url = os.getenv("ROBLOX_DEV_PRODUCT_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
         user_pts = get_user_points(user_id)
         prices = get_prices()
         points_cost = prices["points_cost"]
-        dev_price = prices["dev_product_robux"]
 
         embed = discord.Embed(
             title="Server Deployment Options",
             description=f"<@{user_id}> Your blueprint for **{guild_name}** has been submitted!\n\nTo build this layout, select one of the deployment options below:",
             color=0x8B5CF6
         )
+        limits = get_limits()
+        used = get_builds_used(user_id)
+        build_cap = limits["builds_per_week"]
         embed.add_field(
-            name="Option 1: Single Build with Robux",
+            name="Option 1: Server Points",
             value=(
-                f"Buy the one-time Roblox Developer Product (**{dev_price:,} Robux**), then click **Verify Purchase**.\n"
-                if dev_price else
-                "Buy the one-time Roblox Developer Product, then click **Verify Purchase**.\n"
-            ) + "Needs a Roblox account that is synced (see below).",
+                f"Click **Use Points ({points_cost:,} Pts)** to build right now.\n"
+                f"Your points: `{user_pts:,} pts`\n"
+                "Earn points by chatting, with `/daily`, in giveaways, and in `/shop` deals."
+            ),
             inline=False
         )
         embed.add_field(
-            name="Option 2: Server Points",
-            value=f"No Roblox account needed. Click **Use Points ({points_cost:,} Pts)** to build right now.\nYour points: `{user_pts:,} pts`\nEarn points by chatting, with `/daily`, in giveaways, and in `/shop` deals.",
-            inline=False
-        )
-        embed.add_field(
-            name="Option 3: TE Premium",
+            name="Option 2: TE Premium",
             value=(
                 f"Subscribe on Roblox (**{prices['subscription_robux']:,} Robux/mo**) "
-                "for instant automatic builds every time, or get it free for 30 days while you boost our server.\n"
+                "for instant automatic builds with no limits, or get it free for 30 days while you boost our server.\n"
                 "The subscription needs a synced Roblox account (see below)."
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Your Free Limits",
+            value=(
+                (f"Builds this week: `{used}/{build_cap}`\n" if build_cap > 0 else "Builds: `no limit`\n")
+                + (f"AI generations: `{limits['ai_per_day']} per day`\n" if limits["ai_per_day"] > 0 else "AI generations: `no limit`\n")
+                + "TE Premium members have no limits."
             ),
             inline=False
         )
         embed.add_field(
             name="How to Sync Your Roblox Account",
             value=(
-                "Only Option 1 and the Roblox part of Option 3 need this.\n"
+                "Only TE Premium (Roblox subscription) needs this.\n"
                 "1. Join the Template Engine Discord server.\n"
                 "2. Open the `#account-sync` channel.\n"
-                "3. Follow the steps there to link your Roblox account.\n"
-                "4. Come back here and click **Verify Purchase**."
+                "3. Follow the steps there to link your Roblox account."
             ),
             inline=False
         )
@@ -3953,7 +3945,6 @@ class FeaturesCog(commands.Cog):
             submitting_user_id=user_id,
             target_guild_id=target_guild_id,
             layout=layout,
-            dev_product_url=dev_product_url,
             points_cost=points_cost
         )
 
