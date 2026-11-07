@@ -671,6 +671,14 @@ gap: 6px;
 .inbox-btn { position: relative; }
 .inbox-badge { background: #f43f5e; color: #fff; border-radius: 999px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 0.68rem; line-height: 18px; text-align: center; margin-left: 6px; display: inline-block; }
 .new-tag { background: #f43f5e; color: #fff; border-radius: 2px; padding: 1px 6px; font-size: 0.62rem; margin-left: 6px; letter-spacing: 1px; }
+.ai-chat { max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin: 8px 0 12px; padding: 4px 2px; }
+.chat-msg { padding: 9px 12px; border-radius: 3px; font-size: 0.82rem; line-height: 1.45; max-width: 92%; word-break: break-word; }
+.chat-msg.user { align-self: flex-end; background: var(--accent-purple); color: #fff; }
+.chat-msg.ai { align-self: flex-start; background: var(--card-bg); border: 1px solid var(--card-border); }
+.chat-msg.ai ul { margin: 6px 0 0 16px; padding: 0; }
+.chat-msg.ai li { margin: 2px 0; }
+.chat-msg .chat-h { font-weight: 700; margin-top: 6px; }
+.chat-msg.note { align-self: center; font-size: 0.74rem; color: var(--text-sub); }
 .person-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid var(--card-border); }
 .person-row img { width:32px; height:32px; border-radius:50%; margin-right:10px; vertical-align:middle; }
 .lb-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--card-border); font-size:0.9rem; }
@@ -1107,6 +1115,7 @@ background: var(--accent-purple-glow) !important;
 {% if is_premium %}
 <div class="editor-card" id="ai-edit-card" style="margin-top:16px;">
 <label class="label-heading">EDIT WITH AI <span style="color:var(--gold, #C9962B);">TE PREMIUM</span></label>
+<div id="ai-chat" class="ai-chat" style="display:none;"></div>
 <input type="text" id="ai-edit-input" class="form-control" maxlength="500" placeholder="Example: add a gaming category with 3 channels">
 <button id="ai-edit-btn" class="btn-glass btn-premium" style="margin-top:10px;" onclick="handleAIEdit()">
 <i class="fa-solid fa-wand-magic-sparkles"></i> <span>Apply Change</span>
@@ -1636,6 +1645,8 @@ function loadLayoutIntoEditor(blueprint) {
     activeCatIdx = 0;
     activeChanIdx = 0;
     previousLayout = null;
+    const chatBox = document.getElementById('ai-chat');
+    if (chatBox) { chatBox.innerHTML = ''; chatBox.style.display = 'none'; }
     const undoBtn = document.getElementById('ai-edit-undo-btn');
     if (undoBtn) undoBtn.style.display = 'none';
     renderDashboard();
@@ -1853,6 +1864,72 @@ async function handleAIGeneration() {
 
 let previousLayout = null;
 
+// ---------- Edit with AI: chat box that lists what changed ----------
+function chatAdd(kind, html) {
+    const box = document.getElementById('ai-chat');
+    if (!box) return null;
+    box.style.display = 'flex';
+    const el = document.createElement('div');
+    el.className = 'chat-msg ' + kind;
+    el.innerHTML = html;
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+    return el;
+}
+
+function layoutChanges(before, after) {
+    const norm = v => String(v || '').trim().toLowerCase();
+    const chName = c => c.name || c.formatted_name || '';
+    const oldRoles = new Set((before.roles || []).map(r => norm(r.name)));
+    const newRoles = new Set((after.roles || []).map(r => norm(r.name)));
+    const oldCats = new Map((before.categories || []).map(c => [norm(c.name), c]));
+    const newCats = new Map((after.categories || []).map(c => [norm(c.name), c]));
+    const out = { roles: [], categories: [], channels: [], removed: [] };
+
+    (after.roles || []).forEach(r => { if (!oldRoles.has(norm(r.name))) out.roles.push(r.name); });
+    (before.roles || []).forEach(r => { if (!newRoles.has(norm(r.name))) out.removed.push('role ' + r.name); });
+
+    (after.categories || []).forEach(c => {
+        const old = oldCats.get(norm(c.name));
+        const chans = (c.channels || []).map(chName);
+        if (!old) {
+            out.categories.push({ name: c.name, channels: chans });
+        } else {
+            const had = new Set((old.channels || []).map(x => norm(chName(x))));
+            (c.channels || []).forEach(ch => { if (!had.has(norm(chName(ch)))) out.channels.push({ name: chName(ch), category: c.name, type: ch.type }); });
+        }
+    });
+    (before.categories || []).forEach(c => {
+        const now = newCats.get(norm(c.name));
+        if (!now) { out.removed.push('category ' + c.name); return; }
+        const has = new Set((now.channels || []).map(x => norm(chName(x))));
+        (c.channels || []).forEach(ch => { if (!has.has(norm(chName(ch)))) out.removed.push('channel ' + chName(ch)); });
+    });
+    return out;
+}
+
+function changesToHtml(ch) {
+    const e = escapeHtml;
+    const parts = [];
+    if (ch.categories.length) {
+        parts.push('<div class="chat-h">New categories</div><ul>' + ch.categories.map(c =>
+            `<li><b>${e(c.name)}</b>${c.channels.length ? ' with ' + c.channels.map(x => '<code>' + e(x) + '</code>').join(', ') : ''}</li>`).join('') + '</ul>');
+    }
+    if (ch.channels.length) {
+        parts.push('<div class="chat-h">New channels</div><ul>' + ch.channels.map(c =>
+            `<li><code>${e(c.name)}</code> in ${e(c.category)}${c.type === 'voice' ? ' (voice)' : ''}</li>`).join('') + '</ul>');
+    }
+    if (ch.roles.length) {
+        parts.push('<div class="chat-h">New roles</div><ul>' + ch.roles.map(r => `<li>${e(r)}</li>`).join('') + '</ul>');
+    }
+    if (ch.removed.length) {
+        parts.push('<div class="chat-h">Removed</div><ul>' + ch.removed.map(r => `<li>${e(r)}</li>`).join('') + '</ul>');
+    }
+    const added = ch.categories.length + ch.channels.length + ch.roles.length;
+    if (!parts.length) return 'I changed the layout, but nothing new was added. It may be a rename or a settings change. Check the editor.';
+    return (added ? 'Done! Here is what I added:' : 'Done! Nothing new was added, but I changed this:') + parts.join('');
+}
+
 async function handleAIEdit() {
     const input = document.getElementById('ai-edit-input');
     const instruction = input.value.trim();
@@ -1860,6 +1937,8 @@ async function handleAIEdit() {
     const btn = document.getElementById('ai-edit-btn');
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner"></span> Editing...`;
+    chatAdd('user', escapeHtml(instruction));
+    const thinking = chatAdd('ai', 'Working on it...');
     try {
         const response = await fetch('/edit-blueprint', {
             method: 'POST',
@@ -1876,12 +1955,13 @@ async function handleAIEdit() {
             renderDashboard();
             input.value = '';
             document.getElementById('ai-edit-undo-btn').style.display = 'block';
+            if (thinking) thinking.innerHTML = changesToHtml(layoutChanges(previousLayout, currentLayout));
         } else {
-            alert(result.error || 'The AI edit failed. Please try again.');
+            if (thinking) thinking.textContent = result.error || 'The AI edit failed. Please try again.';
         }
     } catch (err) {
         console.error('AI edit error:', err);
-        alert('An error occurred during the AI edit. Please check your connection.');
+        if (thinking) thinking.textContent = 'Something went wrong. Please check your connection and try again.';
     } finally {
         btn.disabled = false;
         btn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i> <span>Apply Change</span>`;
@@ -1896,6 +1976,7 @@ function undoAIEdit() {
     activeChanIdx = 0;
     renderDashboard();
     document.getElementById('ai-edit-undo-btn').style.display = 'none';
+    chatAdd('note', 'Last AI edit undone.');
 }
 
 function renderDashboard() {
