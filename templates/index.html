@@ -659,6 +659,8 @@ justify-content: center;
 gap: 6px;
 }
 
+.page-nav { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+.page-nav .btn-glass { margin-top: 0; }
 .landing-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
 .landing-links .btn-glass { padding: 12px 6px; font-size: 0.72rem; }
 .usage-meter { margin-top: 14px; display: grid; gap: 8px; }
@@ -1042,6 +1044,10 @@ background: var(--accent-purple-glow) !important;
 <button id="generate-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" style="margin-top: 24px;" onclick="handleAIGeneration()">
 <i class="fa-solid fa-wand-magic-sparkles"></i> <span>Generate Server Layout</span>
 </button>
+<div class="page-nav">
+<button class="btn-glass btn-secondary" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> <span>Previous</span></button>
+<button class="btn-glass" onclick="goNextFromGenerator()"><span>Next</span> <i class="fa-solid fa-arrow-right"></i></button>
+</div>
 </div>
 
 <!-- PAGE 3: LAYOUT DASHBOARD -->
@@ -1099,9 +1105,12 @@ background: var(--accent-purple-glow) !important;
 </button>
 </div>
 {% endif %}
+<div class="page-nav">
+<button class="btn-glass btn-secondary" onclick="navigateTo('page-generator')"><i class="fa-solid fa-arrow-left"></i> <span>Previous</span></button>
 <button id="next-page-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="goToPermissionsPage()">
-<span>Next Page: Permissions</span> <i class="fa-solid fa-arrow-right"></i>
+<span>Next: Permissions</span> <i class="fa-solid fa-arrow-right"></i>
 </button>
+</div>
 </div>
 
 <!-- PAGE 4: PERMISSIONS MANAGEMENT -->
@@ -1133,9 +1142,12 @@ background: var(--accent-purple-glow) !important;
 <i class="fa-solid fa-check-double"></i> Save & Apply Permissions
 </button>
 </div>
+<div class="page-nav">
+<button class="btn-glass btn-secondary" onclick="navigateTo('page-layout')"><i class="fa-solid fa-arrow-left"></i> <span>Previous</span></button>
 <button class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="goToRolesEditorPage()">
-<span>Next Page: Edit Roles</span> <i class="fa-solid fa-arrow-right"></i>
+<span>Next: Edit Roles</span> <i class="fa-solid fa-arrow-right"></i>
 </button>
+</div>
 </div>
 
 <!-- PAGE 5: ROLES EDITOR PAGE -->
@@ -1164,6 +1176,9 @@ background: var(--accent-purple-glow) !important;
 <button id="submit-design-btn" class="btn-glass {% if is_premium %}btn-premium{% endif %}" onclick="handleInitialSubmitClick()">
 <i class="fa-solid fa-paper-plane"></i> <span id="submit-btn-label">Submit Design</span>
 </button>
+<div class="page-nav" style="grid-template-columns: 1fr;">
+<button class="btn-glass btn-secondary" onclick="navigateTo('page-permissions')"><i class="fa-solid fa-arrow-left"></i> <span>Previous</span></button>
+</div>
 </div>
 
 <!-- PAGE 6: COMPLETION -->
@@ -2017,6 +2032,14 @@ function deleteChannel(cIdx, chIdx) {
         activeChanIdx = Math.max(0, currentLayout.categories[cIdx].channels.length - 1);
     }
     renderDashboard();
+}
+
+function goNextFromGenerator() {
+    if (currentLayout && (currentLayout.categories || []).length) {
+        navigateTo('page-layout');
+    } else {
+        alert('Generate a layout first (or pick a template). Then you can continue.');
+    }
 }
 
 function goToPermissionsPage() {
