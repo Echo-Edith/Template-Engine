@@ -1029,6 +1029,9 @@ async def giveaway_entries(interaction: discord.Interaction):
 class GiveawayView(discord.ui.View):
     """Classic layout (embed + buttons under it). Used for old giveaway messages and when the card layout is not available."""
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await blocked_check(interaction)
+
     def __init__(self, ended: bool = False, entries: int = 0):
         super().__init__(timeout=None)
         self.entries_btn.label = f"Entries ({entries})"
@@ -1638,7 +1641,7 @@ async def sync_boost_rewards(bot: commands.Bot) -> int:
 # =====================================================================
 # PERSONAL SETTINGS (/settings): saved in the same "web_users" collection the website uses
 # =====================================================================
-DEFAULT_USER_SETTINGS = {"bot_dms": True, "inbox_notify": True, "theme_mode": "default", "blocked": []}
+DEFAULT_USER_SETTINGS = {"bot_dms": True, "inbox_notify": True, "profile_public": False, "theme_mode": "default", "blocked": []}
 LOCAL_USER_SETTINGS: Dict[str, dict] = {}
 THEME_MODES = ("default", "dark", "light")
 
@@ -1652,7 +1655,7 @@ def get_user_settings(user_id) -> dict:
         except Exception as e:
             print(f"[Settings Read Error] {e}")
     result = dict(DEFAULT_USER_SETTINGS)
-    for key in ("bot_dms", "inbox_notify"):
+    for key in ("bot_dms", "inbox_notify", "profile_public"):
         if isinstance(doc.get(key), bool):
             result[key] = doc[key]
     if doc.get("theme_mode") in THEME_MODES:
@@ -3092,6 +3095,9 @@ class TicketOpenModal(discord.ui.Modal):
 
 
 class TicketPanelView(discord.ui.View):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await blocked_check(interaction)
+
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -3216,6 +3222,9 @@ class RobloxVerifyModal(discord.ui.Modal, title="Roblox Account Verification"):
 
 
 class RobloxVerificationView(discord.ui.View):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await blocked_check(interaction)
+
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -3253,6 +3262,9 @@ class RobloxVerificationView(discord.ui.View):
 
 
 class RobloxUnsyncView(discord.ui.View):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await blocked_check(interaction)
+
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -3434,6 +3446,82 @@ class NonPremiumDeploymentView(discord.ui.View):
             await cog.execute_auto_build(guild, self.layout, "rebuild", self.build_id, self.submitting_user_id)
 
 
+
+
+# =====================================================================
+# BLACKLIST: blocked users and servers cannot use the bot or the website.
+# The owner changes it in the website Owner Panel. The main staff are never blocked.
+# =====================================================================
+LOCAL_BLACKLIST: Dict[str, dict] = {"users": {}, "guilds": {}}
+BLACKLIST_CACHE = {"at": 0.0, "data": {"users": {}, "guilds": {}}}
+
+
+def get_blacklist() -> dict:
+    now = time.time()
+    if now - BLACKLIST_CACHE["at"] < 20:
+        return BLACKLIST_CACHE["data"]
+    data = {"users": dict(LOCAL_BLACKLIST["users"]), "guilds": dict(LOCAL_BLACKLIST["guilds"])}
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "blacklist"}) or {}
+            data = {"users": dict(doc.get("users") or {}), "guilds": dict(doc.get("guilds") or {})}
+        except Exception as e:
+            print(f"[Blacklist Read Error] {e}")
+    BLACKLIST_CACHE["at"], BLACKLIST_CACHE["data"] = now, data
+    return data
+
+
+def is_user_blacklisted(user_id) -> bool:
+    uid = str(user_id)
+    return uid not in COMMAND_ADMINS and uid in get_blacklist()["users"]
+
+
+def is_guild_blacklisted(guild_id) -> bool:
+    return str(guild_id) in get_blacklist()["guilds"]
+
+
+def set_blacklist(kind: str, target_id, add: bool, reason: str = "", by: str = "") -> bool:
+    key = "users" if kind == "user" else "guilds"
+    tid = str(target_id)
+    if add:
+        entry = {"reason": reason[:200], "by": str(by), "at": datetime.now(timezone.utc).timestamp()}
+        LOCAL_BLACKLIST[key][tid] = entry
+    else:
+        LOCAL_BLACKLIST[key].pop(tid, None)
+    BLACKLIST_CACHE["at"] = 0.0
+    if db_settings is not None:
+        try:
+            if add:
+                db_settings.update_one({"_id": "blacklist"}, {"$set": {f"{key}.{tid}": entry}}, upsert=True)
+            else:
+                db_settings.update_one({"_id": "blacklist"}, {"$unset": {f"{key}.{tid}": ""}}, upsert=True)
+        except Exception as e:
+            print(f"[Blacklist Save Error] {e}")
+            return False
+    return True
+
+
+async def blocked_check(interaction: discord.Interaction) -> bool:
+    """True = allowed. Used for every slash command and for the main buttons."""
+    uid = str(interaction.user.id)
+    if uid in COMMAND_ADMINS:
+        return True
+    why = None
+    if is_user_blacklisted(uid):
+        why = "You are blocked from using Template Engine. If you think this is a mistake, contact the staff."
+    elif interaction.guild is not None and is_guild_blacklisted(interaction.guild.id):
+        why = "This server is blocked from using Template Engine."
+    if why is None:
+        return True
+    try:
+        embed = discord.Embed(title="Access Blocked", description=why, color=COLOR_RED)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"[Blocked Reply Error] {e}")
+    return False
 
 
 # =====================================================================
@@ -3715,6 +3803,29 @@ async def run_owner_job(bot, job: dict) -> str:
             raise ValueError("Unknown theme or the database could not be reached.")
         return f"Website theme is now {SITE_THEMES[theme]}."
 
+    if t in ("blacklist_add", "blacklist_remove"):
+        kind = p.get("kind")
+        if kind not in ("user", "guild"):
+            raise ValueError("Choose user or server.")
+        target = str(_job_id(p, "id"))
+        if t == "blacklist_remove":
+            set_blacklist(kind, target, False)
+            return f"Unblocked {kind} {target}."
+        if kind == "user" and target in COMMAND_ADMINS:
+            raise ValueError("The main staff cannot be blocked.")
+        if not set_blacklist(kind, target, True, str(p.get("reason") or ""), by):
+            raise ValueError("Could not save to the database.")
+        note = ""
+        if kind == "guild":
+            guild = bot.get_guild(int(target))
+            if guild is not None:
+                try:
+                    await guild.leave()
+                    note = f" The bot left {guild.name}."
+                except Exception as e:
+                    note = f" Could not leave the server: {e}"
+        return f"Blocked {kind} {target}." + note
+
     if t == "invite":
         guild = bot.get_guild(_job_id(p, "guild_id"))
         if guild is None:
@@ -3788,6 +3899,15 @@ def publish_owner_data(bot):
 class FeaturesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        bot.tree.interaction_check = blocked_check  # every slash command goes through the blacklist
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        if is_guild_blacklisted(guild.id):
+            try:
+                await guild.leave()
+            except Exception as e:
+                print(f"[Blacklist Leave Error] {e}")
 
     # -------------------------------------------------------------
     # BACKGROUND SCHEDULER: reminders and giveaway endings
@@ -3848,6 +3968,12 @@ class FeaturesCog(commands.Cog):
             if datetime.now(timezone.utc).timestamp() - OWNER_PUBLISH["last"] >= 60:
                 OWNER_PUBLISH["last"] = datetime.now(timezone.utc).timestamp()
                 publish_owner_data(self.bot)
+                for g in list(self.bot.guilds):
+                    if is_guild_blacklisted(g.id):
+                        try:
+                            await g.leave()
+                        except Exception as e:
+                            print(f"[Blacklist Leave Error] {e}")
         except Exception as e:
             print(f"[Owner Panel Error] {e!r}")
         GIVEAWAY_DEBUG["stage"] = "idle"

@@ -836,6 +836,11 @@ class SettingsView(discord.ui.View):
             value=f"`{'On' if s['inbox_notify'] else 'Off'}`\nA DM when someone sends you a design." + ("" if s["bot_dms"] else "\nNeeds Bot Messages turned on."),
             inline=True
         )
+        embed.add_field(
+            name="Public Profile",
+            value=f"`{'On' if s['profile_public'] else 'Off'}`\nA web page with the designs you choose to show. No Discord ID is shown.",
+            inline=False
+        )
         embed.add_field(name="Website Theme", value=f"`{THEME_LABELS[s['theme_mode']]}`\nOnly changes the website for you.", inline=False)
         if s["blocked"]:
             shown = ", ".join(f"<@{b}>" for b in s["blocked"][:15])
@@ -856,6 +861,10 @@ class SettingsView(discord.ui.View):
         notify.callback = self.toggle_notify
         self.add_item(dms)
         self.add_item(notify)
+        profile = discord.ui.Button(label=f"Public Profile: {'On' if s['profile_public'] else 'Off'}",
+                                    style=discord.ButtonStyle.success if s["profile_public"] else discord.ButtonStyle.secondary, row=0)
+        profile.callback = self.toggle_profile
+        self.add_item(profile)
 
         theme = discord.ui.Select(placeholder="Website theme (only for you)", row=1, options=[
             discord.SelectOption(label=label, value=key, default=(key == s["theme_mode"]),
@@ -897,6 +906,10 @@ class SettingsView(discord.ui.View):
 
     async def toggle_notify(self, interaction: discord.Interaction):
         set_user_settings(self.user_id, inbox_notify=not get_user_settings(self.user_id)["inbox_notify"])
+        await self.refresh(interaction)
+
+    async def toggle_profile(self, interaction: discord.Interaction):
+        set_user_settings(self.user_id, profile_public=not get_user_settings(self.user_id)["profile_public"])
         await self.refresh(interaction)
 
     async def pick_theme(self, interaction: discord.Interaction):

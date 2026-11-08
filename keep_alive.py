@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import asyncio
 import requests
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort, render_template_string
 from pymongo import MongoClient
 
 # Import ai_brain module
@@ -374,7 +374,7 @@ def api_designs():
         for d in _own_designs(user["id"]):
             cats, chans, roles = _count_layout(d.get("layout", {}))
             items.append({"id": d["_id"], "kind": d["kind"], "title": d.get("title", ""), "created_at": d["created_at"],
-                          "categories": cats, "channels": chans, "roles": roles, "build_mode": d.get("build_mode", "")})
+                          "categories": cats, "channels": chans, "roles": roles, "build_mode": d.get("build_mode", ""), "on_profile": bool(d.get("on_profile"))})
         return jsonify({"success": True, "designs": items})
     except Exception as e:
         print(f"[Designs List Error] {e}")
@@ -697,6 +697,7 @@ def api_people_search():
         else:
             rows = [u for u in LOCAL_WEB_USERS.values() if u["_id"] == q or u.get("username_lower", "").startswith(q)]
         people = []
+        rows = [u for u in rows if not is_blocked_user(u['_id'])]
         for u in rows:
             if u["_id"] == me or u.get("accepts") is False or me in (u.get("blocked") or []):
                 continue
@@ -883,6 +884,8 @@ OWNER_JOB_SPECS = {
     "limit": {"key", "value"},
     "theme": {"theme"},
     "invite": {"guild_id"},
+    "blacklist_add": {"kind", "id", "reason"},
+    "blacklist_remove": {"kind", "id"},
     "sync_roles": set(),
 }
 
@@ -1042,9 +1045,168 @@ def api_owner_user(uid):
     return jsonify(_owner_user_info(uid))
 
 
+# =====================================================================
+# BLACKLIST: blocked users cannot use the website. The owner changes it in the Owner Panel (the bot saves it).
+# =====================================================================
+_BL = {"at": 0.0, "data": {"users": {}, "guilds": {}}}
+
+
+def get_blacklist() -> dict:
+    now = datetime.now().timestamp()
+    if now - _BL["at"] < 20:
+        return _BL["data"]
+    data = {"users": {}, "guilds": {}}
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "blacklist"}) or {}
+            data = {"users": dict(doc.get("users") or {}), "guilds": dict(doc.get("guilds") or {})}
+        except Exception as e:
+            print(f"[Blacklist Read Error] {e}")
+    _BL["at"], _BL["data"] = now, data
+    return data
+
+
+def is_blocked_user(user_id) -> bool:
+    uid = str(user_id or "")
+    return bool(uid) and uid not in OWNER_IDS and uid not in HARDCODED_STAFF and uid in get_blacklist()["users"]
+
+
+@app.before_request
+def block_blacklisted_users():
+    user = session.get("user")
+    if user and request.path.startswith("/api/") and is_blocked_user(user.get("id")):
+        return jsonify({"success": False, "error": "Your account is blocked from Template Engine."}), 403
+
+
+@app.route("/api/owner/blacklist")
+@owner_only
+def api_owner_blacklist():
+    data = get_blacklist()
+    guild_names = {}
+    try:
+        for g in (db_settings.find_one({"_id": "owner_guilds"}) or {}).get("guilds", []) if db_settings is not None else []:
+            guild_names[g["id"]] = g["name"]
+    except Exception:
+        pass
+    users = [{"id": uid, "name": _discord_name(uid), "reason": v.get("reason", ""), "at": v.get("at", 0)} for uid, v in list(data["users"].items())[:60]]
+    guilds = [{"id": gid, "name": guild_names.get(gid, "Server " + gid[-4:]), "reason": v.get("reason", ""), "at": v.get("at", 0)} for gid, v in list(data["guilds"].items())[:60]]
+    return jsonify({"users": users, "guilds": guilds})
+
+
+# =====================================================================
+# PUBLIC PROFILE: /u/<username>. Off by default. Shows only designs the owner of the profile chose.
+# No Discord ID, no messages, no search. Search engines are told not to list it.
+# =====================================================================
+PROFILE_PAGE = """<!doctype html>
+<html lang="en" data-theme="{{ theme }}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow"><title>{{ name }} - Template Engine</title>
+<style>
+:root{--bg:#060f1c;--panel:#0a1a2e;--edge:#3a5f86;--text:#e6f0fa;--sub:#9db6cf;--acc:#e0691a;--gold:#c9962b;--card:#0d2239}
+[data-theme="light"]{--bg:#e8eff6;--panel:#fffaf0;--edge:#b8862a;--text:#0d2238;--sub:#35546f;--acc:#d4580f;--gold:#8a6100;--card:#fff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:ui-monospace,Menlo,Consolas,monospace;padding:16px}
+.wrap{max-width:720px;margin:0 auto;border:2px solid var(--edge);background:var(--panel);padding:20px;box-shadow:8px 8px 0 rgba(0,0,0,.35)}
+.head{display:flex;gap:14px;align-items:center;flex-wrap:wrap}.ava{width:72px;height:72px;border:2px solid var(--edge);background:var(--acc);color:#fff;display:flex;align-items:center;justify-content:center;font-size:2rem;font-weight:700;text-transform:uppercase}
+h1{margin:0;font-size:1.3rem;word-break:break-word}.badge{display:inline-block;margin-top:6px;padding:2px 8px;border:1px solid var(--gold);color:var(--gold);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}
+.sub{color:var(--sub);font-size:.8rem;margin-top:4px}.grid{display:grid;gap:12px;margin-top:18px}
+.card{border:1px solid var(--edge);background:var(--card);padding:12px}.card h2{margin:0 0 4px;font-size:1rem;word-break:break-word}
+.meta{color:var(--sub);font-size:.76rem}.cats{margin:8px 0;font-size:.78rem;color:var(--sub);word-break:break-word}
+a.btn{display:inline-block;margin-top:6px;padding:9px 14px;background:var(--acc);color:#fff;text-decoration:none;border:2px solid rgba(0,0,0,.35);font-weight:700;font-size:.78rem;text-transform:uppercase}
+.foot{margin-top:18px;text-align:center}.foot a{color:var(--sub);font-size:.78rem}
+</style></head><body><div class="wrap">
+<div class="head"><div class="ava">{{ name[:1] }}</div><div><h1>{{ name }}</h1>
+{% if premium %}<span class="badge">TE Premium</span>{% endif %}
+<div class="sub">{{ designs|length }} public design{{ '' if designs|length == 1 else 's' }}</div></div></div>
+<div class="grid">
+{% for d in designs %}<div class="card"><h2>{{ d.title }}</h2>
+<div class="meta">{{ d.categories }} categories, {{ d.channels }} channels, {{ d.roles }} roles</div>
+{% if d.cat_names %}<div class="cats">{{ d.cat_names }}</div>{% endif %}
+<a class="btn" href="/s/{{ d.share_id }}">Use this design</a></div>
+{% else %}<div class="card"><div class="meta">No public designs yet.</div></div>{% endfor %}
+</div>
+<div class="foot"><a href="/">Open Template Engine</a></div></div></body></html>"""
+
+
+@app.route("/api/profile/me")
+def api_profile_me():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    doc = _web_user(user["id"]) or {}
+    username = doc.get("username") or user.get("username") or ""
+    return jsonify({"success": True, "public": bool(doc.get("profile_public")), "username": username,
+                    "url": request.host_url.rstrip("/") + "/u/" + username})
+
+
+@app.route("/api/profile/settings", methods=["POST"])
+def api_profile_settings():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    data = request.get_json(silent=True) or {}
+    _web_user_update(str(user["id"]), {"profile_public": bool(data.get("public"))})
+    return jsonify({"success": True})
+
+
+@app.route("/api/designs/<design_id>/profile", methods=["POST"])
+def api_design_profile(design_id):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    uid = str(user["id"])
+    on = bool((request.get_json(silent=True) or {}).get("on"))
+    try:
+        if db_designs is not None:
+            doc = db_designs.find_one({"_id": design_id, "user_id": uid})
+        else:
+            doc = next((d for d in LOCAL_DESIGNS if d["_id"] == design_id and d["user_id"] == uid), None)
+        if not doc:
+            return jsonify({"success": False, "error": "Design not found."}), 404
+        changes = {"on_profile": on}
+        if on and not doc.get("share_id"):
+            changes["share_id"] = uuid.uuid4().hex[:10]
+        if db_designs is not None:
+            db_designs.update_one({"_id": design_id}, {"$set": changes})
+        else:
+            doc.update(changes)
+        return jsonify({"success": True, "on": on})
+    except Exception as e:
+        print(f"[Profile Design Error] {e}")
+        return jsonify({"success": False, "error": "Could not save."}), 500
+
+
+@app.route("/u/<username>")
+def public_profile(username):
+    name_l = str(username).strip().lower()[:40]
+    u = None
+    if name_l:
+        if db_web_users is not None:
+            u = db_web_users.find_one({"username_lower": name_l, "profile_public": True})
+        else:
+            u = next((x for x in LOCAL_WEB_USERS.values() if x.get("username_lower") == name_l and x.get("profile_public")), None)
+    if not u or is_blocked_user(u["_id"]):
+        abort(404)  # same answer for "no such user" and "profile is private"
+    uid = str(u["_id"])
+    if db_designs is not None:
+        docs = list(db_designs.find({"user_id": uid, "on_profile": True, "share_id": {"$exists": True}}).sort("created_at", -1).limit(30))
+    else:
+        docs = [d for d in _own_designs(uid) if d.get("on_profile") and d.get("share_id")][:30]
+    designs = []
+    for d in docs:
+        cats, chans, roles = _count_layout(d.get("layout", {}))
+        names = [str(c.get("name", ""))[:30] for c in (d.get("layout", {}).get("categories") or [])[:6]]
+        designs.append({"title": d.get("title", "Untitled"), "categories": cats, "channels": chans, "roles": roles,
+                        "cat_names": ", ".join(n for n in names if n), "share_id": d["share_id"]})
+    viewer = session.get("user") or {}
+    theme = ((_web_user(viewer["id"]) or {}).get("theme_mode") if viewer.get("id") else "") or ""
+    return render_template_string(PROFILE_PAGE, name=u.get("name") or u.get("username") or "User",
+                                  premium=is_user_premium(uid), designs=designs, theme="light" if theme == "light" else "dark")
+
+
 @app.route("/")
 def index():
     user = session.get("user")
+    if user and is_blocked_user(user.get("id")):
+        return "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><body style='font-family:monospace;background:#060f1c;color:#e6f0fa;padding:24px'><h2>Access Blocked</h2><p>Your account is blocked from Template Engine. If you think this is a mistake, contact the staff.</p>", 403
     roblox_user = session.get("roblox_user")
     is_premium = False
     if user and user.get("id") and not _web_user(user["id"]):
@@ -1254,6 +1416,8 @@ def submit_design_endpoint():
     if not _re.fullmatch(r"\d{17,20}", str(target_server_id).strip()):
         return jsonify({"success": False, "error": "Enter your Server ID (a number with 17 to 20 digits) before submitting."}), 400
     target_server_id = str(target_server_id).strip()
+    if target_server_id in get_blacklist()["guilds"]:
+        return jsonify({"success": False, "error": "This server is blocked from using Template Engine."}), 403
     prompt_text = payload.get("prompt", "No prompt description provided.")
     server_name = payload.get("server_name", "Custom Server")
 

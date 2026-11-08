@@ -1115,6 +1115,7 @@ background: var(--accent-purple-glow) !important;
 <button class="btn-glass btn-secondary-link" data-tab="panels">Panels</button>
 <button class="btn-glass btn-secondary-link" data-tab="codes">Codes</button>
 <button class="btn-glass btn-secondary-link" data-tab="servers">Servers</button>
+<button class="btn-glass btn-secondary-link" data-tab="blocked">Blocked</button>
 <button class="btn-glass btn-secondary-link" data-tab="users">Users</button>
 </div>
 <div id="own-msg" class="own-msg"></div>
@@ -1176,6 +1177,17 @@ background: var(--accent-purple-glow) !important;
 <p class="own-note">"Get invite" makes a new invite link that works for 1 hour. The bot needs the Create Invite permission in the server.</p></div>
 </div>
 
+<div class="own-sec" id="own-blocked">
+<div class="editor-card"><div class="label-heading">BLOCK A USER OR SERVER</div>
+<div class="own-row"><select class="form-control" id="own-b-kind"><option value="user">User</option><option value="guild">Server</option></select>
+<input class="form-control" id="own-b-id" placeholder="Discord ID" inputmode="numeric"></div>
+<input class="form-control" id="own-b-reason" placeholder="Reason (only you see it)" maxlength="200">
+<div class="own-row"><button class="btn-glass" onclick="ownBlock()">Block</button></div>
+<p class="own-note">Blocked users cannot use the bot or the website. For a blocked server, the bot leaves and stays out. The main staff cannot be blocked.</p></div>
+<div class="editor-card"><div class="label-heading">BLOCKED USERS</div><div id="own-b-users"></div></div>
+<div class="editor-card"><div class="label-heading">BLOCKED SERVERS</div><div id="own-b-guilds"></div></div>
+</div>
+
 <div class="own-sec" id="own-users">
 <div class="editor-card"><div class="label-heading">FIND A USER</div>
 <div class="own-row"><input class="form-control" id="own-u-id" placeholder="Discord user ID" inputmode="numeric"><button class="btn-glass own-small" onclick="ownLookup()">Look up</button></div>
@@ -1200,6 +1212,13 @@ background: var(--accent-purple-glow) !important;
 <div class="brand-header">
 <h1>My Designs</h1>
 <p>Everything you made on this site. Open any item to keep working on it.</p>
+</div>
+<div class="editor-card" id="profile-card" style="margin-bottom:12px;">
+<label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+<input type="checkbox" id="profile-public" style="margin-top:4px;" onchange="saveProfileSetting()">
+<span><strong>Public profile page</strong><br><small style="color:var(--text-sub);">Anyone with the link can see the designs you choose with <b>Profile</b>. Your Discord ID is never shown.</small></span>
+</label>
+<div id="profile-link" style="display:none; margin-top:10px; font-size:0.8rem; word-break:break-all;"></div>
 </div>
 <div id="history-list"></div>
 
@@ -1860,6 +1879,7 @@ function openInbox() {
 
 async function openHistory() {
     navigateTo('page-history');
+    loadProfileCard();
     const list = document.getElementById('history-list');
     list.innerHTML = '<p style="color:var(--text-sub);">Loading...</p>';
     try {
@@ -1887,6 +1907,7 @@ async function openHistory() {
                     <button class="btn-glass" onclick="openSavedDesign('${d.id}', this)">Open</button>
                     <button class="btn-glass btn-secondary-link" title="Send to a Discord user" onclick="openSendModal('${d.id}')"><i class="fa-solid fa-paper-plane"></i> Send</button>
                     <button class="btn-glass btn-secondary-link" title="Copy share link" onclick="shareSavedDesign('${d.id}')"><i class="fa-solid fa-share-nodes"></i> Share</button>
+                    <button class="btn-glass ${d.on_profile ? '' : 'btn-secondary-link'}" title="Show this design on your public profile" onclick="toggleProfileDesign('${d.id}', ${d.on_profile ? 'false' : 'true'}, this)"><i class="fa-solid fa-id-card"></i> ${d.on_profile ? 'On profile' : 'Profile'}</button>
                     <button class="btn-glass btn-secondary-link" onclick="deleteSavedDesign('${d.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
                 </div>
             </div>`;
@@ -1894,6 +1915,37 @@ async function openHistory() {
     } catch (e) {
         list.innerHTML = '<p style="color:var(--text-sub);">Could not load your designs. Please try again.</p>';
     }
+}
+
+async function loadProfileCard() {
+    try {
+        const j = await (await fetch('/api/profile/me')).json();
+        if (!j.success) return;
+        document.getElementById('profile-public').checked = !!j.public;
+        PROFILE_URL = j.url;
+        showProfileLink(!!j.public);
+    } catch (e) {}
+}
+let PROFILE_URL = '';
+function showProfileLink(on) {
+    const el = document.getElementById('profile-link');
+    el.style.display = on && PROFILE_URL ? 'block' : 'none';
+    el.innerHTML = on ? 'Your page: <a href="' + escapeHtml(PROFILE_URL) + '" target="_blank" rel="noopener" style="color:var(--accent-purple);">' + escapeHtml(PROFILE_URL) + '</a>' : '';
+}
+async function saveProfileSetting() {
+    const on = document.getElementById('profile-public').checked;
+    const j = await (await fetch('/api/profile/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({public: on})})).json();
+    if (!j.success) { alert(j.error || 'Could not save.'); document.getElementById('profile-public').checked = !on; return; }
+    showProfileLink(on);
+}
+async function toggleProfileDesign(id, on, btn) {
+    btn.disabled = true;
+    try {
+        const j = await (await fetch('/api/designs/' + encodeURIComponent(id) + '/profile', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({on})})).json();
+        if (!j.success) { alert(j.error || 'Could not save.'); btn.disabled = false; return; }
+        if (on && !document.getElementById('profile-public').checked) alert('Saved. Turn on "Public profile page" at the top so people can see it.');
+        openHistory();
+    } catch (e) { btn.disabled = false; }
 }
 
 async function openSavedDesign(id, btn) {
@@ -2629,6 +2681,7 @@ function ownTab(name) {
     if (name === 'codes') ownLoadCodes();
     if (name === 'users') ownLoadPremium();
     if (name === 'servers') ownRenderServers();
+    if (name === 'blocked') ownLoadBlocked();
 }
 document.querySelectorAll('#own-tabs button').forEach(b => b.addEventListener('click', () => ownTab(b.dataset.tab)));
 function ownOpts(list, empty) {
@@ -2670,17 +2723,35 @@ async function ownRefresh() {
 function ownRenderServers() {
     const box = document.getElementById('own-server-list');
     if (!OWN.guilds.length) { box.innerHTML = '<p class="own-note">No server data yet. Is the bot online?</p>'; return; }
-    box.innerHTML = OWN.guilds.map(g => '<div class="own-list-item" data-gid="' + g.id + '"><span><b>' + escapeHtml(g.name) + '</b><br><small>' + (g.members || 0).toLocaleString() + ' members | ' + g.id + '</small><div class="own-invite"></div></span><button class="btn-glass" data-inv="' + g.id + '">Get invite</button></div>').join('');
+    box.innerHTML = OWN.guilds.map(g => '<div class="own-list-item" data-gid="' + g.id + '"><span><b>' + escapeHtml(g.name) + '</b><br><small>' + (g.members || 0).toLocaleString() + ' members | ' + g.id + '</small><div class="own-invite"></div></span><span><button class="btn-glass" data-inv="' + g.id + '">Get invite</button> <button class="btn-glass" data-blk="' + g.id + '">Block</button></span></div>').join('');
     box.querySelectorAll('[data-inv]').forEach(b => b.onclick = () => ownJob('invite', {guild_id: b.dataset.inv}, res => {
         const m = (res || '').match(/https:\/\/discord\.gg\/\S+/);
         if (m) { OWN.invites[b.dataset.inv] = m[0]; ownRenderServers(); }
     }));
+    box.querySelectorAll('[data-blk]').forEach(b => b.onclick = () => { if (confirm('Block this server? The bot will leave it and stay out.')) ownJob('blacklist_add', {kind: 'guild', id: b.dataset.blk, reason: 'Blocked from the Servers tab'}, ownLoadBlocked); });
     Object.keys(OWN.invites).forEach(gid => {
         const slot = box.querySelector('[data-gid="' + gid + '"] .own-invite'); if (!slot) return;
         const url = OWN.invites[gid];
         slot.innerHTML = '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a> <button class="btn-glass">Copy</button>';
         slot.querySelector('button').onclick = () => { try { navigator.clipboard.writeText(url); ownMsg('Invite copied.', true); } catch (e) { ownMsg(url, true); } };
     });
+}
+function ownBlock() {
+    const id = document.getElementById('own-b-id').value.replace(/\D/g, '');
+    if (id.length < 15) { ownMsg('Type a Discord ID.', false); return; }
+    const kind = document.getElementById('own-b-kind').value;
+    if (!confirm('Block this ' + (kind === 'guild' ? 'server' : 'user') + ' (' + id + ')?')) return;
+    ownJob('blacklist_add', {kind, id, reason: document.getElementById('own-b-reason').value}, () => { document.getElementById('own-b-id').value = ''; ownLoadBlocked(); });
+}
+async function ownLoadBlocked() {
+    const j = await ownApi('/api/owner/blacklist');
+    const row = (kind, x) => '<div class="own-list-item"><span><b>' + escapeHtml(x.name) + '</b><br><small>' + x.id + (x.reason ? ' | ' + escapeHtml(x.reason) : '') + '</small></span><button class="btn-glass" data-kind="' + kind + '" data-id="' + x.id + '">Unblock</button></div>';
+    const fill = (id, kind, list) => {
+        const box = document.getElementById(id);
+        box.innerHTML = (list || []).map(x => row(kind, x)).join('') || '<p class="own-note">None.</p>';
+        box.querySelectorAll('[data-id]').forEach(b => b.onclick = () => ownJob('blacklist_remove', {kind: b.dataset.kind, id: b.dataset.id}, ownLoadBlocked));
+    };
+    fill('own-b-users', 'user', j.users); fill('own-b-guilds', 'guild', j.guilds);
 }
 function ownFree(on) { ownJob('free', {on}); }
 function ownLimit(key, id) { ownJob('limit', {key, value: parseInt(document.getElementById(id).value, 10)}); }
