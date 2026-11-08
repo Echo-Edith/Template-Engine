@@ -3501,20 +3501,61 @@ def set_blacklist(kind: str, target_id, add: bool, reason: str = "", by: str = "
     return True
 
 
+# =====================================================================
+# MAINTENANCE MODE: everyone except the staff sees "Back soon". The owner turns it on in the website Owner Panel.
+# =====================================================================
+MAINTENANCE_CACHE = {"at": 0.0, "data": {"on": False, "message": ""}}
+LOCAL_MAINTENANCE = {"on": False, "message": ""}
+DEFAULT_MAINTENANCE_TEXT = "Template Engine is being updated. Please try again in a little while."
+
+
+def get_maintenance() -> dict:
+    now = time.time()
+    if now - MAINTENANCE_CACHE["at"] < 10:
+        return MAINTENANCE_CACHE["data"]
+    data = dict(LOCAL_MAINTENANCE)
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "maintenance"}) or {}
+            data = {"on": bool(doc.get("on")), "message": str(doc.get("message") or "")}
+        except Exception as e:
+            print(f"[Maintenance Read Error] {e}")
+    MAINTENANCE_CACHE["at"], MAINTENANCE_CACHE["data"] = now, data
+    return data
+
+
+def set_maintenance(on: bool, message: str = "", by: str = "") -> bool:
+    data = {"on": bool(on), "message": message[:300]}
+    LOCAL_MAINTENANCE.update(data)
+    MAINTENANCE_CACHE["at"] = 0.0
+    if db_settings is None:
+        return True
+    try:
+        db_settings.update_one({"_id": "maintenance"}, {"$set": {**data, "by": str(by),
+                               "at": datetime.now(timezone.utc).timestamp()}}, upsert=True)
+        return True
+    except Exception as e:
+        print(f"[Maintenance Save Error] {e}")
+        return False
+
+
 async def blocked_check(interaction: discord.Interaction) -> bool:
     """True = allowed. Used for every slash command and for the main buttons."""
     uid = str(interaction.user.id)
     if uid in COMMAND_ADMINS:
         return True
-    why = None
-    if is_user_blacklisted(uid):
+    why, title = None, "Access Blocked"
+    maintenance = get_maintenance()
+    if maintenance["on"]:
+        why, title = maintenance["message"] or DEFAULT_MAINTENANCE_TEXT, "Back Soon"
+    elif is_user_blacklisted(uid):
         why = "You are blocked from using Template Engine. If you think this is a mistake, contact the staff."
     elif interaction.guild is not None and is_guild_blacklisted(interaction.guild.id):
         why = "This server is blocked from using Template Engine."
     if why is None:
         return True
     try:
-        embed = discord.Embed(title="Access Blocked", description=why, color=COLOR_RED)
+        embed = discord.Embed(title=title, description=why, color=COLOR_RED if title == "Access Blocked" else 0xF59E0B)
         if interaction.response.is_done():
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
@@ -3825,6 +3866,12 @@ async def run_owner_job(bot, job: dict) -> str:
                 except Exception as e:
                     note = f" Could not leave the server: {e}"
         return f"Blocked {kind} {target}." + note
+
+    if t == "maintenance":
+        on = bool(p.get("on"))
+        if not set_maintenance(on, str(p.get("message") or "").strip(), by):
+            raise ValueError("Could not save to the database.")
+        return "Maintenance mode is ON. Only staff can use the bot and website." if on else "Maintenance mode is OFF. Everyone can use it again."
 
     if t == "invite":
         guild = bot.get_guild(_job_id(p, "guild_id"))

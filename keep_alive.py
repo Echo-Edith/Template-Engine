@@ -884,6 +884,7 @@ OWNER_JOB_SPECS = {
     "limit": {"key", "value"},
     "theme": {"theme"},
     "invite": {"guild_id"},
+    "maintenance": {"on", "message"},
     "blacklist_add": {"kind", "id", "reason"},
     "blacklist_remove": {"kind", "id"},
     "sync_roles": set(),
@@ -951,7 +952,7 @@ def _owner_user_info(uid: str) -> dict:
 @app.route("/api/owner/overview")
 @owner_only
 def api_owner_overview():
-    out = {"free_mode": get_free_mode(), "theme": get_site_theme(), "limits": _limit_settings(),
+    out = {"maintenance": get_maintenance(), "free_mode": get_free_mode(), "theme": get_site_theme(), "limits": _limit_settings(),
            "themes": sorted(SITE_THEMES), "db": db_owner_jobs is not None,
            "counts": {}, "guilds": [], "bot_online": False, "jobs": []}
     if db_settings is not None:
@@ -1212,6 +1213,50 @@ def public_profile(username):
     theme = ((_web_user(viewer["id"]) or {}).get("theme_mode") if viewer.get("id") else "") or ""
     return render_template_string(PROFILE_PAGE, name=u.get("name") or u.get("username") or "User",
                                   premium=is_user_premium(uid), designs=designs, theme="light" if theme == "light" else "dark")
+
+
+# =====================================================================
+# MAINTENANCE MODE: everyone except the owner sees "Back soon". The login pages stay open so the owner can sign in.
+# =====================================================================
+_MAINT = {"at": 0.0, "data": {"on": False, "message": ""}}
+DEFAULT_MAINTENANCE_TEXT = "Template Engine is being updated. Please try again in a little while."
+
+
+def get_maintenance() -> dict:
+    now = datetime.now().timestamp()
+    if now - _MAINT["at"] < 10:
+        return _MAINT["data"]
+    data = {"on": False, "message": ""}
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "maintenance"}) or {}
+            data = {"on": bool(doc.get("on")), "message": str(doc.get("message") or "")}
+        except Exception as e:
+            print(f"[Maintenance Read Error] {e}")
+    _MAINT["at"], _MAINT["data"] = now, data
+    return data
+
+
+@app.before_request
+def maintenance_gate():
+    if request.path.startswith(("/static/", "/login", "/callback", "/logout")):
+        return None
+    m = get_maintenance()
+    if not m["on"] or is_owner() or request.path.startswith("/api/owner/"):
+        return None
+    text = m["message"] or DEFAULT_MAINTENANCE_TEXT
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": text, "maintenance": True}), 503, {"Retry-After": "60"}
+    return render_template_string(MAINTENANCE_PAGE, text=text), 503, {"Retry-After": "60"}
+
+
+MAINTENANCE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="60"><meta name="robots" content="noindex"><title>Back soon - Template Engine</title>
+<style>:root{color-scheme:dark light}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#060f1c;color:#e6f0fa;font-family:ui-monospace,Menlo,Consolas,monospace;padding:16px}
+.box{max-width:480px;border:2px solid #c9962b;background:#0a1a2e;padding:24px;box-shadow:8px 8px 0 rgba(0,0,0,.4);text-align:center}
+h1{margin:0 0 10px;color:#c9962b;font-size:1.3rem;text-transform:uppercase;letter-spacing:.08em}p{margin:0 0 8px;line-height:1.5;word-break:break-word}small{color:#9db6cf}
+@media (prefers-color-scheme: light){body{background:#e8eff6;color:#0d2238}.box{background:#fffaf0;border-color:#b8862a}h1{color:#8a6100}small{color:#35546f}}</style></head>
+<body><div class="box"><h1>Back soon</h1><p>{{ text }}</p><small>This page checks again every minute.</small></div></body></html>"""
 
 
 @app.route("/")

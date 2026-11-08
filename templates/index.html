@@ -1130,6 +1130,11 @@ background: var(--accent-purple-glow) !important;
 
 <div class="own-sec on" id="own-overview">
 <div class="editor-card"><div class="label-heading">STATUS</div><div id="own-status" class="own-stat"></div></div>
+<div class="editor-card"><div class="label-heading">MAINTENANCE MODE</div>
+<div class="own-row"><span id="own-maint-text">-</span></div>
+<input class="form-control" id="own-maint-msg" maxlength="300" placeholder="Message people will see (empty = default)">
+<div class="own-row"><button class="btn-glass own-small" onclick="ownMaint(true)">Turn On</button><button class="btn-glass own-small" onclick="ownMaint(false)">Turn Off</button></div>
+<p class="own-note">When it is on, everyone except the staff sees "Back soon" on the website and in the bot. You can still use this panel.</p></div>
 <div class="editor-card"><div class="label-heading">FREE MODE</div>
 <div class="own-row"><span id="own-free-text">-</span><button class="btn-glass own-small" onclick="ownFree(true)">Turn On</button><button class="btn-glass own-small" onclick="ownFree(false)">Turn Off</button></div></div>
 <div class="editor-card"><div class="label-heading">FREE LIMITS (0 = no limit)</div>
@@ -2728,6 +2733,8 @@ async function ownRefresh() {
     document.getElementById('own-status').innerHTML =
         '<div><b>' + (o.bot_online ? 'Online' : 'Offline?') + '</b>Bot</div><div><b>' + (c.premium || 0) + '</b>Premium</div><div><b>' + (c.staff || 0) + '</b>Staff</div>' +
         '<div><b>' + (c.website_users || 0) + '</b>Site users</div><div><b>' + (c.designs || 0) + '</b>Designs</div><div><b>' + (c.codes || 0) + '</b>Codes</div>';
+    document.getElementById('own-maint-text').textContent = o.maintenance && o.maintenance.on ? 'Maintenance is ON' : 'Maintenance is OFF';
+    if (o.maintenance && o.maintenance.on && !document.getElementById('own-maint-msg').value) document.getElementById('own-maint-msg').value = o.maintenance.message || '';
     document.getElementById('own-free-text').textContent = 'Free mode is ' + (o.free_mode ? 'ON' : 'OFF');
     document.getElementById('own-lim-ai').value = o.limits.ai_per_day;
     document.getElementById('own-lim-bw').value = o.limits.builds_per_week;
@@ -2769,6 +2776,10 @@ async function ownLoadBlocked() {
         box.querySelectorAll('[data-id]').forEach(b => b.onclick = () => ownJob('blacklist_remove', {kind: b.dataset.kind, id: b.dataset.id}, ownLoadBlocked));
     };
     fill('own-b-users', 'user', j.users); fill('own-b-guilds', 'guild', j.guilds);
+}
+function ownMaint(on) {
+    if (on && !confirm('Turn on maintenance mode? Everyone except the staff will be locked out.')) return;
+    ownJob('maintenance', {on, message: document.getElementById('own-maint-msg').value});
 }
 function ownFree(on) { ownJob('free', {on}); }
 function ownLimit(key, id) { ownJob('limit', {key, value: parseInt(document.getElementById(id).value, 10)}); }
