@@ -12,6 +12,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from cogs.features import (
+    build_ticket_panel_embed,
     is_free_mode,
     set_free_mode,
     user_has_premium,
@@ -3816,13 +3817,7 @@ class CommandsCog(commands.Cog):
         embed.add_field(name="Staff Role", value=staff_role.mention, inline=True)
         embed.add_field(name="Transcripts", value=f"{log_channel.mention}\n`{log_channel.guild.name}`", inline=True)
         if panel_channel is not None:
-            panel = discord.Embed(
-                title="Need Help?",
-                description="Press a button below to open a private ticket. Our staff will answer you there.",
-                color=COLOR_PURPLE
-            )
-            panel.add_field(name="Support", value="Questions or problems.", inline=True)
-            panel.add_field(name="Buy Premium", value="Buy TE Premium with help from staff.", inline=True)
+            panel = build_ticket_panel_embed()
             try:
                 await panel_channel.send(embed=panel, view=TicketPanelView())
                 embed.add_field(name="Panel Posted", value=panel_channel.mention, inline=False)

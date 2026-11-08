@@ -117,6 +117,9 @@ function checkAuthStatus() {
 [data-theme="light"] .add-btn-inline:hover { color: var(--text-title); }
 [data-theme="light"] .form-control option { background: #ffffff; }
 [data-theme="light"] .logout-link { color: #b42323; }
+[data-theme="light"] .glass-panel.gold-theme { background: #fffaf0; box-shadow: 8px 8px 0 rgba(13, 34, 56, 0.18); }
+[data-theme="light"] .gold-theme .form-control { border-color: #b8862a; }
+[data-theme="light"] .btn-glass.btn-premium { color: #ffffff; border-color: #5c4410; }
 [data-theme="light"] .btn-discord,
 [data-theme="light"] .btn-discord *,
 [data-theme="light"] .inbox-badge,
@@ -1032,6 +1035,7 @@ background: var(--accent-purple-glow) !important;
 <button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs</button>
 <button class="btn-glass btn-secondary-link" onclick="openPoints()"><i class="fa-solid fa-coins"></i> My Points</button>
 <button class="btn-glass btn-secondary-link inbox-btn" onclick="openInbox()"><i class="fa-solid fa-inbox"></i> Inbox<span class="inbox-badge" style="display:none;"></span></button>
+{% if is_owner %}<button class="btn-glass btn-secondary-link" onclick="openOwner()" style="grid-column:1 / -1;"><i class="fa-solid fa-crown"></i> Owner Panel</button>{% endif %}
 </div>
 <div class="usage-meter" id="usage-meter-landing"></div>
 {% endif %}
@@ -1081,6 +1085,108 @@ background: var(--accent-purple-glow) !important;
 </div>
 <button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
 </div>
+
+{% if is_owner %}
+<style>
+.own-tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+.own-tabs button { flex:1 1 auto; padding:8px 10px; font-size:0.78rem; }
+.own-tabs button.on { background: var(--accent-purple) !important; color:#fff !important; border-color: var(--accent-purple) !important; }
+.own-sec { display:none; } .own-sec.on { display:block; }
+.own-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; align-items:center; }
+.own-row > * { flex:1 1 140px; min-width:0; }
+.own-row > .own-small { flex:0 1 auto; }
+.own-msg { margin:10px 0; padding:10px 12px; border:1px dashed var(--panel-border); font-size:0.85rem; display:none; word-break:break-word; }
+.own-msg.ok { border-color: var(--accent-green); color: var(--accent-green); }
+.own-msg.err { border-color: var(--accent-red); color: var(--accent-red); }
+.own-stat { display:grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap:8px; }
+.own-stat div { border:1px solid var(--glass-inner-border); padding:8px; text-align:center; background: var(--glass-inner-bg); }
+.own-stat b { display:block; font-size:1.2rem; }
+.own-list-item { display:flex; justify-content:space-between; gap:8px; align-items:center; padding:8px 0; border-bottom:1px dashed var(--glass-inner-border); font-size:0.82rem; flex-wrap:wrap; }
+.own-list-item .btn-glass { padding:4px 8px; font-size:0.72rem; }
+.own-note { font-size:0.75rem; color: var(--text-sub); margin-top:6px; }
+</style>
+{% endif %}
+{% if is_owner %}
+<!-- PAGE: OWNER PANEL (only the owner gets this HTML at all) -->
+<div id="page-owner" class="page">
+<div class="brand-header"><h1>Owner Panel</h1><p>Only you can see this. Actions are run by the bot in a few seconds.</p></div>
+<div class="own-tabs" id="own-tabs">
+<button class="btn-glass on" data-tab="overview">Overview</button>
+<button class="btn-glass btn-secondary-link" data-tab="panels">Panels</button>
+<button class="btn-glass btn-secondary-link" data-tab="codes">Codes</button>
+<button class="btn-glass btn-secondary-link" data-tab="users">Users</button>
+</div>
+<div id="own-msg" class="own-msg"></div>
+
+<div class="own-sec on" id="own-overview">
+<div class="editor-card"><div class="label-heading">STATUS</div><div id="own-status" class="own-stat"></div></div>
+<div class="editor-card"><div class="label-heading">FREE MODE</div>
+<div class="own-row"><span id="own-free-text">-</span><button class="btn-glass own-small" onclick="ownFree(true)">Turn On</button><button class="btn-glass own-small" onclick="ownFree(false)">Turn Off</button></div></div>
+<div class="editor-card"><div class="label-heading">FREE LIMITS (0 = no limit)</div>
+<div class="own-row"><input class="form-control" id="own-lim-ai" type="number" min="0" placeholder="AI per day"><button class="btn-glass own-small" onclick="ownLimit('ai_per_day','own-lim-ai')">Save</button></div>
+<div class="own-row"><input class="form-control" id="own-lim-bw" type="number" min="0" placeholder="Builds per week"><button class="btn-glass own-small" onclick="ownLimit('builds_per_week','own-lim-bw')">Save</button></div></div>
+<div class="editor-card"><div class="label-heading">WEBSITE THEME</div>
+<div class="own-row"><select class="form-control" id="own-theme"></select><button class="btn-glass own-small" onclick="ownTheme()">Save</button></div></div>
+<div class="editor-card"><div class="label-heading">TE PREMIUM ROLES</div>
+<div class="own-row"><button class="btn-glass" onclick="ownJob('sync_roles',{})">Sync roles now</button></div></div>
+<div class="editor-card"><div class="label-heading">RECENT ACTIONS</div><div id="own-jobs"></div></div>
+</div>
+
+<div class="own-sec" id="own-panels">
+<div class="editor-card"><div class="label-heading">SERVER</div>
+<select class="form-control" id="own-guild" onchange="ownFillGuild()"></select>
+<p class="own-note" id="own-guild-note"></p></div>
+<div class="editor-card"><div class="label-heading">POST A PANEL (EMBED WITH BUTTONS)</div>
+<select class="form-control" id="own-panel-ch"></select>
+<textarea class="form-control" id="own-panel-desc" rows="3" maxlength="2000" placeholder="Text above the buttons (empty = default text)" style="margin-top:8px;"></textarea>
+<div class="own-row">
+<button class="btn-glass" onclick="ownPanel('verification')">Roblox Verification</button>
+<button class="btn-glass" onclick="ownPanel('unsync')">Roblox Un-Sync</button>
+<button class="btn-glass" onclick="ownPanel('ticket')">Ticket Buttons</button></div>
+<p class="own-note">The text box is used by the Verification and Un-Sync panels.</p></div>
+<div class="editor-card"><div class="label-heading">TICKET SETUP</div>
+<select class="form-control" id="own-t-cat"></select>
+<select class="form-control" id="own-t-role" style="margin-top:8px;"></select>
+<select class="form-control" id="own-t-log" style="margin-top:8px;"></select>
+<select class="form-control" id="own-t-panel" style="margin-top:8px;"></select>
+<div class="own-row"><button class="btn-glass" onclick="ownTicketSetup()">Save and post panel</button></div>
+<p class="own-note">Category, staff role and transcript channel are saved. A panel is posted if you choose a panel channel.</p></div>
+<div class="editor-card"><div class="label-heading">GREETING (JOIN / LEAVE)</div>
+<div class="own-row"><select class="form-control" id="own-g-kind"><option value="join">Join (new member)</option><option value="leave">Leave (member left)</option></select>
+<select class="form-control" id="own-g-ch"></select></div>
+<textarea class="form-control" id="own-g-msg" rows="3" maxlength="1500" placeholder="{user} {username} {server} {count} {id}. Empty = keep the old or default message."></textarea>
+<div class="own-row"><label style="flex:0 0 auto;"><input type="checkbox" id="own-g-on" checked> On</label><button class="btn-glass" onclick="ownGreeting()">Save greeting</button></div></div>
+<div class="editor-card"><div class="label-heading">MESSAGE LOG</div>
+<select class="form-control" id="own-ml-ch"></select>
+<div class="own-row"><label style="flex:0 0 auto;"><input type="checkbox" id="own-ml-on" checked> On</label><button class="btn-glass" onclick="ownMsgLog()">Save message log</button></div></div>
+</div>
+
+<div class="own-sec" id="own-codes">
+<div class="editor-card"><div class="label-heading">CREATE A CODE</div>
+<div class="own-row"><input class="form-control" id="own-c-code" placeholder="CODE (3-32 letters, numbers, - _)" maxlength="32"><input class="form-control" id="own-c-pts" type="number" min="0" placeholder="Points"></div>
+<div class="own-row"><input class="form-control" id="own-c-days" type="number" min="0" placeholder="Premium days"><input class="form-control" id="own-c-dur" placeholder="Works for (12h, 7d, 2w)"><input class="form-control" id="own-c-max" type="number" min="1" placeholder="Max uses"></div>
+<div class="own-row"><button class="btn-glass" onclick="ownCodeCreate()">Create code</button></div></div>
+<div class="editor-card"><div class="label-heading">CODES</div><div id="own-code-list"></div></div>
+</div>
+
+<div class="own-sec" id="own-users">
+<div class="editor-card"><div class="label-heading">FIND A USER</div>
+<div class="own-row"><input class="form-control" id="own-u-id" placeholder="Discord user ID" inputmode="numeric"><button class="btn-glass own-small" onclick="ownLookup()">Look up</button></div>
+<div id="own-u-info" class="own-note"></div></div>
+<div class="editor-card"><div class="label-heading">POINTS</div>
+<div class="own-row"><input class="form-control" id="own-u-pts" type="number" placeholder="Amount"><button class="btn-glass own-small" onclick="ownPoints(1)">Add</button><button class="btn-glass own-small" onclick="ownPoints(-1)">Deduct</button></div></div>
+<div class="editor-card"><div class="label-heading">TE PREMIUM</div>
+<div class="own-row"><input class="form-control" id="own-u-days" type="number" min="1" placeholder="Days"><button class="btn-glass own-small" onclick="ownPremium('grant')">Grant</button><button class="btn-glass own-small" onclick="ownPremium('extend')">Add days</button><button class="btn-glass own-small" onclick="ownPremium('reduce')">Remove days</button></div>
+<div class="own-row"><button class="btn-glass" onclick="ownPremium('grant', true)">Grant permanent</button><button class="btn-glass" onclick="ownConfirmPremiumRemove()">Revoke premium</button></div></div>
+<div class="editor-card"><div class="label-heading">STAFF</div>
+<div class="own-row"><button class="btn-glass" onclick="ownStaff('add')">Add staff</button><button class="btn-glass" onclick="ownStaff('remove')">Remove staff</button></div>
+<p class="own-note">Staff get TE Premium and the saved staff role.</p></div>
+<div class="editor-card"><div class="label-heading">PEOPLE WITH PREMIUM</div><div id="own-prem-list"></div></div>
+</div>
+
+<button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
+</div>
+{% endif %}
 
 <!-- PAGE: MY DESIGNS -->
 <div id="page-history" class="page">
@@ -2480,5 +2586,169 @@ function resetBuilder() {
     navigateTo('page-generator');
 }
 </script>
+{% if is_owner %}
+<script>
+// OWNER PANEL (this script is only sent to the owner)
+let OWN = {guilds: [], loaded: false};
+function ownMsg(text, ok) {
+    const el = document.getElementById('own-msg');
+    el.textContent = text; el.className = 'own-msg ' + (ok ? 'ok' : 'err'); el.style.display = 'block';
+    el.scrollIntoView({block: 'nearest'});
+}
+async function ownApi(url, body) {
+    const opt = body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {};
+    const r = await fetch(url, opt);
+    let j = {}; try { j = await r.json(); } catch (e) {}
+    if (!r.ok && !j.error) j.error = 'Error ' + r.status;
+    return j;
+}
+async function ownJob(type, params, after) {
+    ownMsg('Sending...', true);
+    const j = await ownApi('/api/owner/job', {type, params});
+    if (!j.success) { ownMsg(j.error || 'Failed.', false); return; }
+    ownMsg('Waiting for the bot...', true);
+    for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const s = await ownApi('/api/owner/job/' + j.id);
+        if (s.status === 'done') { ownMsg(s.result || 'Done.', true); ownRefresh(); if (after) after(); return; }
+        if (s.status === 'error') { ownMsg(s.result || 'The bot could not do this.', false); ownRefresh(); return; }
+    }
+    ownMsg('The bot did not answer in 45 seconds. Is the bot online?', false);
+}
+function openOwner() { navigateTo('page-owner'); ownRefresh(); ownTab('overview'); }
+function ownTab(name) {
+    document.querySelectorAll('#own-tabs button').forEach(b => { const on = b.dataset.tab === name; b.classList.toggle('on', on); b.classList.toggle('btn-secondary-link', !on); });
+    document.querySelectorAll('.own-sec').forEach(s => s.classList.toggle('on', s.id === 'own-' + name));
+    if (name === 'codes') ownLoadCodes();
+    if (name === 'users') ownLoadPremium();
+}
+document.querySelectorAll('#own-tabs button').forEach(b => b.addEventListener('click', () => ownTab(b.dataset.tab)));
+function ownOpts(list, empty) {
+    return '<option value="">' + empty + '</option>' + list.map(x => '<option value="' + x.id + '">' + escapeHtml(x.name) + '</option>').join('');
+}
+function ownGuild() { return OWN.guilds.find(g => g.id === document.getElementById('own-guild').value) || null; }
+function ownFillGuild() {
+    const g = ownGuild();
+    const ch = g ? g.channels : [], cats = g ? g.categories : [], roles = g ? g.roles : [];
+    const chOpts = ownOpts(ch.map(c => ({id: c.id, name: '#' + c.name})), 'Choose a channel');
+    ['own-panel-ch', 'own-g-ch', 'own-ml-ch'].forEach(id => document.getElementById(id).innerHTML = chOpts);
+    document.getElementById('own-t-cat').innerHTML = ownOpts(cats, 'Ticket category');
+    document.getElementById('own-t-role').innerHTML = ownOpts(roles, 'Staff role');
+    document.getElementById('own-t-log').innerHTML = ownOpts(ch.map(c => ({id: c.id, name: '#' + c.name})), 'Transcript channel');
+    document.getElementById('own-t-panel').innerHTML = ownOpts(ch.map(c => ({id: c.id, name: '#' + c.name})), 'Panel channel (optional)');
+}
+async function ownRefresh() {
+    const o = await ownApi('/api/owner/overview');
+    if (o.error) { ownMsg(o.error, false); return; }
+    OWN.guilds = o.guilds || [];
+    const sel = document.getElementById('own-guild'), keep = sel.value;
+    sel.innerHTML = ownOpts(OWN.guilds, OWN.guilds.length ? 'Choose a server' : 'No server data yet (is the bot online?)');
+    if (keep) sel.value = keep;
+    ownFillGuild();
+    const c = o.counts || {};
+    document.getElementById('own-status').innerHTML =
+        '<div><b>' + (o.bot_online ? 'Online' : 'Offline?') + '</b>Bot</div><div><b>' + (c.premium || 0) + '</b>Premium</div><div><b>' + (c.staff || 0) + '</b>Staff</div>' +
+        '<div><b>' + (c.website_users || 0) + '</b>Site users</div><div><b>' + (c.designs || 0) + '</b>Designs</div><div><b>' + (c.codes || 0) + '</b>Codes</div>';
+    document.getElementById('own-free-text').textContent = 'Free mode is ' + (o.free_mode ? 'ON' : 'OFF');
+    document.getElementById('own-lim-ai').value = o.limits.ai_per_day;
+    document.getElementById('own-lim-bw').value = o.limits.builds_per_week;
+    const th = document.getElementById('own-theme');
+    th.innerHTML = (o.themes || []).map(t => '<option value="' + t + '">' + t + '</option>').join('');
+    th.value = o.theme;
+    document.getElementById('own-jobs').innerHTML = (o.jobs || []).map(j =>
+        '<div class="own-list-item"><span><b>' + escapeHtml(j.type) + '</b> - ' + escapeHtml(j.status) + '</span><span style="color:var(--text-sub);">' + escapeHtml((j.result || '').slice(0, 90)) + '</span></div>').join('') || '<p class="own-note">Nothing yet.</p>';
+}
+function ownFree(on) { ownJob('free', {on}); }
+function ownLimit(key, id) { ownJob('limit', {key, value: parseInt(document.getElementById(id).value, 10)}); }
+function ownTheme() { ownJob('theme', {theme: document.getElementById('own-theme').value}); }
+function ownPanel(kind) {
+    const ch = document.getElementById('own-panel-ch').value;
+    if (!ch) { ownMsg('Choose a server and a channel first.', false); return; }
+    ownJob('panel', {kind, channel_id: ch, description: document.getElementById('own-panel-desc').value});
+}
+function ownTicketSetup() {
+    const v = id => document.getElementById(id).value;
+    if (!v('own-t-cat') || !v('own-t-role') || !v('own-t-log')) { ownMsg('Choose the category, the staff role and the transcript channel.', false); return; }
+    ownJob('ticket_setup', {category_id: v('own-t-cat'), staff_role_id: v('own-t-role'), log_channel_id: v('own-t-log'), channel_id: v('own-t-panel')});
+}
+function ownGreeting() {
+    const g = ownGuild();
+    if (!g) { ownMsg('Choose a server first.', false); return; }
+    ownJob('greeting', {guild_id: g.id, kind: document.getElementById('own-g-kind').value, channel_id: document.getElementById('own-g-ch').value,
+        message: document.getElementById('own-g-msg').value, enabled: document.getElementById('own-g-on').checked});
+}
+function ownMsgLog() {
+    const g = ownGuild(), on = document.getElementById('own-ml-on').checked;
+    if (!g) { ownMsg('Choose a server first.', false); return; }
+    if (on && !document.getElementById('own-ml-ch').value) { ownMsg('Choose a channel.', false); return; }
+    ownJob('messagelog', {guild_id: g.id, channel_id: document.getElementById('own-ml-ch').value, enabled: on});
+}
+function ownCodeCreate() {
+    const v = id => document.getElementById(id).value;
+    ownJob('promo_create', {code: v('own-c-code'), points: parseInt(v('own-c-pts') || '0', 10), premium_days: parseInt(v('own-c-days') || '0', 10),
+        duration: v('own-c-dur'), max_uses: v('own-c-max') ? parseInt(v('own-c-max'), 10) : ''}, ownLoadCodes);
+}
+async function ownLoadCodes() {
+    const j = await ownApi('/api/owner/promos');
+    const box = document.getElementById('own-code-list');
+    box.innerHTML = (j.items || []).map(c => {
+        const reward = [c.points ? c.points + ' pts' : '', c.premium_days ? c.premium_days + 'd premium' : ''].filter(Boolean).join(' + ');
+        const uses = c.uses + (c.max_uses ? '/' + c.max_uses : '') + ' used';
+        const exp = c.expires_at ? new Date(c.expires_at * 1000).toLocaleString() : 'never expires';
+        return '<div class="own-list-item"><span><b>' + escapeHtml(c.code) + '</b> ' + (c.active ? '' : '(ended) ') + '<br><small>' + escapeHtml(reward + ' | ' + uses + ' | ' + exp) + '</small></span>' +
+            '<span><button class="btn-glass" data-edit="' + escapeHtml(c.code) + '">Edit</button> <button class="btn-glass" data-del="' + escapeHtml(c.code) + '">Delete</button></span></div>';
+    }).join('') || '<p class="own-note">No codes yet.</p>';
+    box.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { if (confirm('Delete code ' + b.dataset.del + '?')) ownJob('promo_delete', {code: b.dataset.del}, ownLoadCodes); });
+    box.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
+        const pts = prompt('New points for ' + b.dataset.edit + ' (empty = keep):'); if (pts === null) return;
+        const mx = prompt('New max uses (empty = keep):'); if (mx === null) return;
+        const dur = prompt('New time from now, like 7d (empty = keep):'); if (dur === null) return;
+        const params = {code: b.dataset.edit, duration: dur};
+        if (pts.trim()) params.points = parseInt(pts, 10);
+        if (mx.trim()) params.max_uses = parseInt(mx, 10);
+        ownJob('promo_update', params, ownLoadCodes);
+    });
+}
+function ownUid() {
+    const id = document.getElementById('own-u-id').value.replace(/\D/g, '');
+    if (id.length < 15) { ownMsg('Type a Discord user ID first.', false); return ''; }
+    return id;
+}
+async function ownLookup(idArg) {
+    const id = idArg || ownUid(); if (!id) return;
+    document.getElementById('own-u-id').value = id;
+    const j = await ownApi('/api/owner/user/' + id);
+    document.getElementById('own-u-info').innerHTML = j.error ? escapeHtml(j.error) :
+        '<b>' + escapeHtml(j.name) + '</b><br>Points: ' + j.points.toLocaleString() + '<br>Premium: ' + escapeHtml(j.premium) + (j.staff ? '<br>Staff: yes' : '') + (j.roblox ? '<br>Roblox: ' + escapeHtml(j.roblox) : '');
+}
+const ownAfterUser = () => { ownLookup(); ownLoadPremium(); };
+function ownPoints(sign) {
+    const id = ownUid(), n = parseInt(document.getElementById('own-u-pts').value, 10);
+    if (!id) return; if (!n || n < 0) { ownMsg('Type a positive amount.', false); return; }
+    ownJob('points', {user_id: id, amount: sign * n}, ownAfterUser);
+}
+function ownPremium(action, permanent) {
+    const id = ownUid(); if (!id) return;
+    const days = parseInt(document.getElementById('own-u-days').value, 10);
+    if (!permanent && !days) { ownMsg('Type the number of days.', false); return; }
+    ownJob('premium', {user_id: id, action, days: days || 0, permanent: !!permanent}, ownAfterUser);
+}
+function ownConfirmPremiumRemove() {
+    const id = ownUid(); if (!id) return;
+    if (confirm('Revoke TE Premium from ' + id + '?')) ownJob('premium', {user_id: id, action: 'remove'}, ownAfterUser);
+}
+function ownStaff(action) {
+    const id = ownUid(); if (!id) return;
+    if (action === 'remove' && !confirm('Remove staff and their TE Premium?')) return;
+    ownJob('staff', {user_id: id, action}, ownAfterUser);
+}
+async function ownLoadPremium() {
+    const j = await ownApi('/api/owner/premium');
+    const box = document.getElementById('own-prem-list');
+    box.innerHTML = (j.items || []).map(p => '<div class="own-list-item"><span><b>' + escapeHtml(p.name || p.id) + '</b> ' + (p.staff ? '(staff)' : '') + '<br><small>' + p.id + ' | ends ' + escapeHtml(p.expires || 'never') + '</small></span><button class="btn-glass" data-id="' + p.id + '">Open</button></div>').join('') || '<p class="own-note">Nobody yet.</p>';
+    box.querySelectorAll('[data-id]').forEach(b => b.onclick = () => { ownLookup(b.dataset.id); window.scrollTo({top: 0, behavior: 'smooth'}); });
+}
+</script>
+{% endif %}
 </body>
 </html>

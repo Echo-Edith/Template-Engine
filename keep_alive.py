@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import asyncio
 import requests
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort
 from pymongo import MongoClient
 
 # Import ai_brain module
@@ -51,6 +51,8 @@ db_designs = None
 db_shop = None
 db_web_users = None
 db_inbox = None
+db_promos = None
+db_owner_jobs = None
 LOCAL_WEB_USERS = {}
 LOCAL_INBOX = []
 LOCAL_DESIGNS = []  # used only when there is no database
@@ -69,6 +71,8 @@ if MONGO_URI:
         db_shop = db["shop_items"]
         db_web_users = db["web_users"]
         db_inbox = db["web_inbox"]
+        db_promos = db["promo_codes"]
+        db_owner_jobs = db["owner_jobs"]
     except Exception as e:
         print(f"[MongoDB Warning in Flask] {e}")
 
@@ -856,6 +860,187 @@ def api_share_settings():
         return jsonify({"success": False, "error": "Could not save."}), 500
 
 
+# =====================================================================
+# OWNER PANEL: only the IDs in OWNER_IDS can see or use this. Everyone else gets a plain 404.
+# The website never changes data itself. It saves a "job" and the bot runs it with the same code as the slash commands.
+# =====================================================================
+OWNER_IDS = {"1219266886143967245"} | {x.strip() for x in os.environ.get("OWNER_IDS", "").split(",") if x.strip().isdigit()}
+_OWNER_LOG = {}
+
+# job type -> the only settings the website may send for it
+OWNER_JOB_SPECS = {
+    "panel": {"kind", "channel_id", "description"},
+    "ticket_setup": {"category_id", "staff_role_id", "log_channel_id", "channel_id"},
+    "greeting": {"guild_id", "kind", "channel_id", "message", "enabled"},
+    "messagelog": {"guild_id", "channel_id", "enabled"},
+    "promo_create": {"code", "points", "premium_days", "duration", "max_uses"},
+    "promo_update": {"code", "points", "premium_days", "duration", "max_uses"},
+    "promo_delete": {"code"},
+    "points": {"user_id", "amount"},
+    "premium": {"user_id", "action", "days", "permanent"},
+    "staff": {"user_id", "action"},
+    "free": {"on"},
+    "limit": {"key", "value"},
+    "theme": {"theme"},
+    "sync_roles": set(),
+}
+
+
+def is_owner() -> bool:
+    user = session.get("user") or {}
+    return str(user.get("id", "")) in OWNER_IDS
+
+
+def owner_only(fn):
+    from functools import wraps
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not is_owner():
+            abort(404)
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def _owner_user_info(uid: str) -> dict:
+    uid = str(uid)
+    info = {"id": uid, "name": _discord_name(uid), "points": 0, "premium": "none", "staff": False}
+    if db_users is not None:
+        try:
+            doc = db_users.find_one({"discord_id": uid}) or {}
+            info["points"] = int(doc.get("points", 0))
+            info["roblox"] = (doc.get("roblox_data") or {}).get("name", "") if isinstance(doc.get("roblox_data"), dict) else ""
+        except Exception as e:
+            print(f"[Owner User Error] {e}")
+    if uid in HARDCODED_STAFF:
+        info["premium"], info["staff"] = "permanent (staff)", True
+    elif db_premium is not None:
+        try:
+            doc = db_premium.find_one({"discord_id": uid}) or {}
+            info["staff"] = bool(doc.get("staff"))
+            raw = doc.get("expires_at")
+            if doc:
+                info["premium"] = "active" if not raw else str(raw)[:10]
+                if raw:
+                    exp = datetime.fromisoformat(str(raw))
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if exp <= datetime.now(timezone.utc):
+                        info["premium"] = "expired " + str(raw)[:10]
+                    elif exp.year >= 2100:
+                        info["premium"] = "permanent"
+        except Exception as e:
+            print(f"[Owner Premium Error] {e}")
+    return info
+
+
+@app.route("/api/owner/overview")
+@owner_only
+def api_owner_overview():
+    out = {"free_mode": get_free_mode(), "theme": get_site_theme(), "limits": _limit_settings(),
+           "themes": sorted(SITE_THEMES), "db": db_owner_jobs is not None,
+           "counts": {}, "guilds": [], "bot_online": False, "jobs": []}
+    if db_settings is not None:
+        try:
+            g = db_settings.find_one({"_id": "owner_guilds"}) or {}
+            out["guilds"] = g.get("guilds", [])
+            out["bot_online"] = (datetime.now(timezone.utc).timestamp() - float(g.get("updated_at", 0))) < 180
+        except Exception as e:
+            print(f"[Owner Overview Error] {e}")
+    try:
+        out["counts"] = {
+            "premium": db_premium.count_documents({}) if db_premium is not None else 0,
+            "staff": db_premium.count_documents({"staff": True}) if db_premium is not None else 0,
+            "website_users": db_web_users.count_documents({}) if db_web_users is not None else 0,
+            "designs": db_designs.count_documents({}) if db_designs is not None else 0,
+            "codes": db_promos.count_documents({}) if db_promos is not None else 0,
+        }
+        if db_owner_jobs is not None:
+            out["jobs"] = [{"id": j["jid"], "type": j["type"], "status": j["status"], "result": j.get("result", ""),
+                            "at": j.get("created_at", 0)}
+                           for j in db_owner_jobs.find({}).sort("created_at", -1).limit(15)]
+    except Exception as e:
+        print(f"[Owner Counts Error] {e}")
+    return jsonify(out)
+
+
+@app.route("/api/owner/job", methods=["POST"])
+@owner_only
+def api_owner_job():
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Bad request."}), 400
+    me = str(session["user"]["id"])
+    if not _rate_ok(_OWNER_LOG, me, 40, 60):
+        return jsonify({"success": False, "error": "Too many actions. Wait a moment."}), 429
+    data = request.get_json(silent=True) or {}
+    jtype = str(data.get("type", ""))
+    spec = OWNER_JOB_SPECS.get(jtype)
+    if spec is None:
+        return jsonify({"success": False, "error": "Unknown action."}), 400
+    if db_owner_jobs is None:
+        return jsonify({"success": False, "error": "No database connection."}), 503
+    params = {}
+    for key, value in (data.get("params") or {}).items():
+        if key in spec and isinstance(value, (str, int, bool)) and not (isinstance(value, str) and len(value) > 2000):
+            params[key] = value.strip() if isinstance(value, str) else value
+    jid = uuid.uuid4().hex[:12]
+    db_owner_jobs.insert_one({"jid": jid, "type": jtype, "params": params, "by": me, "status": "pending",
+                              "result": "", "created_at": datetime.now(timezone.utc).timestamp()})
+    print(f"[Owner Panel] {me} queued {jtype} ({jid})")
+    return jsonify({"success": True, "id": jid})
+
+
+@app.route("/api/owner/job/<jid>")
+@owner_only
+def api_owner_job_status(jid):
+    job = db_owner_jobs.find_one({"jid": str(jid)}) if db_owner_jobs is not None else None
+    if not job:
+        return jsonify({"status": "missing"}), 404
+    return jsonify({"status": job["status"], "result": job.get("result", "")})
+
+
+@app.route("/api/owner/promos")
+@owner_only
+def api_owner_promos():
+    items = []
+    if db_promos is not None:
+        try:
+            now = datetime.now(timezone.utc).timestamp()
+            for d in db_promos.find({}, {"_id": 0}).sort("created_at", -1).limit(100):
+                exp, mx = d.get("expires_at"), d.get("max_uses")
+                active = not (exp is not None and exp <= now) and not (mx is not None and int(d.get("uses", 0)) >= int(mx))
+                items.append({"code": d.get("code"), "points": d.get("points", 0), "premium_days": d.get("premium_days", 0),
+                              "uses": d.get("uses", 0), "max_uses": mx, "expires_at": exp, "active": active})
+        except Exception as e:
+            print(f"[Owner Promos Error] {e}")
+    return jsonify({"items": items})
+
+
+@app.route("/api/owner/premium")
+@owner_only
+def api_owner_premium():
+    items = []
+    if db_premium is not None:
+        try:
+            for d in db_premium.find({}).sort("updated_at", -1).limit(60):
+                uid = str(d.get("discord_id", ""))
+                if uid:
+                    items.append({"id": uid, "expires": str(d.get("expires_at") or "")[:10], "staff": bool(d.get("staff"))})
+        except Exception as e:
+            print(f"[Owner Premium List Error] {e}")
+    for it in items[:25]:
+        it["name"] = _discord_name(it["id"])
+    return jsonify({"items": items})
+
+
+@app.route("/api/owner/user/<uid>")
+@owner_only
+def api_owner_user(uid):
+    if not (uid.isdigit() and 15 <= len(uid) <= 21):
+        return jsonify({"error": "That is not a Discord ID."}), 400
+    return jsonify(_owner_user_info(uid))
+
+
 @app.route("/")
 def index():
     user = session.get("user")
@@ -889,6 +1074,7 @@ def index():
         site_theme=(personal_theme if personal_theme in ("dark", "light") else get_site_theme()),
         free_mode=get_free_mode(),
         pending_share=pending_share,
+        is_owner=bool(user and str(user.get('id', '')) in OWNER_IDS),
         roblox_store_url=os.environ.get("ROBLOX_STORE_URL", "https://www.roblox.com/games/6094950399/Template-Engine#!/store").strip()
     )
 

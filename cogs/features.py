@@ -42,6 +42,7 @@ db_broadcasts = None
 db_backups = None
 db_shop = None
 db_tickets = None
+db_owner_jobs = None
 
 if MONGO_URI:
     try:
@@ -66,6 +67,7 @@ if MONGO_URI:
         db_backups = db["backups"]
         db_shop = db["shop_items"]
         db_tickets = db["tickets"]
+        db_owner_jobs = db["owner_jobs"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -3433,6 +3435,341 @@ class NonPremiumDeploymentView(discord.ui.View):
 
 
 
+
+# =====================================================================
+# OWNER PANEL (website): the website saves a "job" in the database and the bot runs it here.
+# This way the website uses the exact same code as the slash commands.
+# Only jobs made by an owner ID are run.
+# =====================================================================
+OWNER_IDS = {str(BOT_OWNER_ID)} | {x.strip() for x in os.environ.get("OWNER_IDS", "").split(",") if x.strip().isdigit()}
+OWNER_PUBLISH = {"last": 0.0}
+VERIFY_PANEL_TEXT = "Link your Roblox account to Template Engine. Press **Generate Code**, paste the code in your Roblox bio, then press **Verify Account**."
+UNSYNC_PANEL_TEXT = "Press the button below to remove the Roblox account that is linked to your Discord account."
+
+
+def build_ticket_panel_embed() -> discord.Embed:
+    panel = discord.Embed(
+        title="Need Help?",
+        description="Press a button below to open a private ticket. Our staff will answer you there.",
+        color=COLOR_PURPLE
+    )
+    panel.add_field(name="Support", value="Questions or problems.", inline=True)
+    panel.add_field(name="Buy Premium", value="Buy TE Premium with help from staff.", inline=True)
+    return panel
+
+
+def _job_id(params: dict, key: str) -> int:
+    raw = str(params.get(key, "")).strip()
+    if not (raw.isdigit() and 15 <= len(raw) <= 21):
+        raise ValueError(f"`{key}` is not a valid Discord ID.")
+    return int(raw)
+
+
+def _job_int(params: dict, key: str, lo: int, hi: int) -> int:
+    try:
+        value = int(params.get(key))
+    except (TypeError, ValueError):
+        raise ValueError(f"`{key}` must be a number.")
+    if not lo <= value <= hi:
+        raise ValueError(f"`{key}` must be from {lo:,} to {hi:,}.")
+    return value
+
+
+async def _job_text_channel(bot, params: dict, key: str = "channel_id"):
+    cid = _job_id(params, key)
+    ch = bot.get_channel(cid)
+    if ch is None:
+        try:
+            ch = await bot.fetch_channel(cid)
+        except Exception:
+            ch = None
+    if ch is None or not hasattr(ch, "send") or not getattr(ch, "guild", None):
+        raise ValueError("I cannot see that channel. Check that the bot is in that server.")
+    perms = ch.permissions_for(ch.guild.me)
+    if not (perms.view_channel and perms.send_messages and perms.embed_links):
+        raise ValueError(f"I need `View Channel`, `Send Messages` and `Embed Links` in #{ch.name}.")
+    return ch
+
+
+async def run_owner_job(bot, job: dict) -> str:
+    """Runs one owner job. Raises ValueError with a clear message when the input is wrong."""
+    t = str(job.get("type", ""))
+    p = job.get("params") or {}
+    by = str(job.get("by", ""))
+    if by not in OWNER_IDS:
+        raise ValueError("This job was not made by an owner.")
+
+    if t == "panel":
+        kind = p.get("kind")
+        ch = await _job_text_channel(bot, p)
+        text = str(p.get("description") or "").strip()[:2000]
+        if kind == "verification":
+            embed = discord.Embed(title="Roblox Account Verification", description=text or VERIFY_PANEL_TEXT, color=0x8B5CF6)
+            embed.set_footer(text="Template Engine Roblox Synchronization System")
+            view, label = RobloxVerificationView(), "Verification"
+        elif kind == "unsync":
+            embed = discord.Embed(title="Un-Sync Roblox Account", description=text or UNSYNC_PANEL_TEXT, color=0xF43F5E)
+            embed.set_footer(text="Template Engine Account Management")
+            view, label = RobloxUnsyncView(), "Un-Sync"
+        elif kind == "ticket":
+            embed, view, label = build_ticket_panel_embed(), TicketPanelView(), "Ticket"
+        else:
+            raise ValueError("Unknown panel type.")
+        await ch.send(embed=embed, view=view)
+        return f"Posted the {label} panel in #{ch.name} ({ch.guild.name})."
+
+    if t == "ticket_setup":
+        cat_id, role_id, log_id = _job_id(p, "category_id"), _job_id(p, "staff_role_id"), _job_id(p, "log_channel_id")
+        category = bot.get_channel(cat_id)
+        log_ch = bot.get_channel(log_id)
+        if category is None or getattr(category, "guild", None) is None or not isinstance(category, discord.CategoryChannel):
+            raise ValueError("Category not found.")
+        guild = category.guild
+        role = guild.get_role(role_id)
+        if role is None or role.is_default() or role.managed:
+            raise ValueError("Pick a normal staff role.")
+        if log_ch is None or not hasattr(log_ch, "send"):
+            raise ValueError("I cannot see the log channel. Check that the bot is in that server.")
+        if not guild.me.guild_permissions.manage_channels:
+            raise ValueError("I need `Manage Channels` to create ticket channels.")
+        lp = log_ch.permissions_for(log_ch.guild.me)
+        if not (lp.view_channel and lp.send_messages and lp.attach_files and lp.embed_links):
+            raise ValueError(f"I need `View Channel`, `Send Messages`, `Embed Links` and `Attach Files` in #{log_ch.name}.")
+        cfg = get_guild_config(guild.id)
+        cfg["tickets"] = {"category_id": cat_id, "staff_role_id": role_id, "log_channel_id": log_id}
+        save_guild_config(guild.id)
+        msg = f"Tickets are ready in {guild.name}."
+        if p.get("channel_id"):
+            ch = await _job_text_channel(bot, p)
+            await ch.send(embed=build_ticket_panel_embed(), view=TicketPanelView())
+            msg += f" Ticket panel posted in #{ch.name}."
+        return msg
+
+    if t in ("greeting", "messagelog"):
+        guild = bot.get_guild(_job_id(p, "guild_id"))
+        if guild is None:
+            raise ValueError("The bot is not in that server.")
+        cfg = get_guild_config(guild.id)
+        enabled = bool(p.get("enabled", True))
+        if t == "messagelog":
+            if not enabled:
+                cfg.pop("message_log", None)
+                save_guild_config(guild.id)
+                return f"Message log is off in {guild.name}."
+            ch = await _job_text_channel(bot, p)
+            cfg["message_log"] = ch.id
+            save_guild_config(guild.id)
+            return f"Message log is on in {guild.name}: #{ch.name}."
+        kind = p.get("kind")
+        if kind not in ("join", "leave"):
+            raise ValueError("Choose join or leave.")
+        entry = dict(cfg.get(kind) or {})
+        if p.get("channel_id"):
+            ch = await _job_text_channel(bot, p)
+            entry["channel_id"] = ch.id
+        if not entry.get("channel_id"):
+            raise ValueError("Choose a channel the first time you set this message.")
+        msg_text = str(p.get("message") or "").strip()[:1500]
+        if msg_text:
+            entry["message"] = msg_text
+        entry.setdefault("message", DEFAULT_GREETINGS[kind])
+        entry["enabled"] = enabled
+        cfg[kind] = entry
+        save_guild_config(guild.id)
+        return f"{kind.title()} message saved in {guild.name} ({'on' if enabled else 'off'})."
+
+    if t == "promo_create":
+        code = normalize_promo_code(p.get("code"))
+        if not PROMO_CODE_RE.match(code):
+            raise ValueError("Use 3 to 32 letters, numbers, `-` or `_`.")
+        points = _job_int({"v": p.get("points") or 0}, "v", 0, 1000000)
+        days = _job_int({"v": p.get("premium_days") or 0}, "v", 0, 3650)
+        if points == 0 and days == 0:
+            raise ValueError("Give points, premium days, or both.")
+        expires_at = None
+        if str(p.get("duration") or "").strip():
+            delta = parse_duration_strict(str(p["duration"]))
+            if delta is None:
+                raise ValueError("Use a time like `12h`, `7d` or `2w`.")
+            expires_at = datetime.now(timezone.utc).timestamp() + delta.total_seconds()
+        max_uses = _job_int({"v": p["max_uses"]}, "v", 1, 1000000) if p.get("max_uses") else None
+        if create_promo(code, points, by, expires_at, max_uses, days) is None:
+            raise ValueError(f"`{code}` already exists.")
+        return f"Code {code} created."
+
+    if t == "promo_update":
+        code = normalize_promo_code(p.get("code"))
+        updates = {}
+        if p.get("points") not in (None, ""):
+            updates["points"] = _job_int(p, "points", 0, 1000000)
+        if p.get("premium_days") not in (None, ""):
+            updates["premium_days"] = _job_int(p, "premium_days", 0, 3650)
+        if p.get("max_uses") not in (None, ""):
+            updates["max_uses"] = _job_int(p, "max_uses", 1, 1000000)
+        if str(p.get("duration") or "").strip():
+            delta = parse_duration_strict(str(p["duration"]))
+            if delta is None:
+                raise ValueError("Use a time like `12h`, `7d` or `2w`.")
+            updates["expires_at"] = datetime.now(timezone.utc).timestamp() + delta.total_seconds()
+        if not updates:
+            raise ValueError("Nothing to change.")
+        if update_promo(code, updates) is None:
+            raise ValueError("That code does not exist.")
+        return f"Code {code} updated."
+
+    if t == "promo_delete":
+        code = normalize_promo_code(p.get("code"))
+        if not delete_promo(code):
+            raise ValueError("That code does not exist.")
+        return f"Code {code} deleted."
+
+    if t == "points":
+        uid = str(_job_id(p, "user_id"))
+        amount = _job_int(p, "amount", -1000000, 1000000)
+        if amount == 0:
+            raise ValueError("The amount cannot be 0.")
+        new_total = add_user_points(uid, amount)
+        return f"{'+' if amount > 0 else ''}{amount:,} points. New balance: {new_total:,}."
+
+    if t == "premium":
+        uid = str(_job_id(p, "user_id"))
+        action = p.get("action")
+        if action == "remove":
+            if uid in HARDCODED_STAFF:
+                raise ValueError("This person is permanent staff.")
+            remove_user_premium(uid)
+            return "TE Premium removed."
+        if action == "grant":
+            if p.get("permanent"):
+                set_user_premium(uid, timedelta(days=36500))
+                return "Permanent TE Premium granted."
+            days = _job_int(p, "days", 1, 3650)
+            set_user_premium(uid, timedelta(days=days))
+            return f"TE Premium granted for {days} days."
+        if action == "extend":
+            days = _job_int(p, "days", 1, 3650)
+            exp = extend_user_premium(uid, days)
+            return f"Added {days} days. Ends {exp.strftime('%Y-%m-%d')}."
+        if action == "reduce":
+            days = _job_int(p, "days", 1, 3650)
+            reduce_user_premium(uid, days)
+            return f"Removed {days} days."
+        raise ValueError("Unknown premium action.")
+
+    if t == "staff":
+        uid = _job_id(p, "user_id")
+        info = get_staff_role()
+        guild = bot.get_guild(info["guild_id"]) if info else None
+        role = guild.get_role(info["role_id"]) if guild else None
+        member = None
+        if guild:
+            member = guild.get_member(uid)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(uid)
+                except Exception:
+                    member = None
+        if p.get("action") == "add":
+            if is_staff(uid):
+                raise ValueError("Already staff.")
+            add_staff(uid)
+            note = ""
+            if role and member:
+                try:
+                    await member.add_roles(role, reason="Staff added from the website panel")
+                    note = " Staff role given."
+                except Exception as e:
+                    note = f" Could not give the role: {e}"
+            return "Staff added. They have TE Premium." + note
+        if p.get("action") == "remove":
+            if str(uid) in HARDCODED_STAFF:
+                raise ValueError("This person is permanent staff.")
+            if not remove_staff(uid):
+                raise ValueError("Not on the staff list.")
+            note = ""
+            if role and member:
+                try:
+                    await member.remove_roles(role, reason="Staff removed from the website panel")
+                except Exception:
+                    pass
+            return "Staff removed. Their TE Premium was removed too." + note
+        raise ValueError("Unknown staff action.")
+
+    if t == "free":
+        on = bool(p.get("on"))
+        if not set_free_mode(on, by):
+            raise ValueError("Could not save to the database.")
+        return f"Free mode is {'ON' if on else 'OFF'}."
+
+    if t == "limit":
+        key = str(p.get("key", ""))
+        if key not in DEFAULT_LIMITS:
+            raise ValueError("Unknown limit.")
+        value = _job_int(p, "value", 0, 100000)
+        set_limit(key, value)
+        return f"{key} is now {value}" + (" (no limit)." if value == 0 else ".")
+
+    if t == "theme":
+        theme = str(p.get("theme", ""))
+        if not set_site_theme(theme):
+            raise ValueError("Unknown theme or the database could not be reached.")
+        return f"Website theme is now {SITE_THEMES[theme]}."
+
+    if t == "sync_roles":
+        changed = await sync_premium_roles(bot)
+        return f"TE Premium roles checked ({changed} changes)."
+
+    raise ValueError("Unknown job type.")
+
+
+async def process_owner_jobs(bot):
+    """Runs waiting owner jobs. Called every scheduler tick."""
+    if db_owner_jobs is None:
+        return
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        # a job that was running when the bot stopped would wait forever
+        db_owner_jobs.update_many({"status": "running", "started_at": {"$lt": now - 300}},
+                                  {"$set": {"status": "error", "result": "The bot stopped while running this.", "finished_at": now}})
+        for _ in range(10):
+            job = db_owner_jobs.find_one_and_update(
+                {"status": "pending"}, {"$set": {"status": "running", "started_at": now}},
+                sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+            if not job:
+                break
+            try:
+                result, status = await asyncio.wait_for(run_owner_job(bot, job), timeout=60), "done"
+            except ValueError as e:
+                result, status = str(e), "error"
+            except Exception as e:
+                print(f"[Owner Job Error] {e!r}")
+                result, status = f"Unexpected error: {e!r}"[:300], "error"
+            db_owner_jobs.update_one({"_id": job["_id"]}, {"$set": {"status": status, "result": result,
+                                     "finished_at": datetime.now(timezone.utc).timestamp()}})
+        db_owner_jobs.delete_many({"finished_at": {"$lt": now - 14 * 86400}})
+    except Exception as e:
+        print(f"[Owner Jobs Error] {e!r}")
+
+
+def publish_owner_data(bot):
+    """Saves the list of servers, channels, categories and roles so the website panel can show them."""
+    if db_settings is None:
+        return
+    guilds = []
+    for g in bot.guilds[:100]:
+        guilds.append({
+            "id": str(g.id), "name": g.name,
+            "channels": [{"id": str(c.id), "name": c.name} for c in g.text_channels[:400]],
+            "categories": [{"id": str(c.id), "name": c.name} for c in g.categories[:100]],
+            "roles": [{"id": str(r.id), "name": r.name} for r in g.roles[:250] if not r.is_default() and not r.managed],
+        })
+    try:
+        db_settings.update_one({"_id": "owner_guilds"}, {"$set": {"guilds": guilds,
+                               "updated_at": datetime.now(timezone.utc).timestamp()}}, upsert=True)
+    except Exception as e:
+        print(f"[Owner Data Error] {e!r}")
+
+
 # -------------------------------------------------------------
 # FEATURES COG: points listener, welcome bonus, auto DM, auto build
 # -------------------------------------------------------------
@@ -3493,6 +3830,14 @@ class FeaturesCog(commands.Cog):
                 await asyncio.wait_for(sync_premium_roles(self.bot, dirty), timeout=60)
         except Exception as e:
             print(f"[Premium Role Sync Error] {e!r}")
+        # Website owner panel: run waiting jobs, and refresh the server list every minute
+        try:
+            await process_owner_jobs(self.bot)
+            if datetime.now(timezone.utc).timestamp() - OWNER_PUBLISH["last"] >= 60:
+                OWNER_PUBLISH["last"] = datetime.now(timezone.utc).timestamp()
+                publish_owner_data(self.bot)
+        except Exception as e:
+            print(f"[Owner Panel Error] {e!r}")
         GIVEAWAY_DEBUG["stage"] = "idle"
         GIVEAWAY_DEBUG["last_tick"] = datetime.now(timezone.utc).timestamp()
 
