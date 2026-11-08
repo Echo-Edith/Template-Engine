@@ -36,6 +36,7 @@ from cogs.features import (
     COLOR_GRAY,
     get_roblox_cookie_header,
     get_user_points,
+    is_user_blacklisted,
     add_user_points,
     get_top_leaderboard,
     parse_duration_to_timedelta,
@@ -3862,5 +3863,509 @@ class CommandsCog(commands.Cog):
         await interaction.response.send_message(embed=embed_ok("Person Added", f"{user.mention} can now see this ticket."), allowed_mentions=discord.AllowedMentions(users=True))
 
 
+
+# =====================================================================
+# GAMBLING with TE points: blackjack, roulette, slots, higher/lower.
+# Every command works as a slash command and as a prefix command (for example !slots 5).
+# Why it cannot be rigged:
+#  - all random choices use secrets.SystemRandom (the operating system's secure random source)
+#  - the bet is taken BEFORE the game starts, so leaving a game never saves points
+#  - the result is decided only on the bot, a button press can only choose an action
+#  - the odds are shown to the player and the house edge is small and fixed
+# =====================================================================
+import time as _time
+import secrets as _secrets
+
+_RNG = _secrets.SystemRandom()
+GAMBLE_MIN_BET = 1
+GAMBLE_MAX_BET = 10
+GAMBLE_COOLDOWN = 3          # seconds between two games of the same person
+GAMBLE_ACTIVE = set()        # people who have a game running (one game at a time)
+GAMBLE_LAST = {}
+C_WIN, C_LOSE, C_PUSH, C_GAME = 0x22C55E, 0xEF4444, 0xF59E0B, 0x8B5CF6
+FAIR_FOOTER = "Fair play: every result uses the secure random generator. Max bet is 10 points."
+
+
+def gamble_begin(uid: str, bet) -> Optional[str]:
+    """Checks the bet and takes it. Returns an error text, or None when the game can start."""
+    if isinstance(bet, bool) or not isinstance(bet, int) or not GAMBLE_MIN_BET <= bet <= GAMBLE_MAX_BET:
+        return f"You can bet from `{GAMBLE_MIN_BET}` to `{GAMBLE_MAX_BET}` points in one round."
+    if uid in GAMBLE_ACTIVE:
+        return "You already have a game running. Finish it first."
+    wait = GAMBLE_COOLDOWN - (_time.monotonic() - GAMBLE_LAST.get(uid, -1e9))
+    if wait > 0:
+        return f"Slow down! You can play again in `{int(wait) + 1}` second(s)."
+    balance = get_user_points(uid)
+    if balance < bet:
+        return f"You only have `{balance:,}` points."
+    add_user_points(uid, -bet)           # no await between the check and the payment, so it cannot be abused
+    GAMBLE_ACTIVE.add(uid)
+    GAMBLE_LAST[uid] = _time.monotonic()
+    return None
+
+
+def gamble_end(uid: str, payout: int) -> int:
+    """Pays the winnings (the total that goes back to the player) and returns the new balance."""
+    GAMBLE_ACTIVE.discard(uid)
+    if payout > 0:
+        return add_user_points(uid, payout)
+    return get_user_points(uid)
+
+
+def gamble_net(payout: int, bet: int) -> str:
+    net = payout - bet
+    return f"`+{net:,}`" if net > 0 else (f"`{net:,}`" if net < 0 else "`0`")
+
+
+def gamble_embed(title: str, desc: str, color: int = C_GAME) -> discord.Embed:
+    e = discord.Embed(title=title, description=desc, color=color)
+    e.set_footer(text=FAIR_FOOTER)
+    return e
+
+
+def gamble_error(text: str) -> discord.Embed:
+    return discord.Embed(title="Cannot Play", description=text, color=C_LOSE)
+
+
+# ---------------- cards ----------------
+CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+CARD_SUITS = ["♠", "♥", "♦", "♣"]
+
+
+def new_deck() -> list:
+    deck = [(r, s) for r in CARD_RANKS for s in CARD_SUITS]
+    _RNG.shuffle(deck)
+    return deck
+
+
+def card_text(card) -> str:
+    return f"`{card[0]}{card[1]}`"
+
+
+def hand_text(cards, hide_second: bool = False) -> str:
+    if hide_second:
+        return card_text(cards[0]) + " `??`"
+    return " ".join(card_text(c) for c in cards)
+
+
+def hand_value(cards) -> int:
+    total, aces = 0, 0
+    for rank, _ in cards:
+        if rank == "A":
+            aces += 1
+            total += 11
+        elif rank in ("J", "Q", "K"):
+            total += 10
+        else:
+            total += int(rank)
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+
+# ---------------- blackjack ----------------
+class BlackjackView(discord.ui.View):
+    def __init__(self, owner_id: int, bet: int, deck: list, player: list, dealer: list):
+        super().__init__(timeout=90)
+        self.owner_id, self.bet, self.deck, self.player, self.dealer = owner_id, bet, deck, player, dealer
+        self.message = None
+        self.done = False
+        self.lock = asyncio.Lock()
+
+    def make_embed(self, final: bool = False, result: str = "", color: int = C_GAME, payout: int = 0, balance: Optional[int] = None) -> discord.Embed:
+        e = gamble_embed("Blackjack", result or "Hit to take a card, Stand to keep your hand.", color)
+        e.add_field(name=f"Your hand ({hand_value(self.player)})", value=hand_text(self.player), inline=False)
+        e.add_field(name=f"Dealer ({hand_value(self.dealer) if final else '?'})", value=hand_text(self.dealer, hide_second=not final), inline=False)
+        e.add_field(name="Bet", value=f"`{self.bet}`", inline=True)
+        if final:
+            e.add_field(name="Result", value=gamble_net(payout, self.bet), inline=True)
+            e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
+        return e
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This is not your game. Start your own with `/blackjack`.", ephemeral=True)
+            return False
+        return True
+
+    def finish(self, player_bust: bool = False):
+        """Dealer plays (stands on every 17) and the result is worked out. Returns (text, color, payout)."""
+        if not player_bust:
+            while hand_value(self.dealer) < 17:
+                self.dealer.append(self.deck.pop())
+        pv, dv = hand_value(self.player), hand_value(self.dealer)
+        if pv > 21:
+            return f"Bust! You went over 21 and lost `{self.bet}` points.", C_LOSE, 0
+        if dv > 21:
+            return "The dealer went over 21. You win!", C_WIN, self.bet * 2
+        if pv > dv:
+            return "Your hand is higher. You win!", C_WIN, self.bet * 2
+        if pv == dv:
+            return "Same total. Your bet comes back.", C_PUSH, self.bet
+        return "The dealer's hand is higher. You lose.", C_LOSE, 0
+
+    async def end(self, interaction: Optional[discord.Interaction], player_bust: bool = False):
+        self.done = True
+        for item in self.children:
+            item.disabled = True
+        text, color, payout = self.finish(player_bust)
+        balance = gamble_end(str(self.owner_id), payout)
+        embed = self.make_embed(True, text, color, payout, balance)
+        if interaction is not None:
+            await interaction.response.edit_message(embed=embed, view=self)
+        elif self.message is not None:
+            await self.message.edit(embed=embed, view=self)
+        self.stop()
+
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            self.player.append(self.deck.pop())
+            value = hand_value(self.player)
+            if value > 21:
+                return await self.end(interaction, player_bust=True)
+            if value == 21:
+                return await self.end(interaction)
+            await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success)
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            await self.end(interaction)
+
+    async def on_timeout(self):
+        async with self.lock:
+            if not self.done:  # no answer: the hand stands
+                try:
+                    await self.end(None)
+                except Exception as e:
+                    GAMBLE_ACTIVE.discard(str(self.owner_id))
+                    print(f"[Blackjack Timeout Error] {e}")
+
+
+# ---------------- roulette ----------------
+RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+ROULETTE_OUTSIDE = {
+    "red": ("Red", lambda n: n in RED_NUMBERS, 2),
+    "black": ("Black", lambda n: n != 0 and n not in RED_NUMBERS, 2),
+    "even": ("Even", lambda n: n != 0 and n % 2 == 0, 2),
+    "odd": ("Odd", lambda n: n % 2 == 1, 2),
+    "low": ("Low (1-18)", lambda n: 1 <= n <= 18, 2),
+    "high": ("High (19-36)", lambda n: 19 <= n <= 36, 2),
+    "1st": ("1st dozen (1-12)", lambda n: 1 <= n <= 12, 3),
+    "2nd": ("2nd dozen (13-24)", lambda n: 13 <= n <= 24, 3),
+    "3rd": ("3rd dozen (25-36)", lambda n: 25 <= n <= 36, 3),
+}
+ROULETTE_ALIASES = {"1-18": "low", "19-36": "high", "first": "1st", "second": "2nd", "third": "3rd", "dozen1": "1st", "dozen2": "2nd", "dozen3": "3rd",
+                    "1-12": "1st", "13-24": "2nd", "25-36": "3rd", "r": "red", "b": "black", "e": "even", "o": "odd", "l": "low", "h": "high"}
+
+
+def roulette_parse(text: str):
+    """Returns (label, test function, total payout multiplier) or None."""
+    key = str(text or "").strip().lower()
+    key = ROULETTE_ALIASES.get(key, key)
+    if key in ROULETTE_OUTSIDE:
+        return ROULETTE_OUTSIDE[key]
+    if key.isdigit() and 0 <= int(key) <= 36:
+        n = int(key)
+        return (f"Number {n}", lambda x, n=n: x == n, 36)
+    return None
+
+
+def roulette_color(n: int) -> str:
+    return "\U0001F7E2" if n == 0 else ("\U0001F534" if n in RED_NUMBERS else "⚫")
+
+
+# ---------------- slots ----------------
+SLOT_WEIGHTS = {"\U0001F352": 30, "\U0001F34B": 25, "\U0001F34A": 20, "\U0001F347": 12, "\U0001F514": 8, "⭐": 4, "\U0001F48E": 1}
+SLOT_TRIPLE = {"\U0001F352": 7, "\U0001F34B": 10, "\U0001F34A": 14, "\U0001F347": 24, "\U0001F514": 45, "⭐": 90, "\U0001F48E": 250}
+SLOT_TWO_CHERRIES = 2   # exactly two cherries anywhere pay 2 times the bet
+
+
+def slot_payout_multiplier(reels) -> int:
+    if reels[0] == reels[1] == reels[2]:
+        return SLOT_TRIPLE[reels[0]]
+    if reels.count("\U0001F352") == 2:
+        return SLOT_TWO_CHERRIES
+    return 0
+
+
+def slot_rtp() -> float:
+    """Exact return to player (for tests and the help text)."""
+    from itertools import product
+    total = sum(SLOT_WEIGHTS.values())
+    rtp = 0.0
+    for reels in product(SLOT_WEIGHTS, repeat=3):
+        p = 1.0
+        for r in reels:
+            p *= SLOT_WEIGHTS[r] / total
+        rtp += p * slot_payout_multiplier(list(reels))
+    return rtp
+
+
+# ---------------- higher / lower ----------------
+HL_EDGE = 0.94          # fair odds times 0.94: the house keeps about 6 percent of each step
+HL_MAX_STEPS = 8
+HL_MAX_PAYOUT = 500
+
+
+def card_rank(card) -> int:
+    return CARD_RANKS.index(card[0]) + 1    # Ace is low (1), King is high (13)
+
+
+class HigherLowerView(discord.ui.View):
+    def __init__(self, owner_id: int, bet: int, deck: list):
+        super().__init__(timeout=90)
+        self.owner_id, self.bet, self.deck = owner_id, bet, deck
+        self.current = deck.pop()
+        self.mult = 1.0
+        self.steps = 0
+        self.message = None
+        self.done = False
+        self.lock = asyncio.Lock()
+        self.refresh_buttons()
+
+    def chances(self):
+        rank = card_rank(self.current)
+        left = len(self.deck)
+        higher = sum(1 for c in self.deck if card_rank(c) > rank)
+        lower = sum(1 for c in self.deck if card_rank(c) < rank)
+        return higher / left, lower / left, higher, lower
+
+    @staticmethod
+    def step_multiplier(p: float) -> float:
+        return max(1.0, HL_EDGE / p) if p > 0 else 1.0
+
+    def cash_value(self) -> int:
+        return min(HL_MAX_PAYOUT, int(self.bet * self.mult))
+
+    def refresh_buttons(self):
+        ph, pl, hi, lo = self.chances()
+        self.higher_btn.disabled = hi == 0 or self.done
+        self.lower_btn.disabled = lo == 0 or self.done
+        self.cash_btn.disabled = self.steps == 0 or self.done
+        self.higher_btn.label = f"Higher ({ph * 100:.0f}%)"
+        self.lower_btn.label = f"Lower ({pl * 100:.0f}%)"
+        self.cash_btn.label = f"Cash out ({self.cash_value()})"
+
+    def make_embed(self, note: str = "", color: int = C_GAME, final: bool = False, payout: int = 0, balance: Optional[int] = None, last=None) -> discord.Embed:
+        e = gamble_embed("Higher or Lower", note or "Will the next card be higher or lower? The same rank is a loss. Ace is low, King is high.", color)
+        if last is not None:
+            e.add_field(name="Next card", value=card_text(last), inline=True)
+        e.add_field(name="Current card" if not final else "Last card", value=card_text(self.current), inline=True)
+        e.add_field(name="Bet", value=f"`{self.bet}`", inline=True)
+        e.add_field(name="Streak", value=f"`{self.steps}/{HL_MAX_STEPS}`", inline=True)
+        e.add_field(name="Multiplier", value=f"`x{self.mult:.2f}`", inline=True)
+        if final:
+            e.add_field(name="Result", value=gamble_net(payout, self.bet), inline=True)
+            e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
+        else:
+            ph, pl, _, _ = self.chances()
+            e.add_field(name="If you win", value=f"Higher `x{self.mult * self.step_multiplier(ph):.2f}` | Lower `x{self.mult * self.step_multiplier(pl):.2f}`", inline=False)
+        return e
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This is not your game. Start your own with `/highlow`.", ephemeral=True)
+            return False
+        return True
+
+    async def finish(self, interaction: Optional[discord.Interaction], payout: int, note: str, color: int, last=None):
+        self.done = True
+        for item in self.children:
+            item.disabled = True
+        balance = gamble_end(str(self.owner_id), payout)
+        embed = self.make_embed(note, color, True, payout, balance, last)
+        if interaction is not None:
+            await interaction.response.edit_message(embed=embed, view=self)
+        elif self.message is not None:
+            await self.message.edit(embed=embed, view=self)
+        self.stop()
+
+    async def guess(self, interaction: discord.Interaction, higher: bool):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            ph, pl, _, _ = self.chances()
+            p = ph if higher else pl
+            nxt = self.deck.pop()
+            old, new = card_rank(self.current), card_rank(nxt)
+            won = new > old if higher else new < old
+            previous = self.current
+            self.current = nxt
+            if not won:
+                return await self.finish(interaction, 0, f"Wrong! The card was {card_text(nxt)}. You lost `{self.bet}` points.", C_LOSE, last=None)
+            self.steps += 1
+            self.mult *= self.step_multiplier(p)
+            if self.steps >= HL_MAX_STEPS:
+                return await self.finish(interaction, self.cash_value(), f"Perfect streak of {HL_MAX_STEPS}! Paid out automatically.", C_WIN)
+            self.refresh_buttons()
+            await interaction.response.edit_message(embed=self.make_embed(f"Correct! {card_text(previous)} then {card_text(nxt)}. Keep going or cash out.", C_WIN), view=self)
+
+    @discord.ui.button(label="Higher", style=discord.ButtonStyle.success)
+    async def higher_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.guess(interaction, True)
+
+    @discord.ui.button(label="Lower", style=discord.ButtonStyle.danger)
+    async def lower_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.guess(interaction, False)
+
+    @discord.ui.button(label="Cash out", style=discord.ButtonStyle.secondary)
+    async def cash_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            await self.finish(interaction, self.cash_value(), "You cashed out!", C_WIN)
+
+    async def on_timeout(self):
+        async with self.lock:
+            if not self.done:  # no answer: cash out what the player has (the bet comes back at streak 0)
+                try:
+                    await self.finish(None, self.cash_value(), "Time ran out, so you were cashed out.", C_PUSH)
+                except Exception as e:
+                    GAMBLE_ACTIVE.discard(str(self.owner_id))
+                    print(f"[HigherLower Timeout Error] {e}")
+
+
+class GamblingCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        if is_user_blacklisted(ctx.author.id):
+            raise commands.CheckFailure("blocked")
+        return True
+
+    async def cog_command_error(self, ctx: commands.Context, error):
+        error = getattr(error, "original", error)
+        if isinstance(error, commands.CheckFailure):
+            return  # blocked people get no answer (slash commands are answered by the global block check)
+        if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument, commands.BadLiteralArgument)):
+            usage = f"{ctx.clean_prefix}{ctx.command.qualified_name} {ctx.command.signature}".strip()
+            return await ctx.send(embed=gamble_error(f"Please use it like this:\n`{usage}`\nThe bet must be a whole number from `{GAMBLE_MIN_BET}` to `{GAMBLE_MAX_BET}`."))
+        print(f"[Gambling Error] {error!r}")
+        GAMBLE_ACTIVE.discard(str(ctx.author.id))
+        try:
+            await ctx.send(embed=gamble_error("Something went wrong. If your bet was taken, it is gone. Please tell the owner."))
+        except Exception:
+            pass
+
+    # ----- help -----
+    @commands.hybrid_command(name="gamble", description="How the gambling games work.")
+    async def gamble_cmd(self, ctx: commands.Context):
+        p = ctx.clean_prefix
+        e = gamble_embed("Gambling with TE Points", f"You can bet `{GAMBLE_MIN_BET}` to `{GAMBLE_MAX_BET}` points in each round. You have `{get_user_points(str(ctx.author.id)):,}` points.")
+        e.add_field(name="Blackjack", value=f"`{p}blackjack <bet>`\nBeat the dealer without going over 21. Win pays `2x`, blackjack pays `2.5x`. The dealer stands on 17.", inline=False)
+        e.add_field(name="Roulette", value=f"`{p}roulette <bet> <choice>`\nChoices: `red` `black` `even` `odd` `low` `high` (pay `2x`), `1st` `2nd` `3rd` dozen (pay `3x`), or a number `0`-`36` (pays `36x`). There is one green `0`.", inline=False)
+        e.add_field(name="Slots", value=f"`{p}slots <bet>`\nThree matching symbols win up to `250x`. Exactly two cherries pay `2x`. Return to player: `{slot_rtp() * 100:.1f}%`.", inline=False)
+        e.add_field(name="Higher or Lower", value=f"`{p}highlow <bet>`\nGuess if the next card is higher or lower. The payout follows the real chance. Cash out any time after one correct guess.", inline=False)
+        await ctx.send(embed=e)
+
+    # ----- blackjack -----
+    @commands.hybrid_command(name="blackjack", aliases=["bj"], description="Play blackjack against the dealer with TE points (bet 1-10).")
+    @app_commands.describe(bet="How many points to bet (1-10).")
+    async def blackjack_cmd(self, ctx: commands.Context, bet: int):
+        uid = str(ctx.author.id)
+        error = gamble_begin(uid, bet)
+        if error:
+            return await ctx.send(embed=gamble_error(error), ephemeral=True)
+        deck = new_deck()
+        view = BlackjackView(ctx.author.id, bet, deck, [deck.pop(), deck.pop()], [deck.pop(), deck.pop()])
+        pv, dv = hand_value(view.player), hand_value(view.dealer)
+        if pv == 21 or dv == 21:  # a natural blackjack ends the round at once
+            view.done = True
+            for item in view.children:
+                item.disabled = True
+            if pv == 21 and dv == 21:
+                text, color, payout = "Both have blackjack. Your bet comes back.", C_PUSH, bet
+            elif pv == 21:
+                text, color, payout = "Blackjack! You win `2.5x`.", C_WIN, bet * 5 // 2
+            else:
+                text, color, payout = "The dealer has blackjack. You lose.", C_LOSE, 0
+            balance = gamble_end(uid, payout)
+            return await ctx.send(embed=view.make_embed(True, text, color, payout, balance), view=view)
+        view.message = await ctx.send(embed=view.make_embed(), view=view)
+
+    # ----- roulette -----
+    @commands.hybrid_command(name="roulette", description="Bet on the roulette wheel with TE points (bet 1-10).")
+    @app_commands.describe(bet="How many points to bet (1-10).", choice="red, black, even, odd, low, high, 1st, 2nd, 3rd or a number 0-36.")
+    async def roulette_cmd(self, ctx: commands.Context, bet: int, choice: str):
+        parsed = roulette_parse(choice)
+        if parsed is None:
+            return await ctx.send(embed=gamble_error("I do not know that choice. Use `red`, `black`, `even`, `odd`, `low`, `high`, `1st`, `2nd`, `3rd` or a number from `0` to `36`."), ephemeral=True)
+        uid = str(ctx.author.id)
+        error = gamble_begin(uid, bet)
+        if error:
+            return await ctx.send(embed=gamble_error(error), ephemeral=True)
+        label, test, multiplier = parsed
+        number = _RNG.randrange(37)
+        won = bool(test(number))
+        payout = bet * multiplier if won else 0
+        balance = gamble_end(uid, payout)
+        e = gamble_embed("Roulette", f"The ball landed on {roulette_color(number)} `{number}`.", C_WIN if won else C_LOSE)
+        e.add_field(name="Your bet", value=f"`{label}`", inline=True)
+        e.add_field(name="Stake", value=f"`{bet}`", inline=True)
+        e.add_field(name="Result", value=gamble_net(payout, bet), inline=True)
+        e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
+        await ctx.send(embed=e)
+
+    @roulette_cmd.autocomplete("choice")
+    async def roulette_choices(self, interaction: discord.Interaction, current: str):
+        names = {"red": "Red", "black": "Black", "even": "Even", "odd": "Odd", "low": "Low (1-18)", "high": "High (19-36)",
+                 "1st": "1st dozen (1-12)", "2nd": "2nd dozen (13-24)", "3rd": "3rd dozen (25-36)"}
+        out = [app_commands.Choice(name=v, value=k) for k, v in names.items() if current.lower() in k or current.lower() in v.lower()]
+        if current.isdigit() and 0 <= int(current) <= 36:
+            out.insert(0, app_commands.Choice(name=f"Number {int(current)}", value=str(int(current))))
+        return out[:25]
+
+    # ----- slots -----
+    @commands.hybrid_command(name="slots", aliases=["slot"], description="Spin the slot machine with TE points (bet 1-10).")
+    @app_commands.describe(bet="How many points to bet (1-10).")
+    async def slots_cmd(self, ctx: commands.Context, bet: int):
+        uid = str(ctx.author.id)
+        error = gamble_begin(uid, bet)
+        if error:
+            return await ctx.send(embed=gamble_error(error), ephemeral=True)
+        try:
+            symbols, weights = list(SLOT_WEIGHTS), list(SLOT_WEIGHTS.values())
+            reels = _RNG.choices(symbols, weights=weights, k=3)   # decided now, the animation below only shows it
+            multiplier = slot_payout_multiplier(reels)
+            msg = await ctx.send(embed=gamble_embed("Slot Machine", "❓ ❓ ❓\nSpinning...", C_GAME))
+            await asyncio.sleep(1.2)
+        except Exception:
+            gamble_end(uid, bet)  # the game could not even start: give the bet back
+            raise
+        payout = bet * multiplier
+        balance = gamble_end(uid, payout)
+        text = " ".join(reels)
+        if multiplier >= 24:
+            note, color = f"JACKPOT! `x{multiplier}`", C_WIN
+        elif multiplier:
+            note, color = f"You win `x{multiplier}`!", C_WIN
+        else:
+            note, color = "No match. Try again!", C_LOSE
+        e = gamble_embed("Slot Machine", f"## {text}\n{note}", color)
+        e.add_field(name="Bet", value=f"`{bet}`", inline=True)
+        e.add_field(name="Result", value=gamble_net(payout, bet), inline=True)
+        e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
+        await msg.edit(embed=e)
+
+    # ----- higher / lower -----
+    @commands.hybrid_command(name="highlow", aliases=["hl", "higherlower"], description="Guess if the next card is higher or lower (bet 1-10).")
+    @app_commands.describe(bet="How many points to bet (1-10).")
+    async def highlow_cmd(self, ctx: commands.Context, bet: int):
+        error = gamble_begin(str(ctx.author.id), bet)
+        if error:
+            return await ctx.send(embed=gamble_error(error), ephemeral=True)
+        view = HigherLowerView(ctx.author.id, bet, new_deck())
+        view.message = await ctx.send(embed=view.make_embed(), view=view)
+
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(CommandsCog(bot))
+    await bot.add_cog(GamblingCog(bot))
