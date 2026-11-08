@@ -1105,6 +1105,11 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 .own-tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
 .own-tabs button { flex:1 1 auto; padding:8px 10px; font-size:0.78rem; }
 .own-tabs button.on { background: var(--accent-purple) !important; color:#fff !important; border-color: var(--accent-purple) !important; }
+.sec-levels { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin-top:10px; }
+.sec-levels button { padding:10px 0; font-size:0.8rem; }
+.sec-levels button.cur { background: var(--accent-purple) !important; color:#fff !important; }
+.sec-chk { display:flex !important; flex-direction:row !important; align-items:center; gap:10px; font-size:0.85rem; }
+.sec-chk input { width:auto; flex:none; }
 .own-sec { display:none; } .own-sec.on { display:block; }
 .own-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; align-items:center; }
 .own-row > * { flex:1 1 140px; min-width:0; }
@@ -1139,6 +1144,7 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <button class="btn-glass btn-secondary-link" data-tab="servers">Servers</button>
 <button class="btn-glass btn-secondary-link" data-tab="blocked">Blocked</button>
 <button class="btn-glass btn-secondary-link" data-tab="users">Users</button>
+<button class="btn-glass btn-secondary-link" data-tab="security">Security</button>
 </div>
 
 
@@ -1213,6 +1219,21 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <p class="own-note">Blocked users cannot use the bot or the website. For a blocked server, the bot leaves and stays out. The main staff cannot be blocked.</p></div>
 <div class="editor-card"><div class="label-heading">BLOCKED USERS</div><div id="own-b-users"></div></div>
 <div class="editor-card"><div class="label-heading">BLOCKED SERVERS</div><div id="own-b-guilds"></div></div>
+</div>
+
+<div class="own-sec" id="own-security">
+<div class="editor-card"><div class="label-heading">LOCKDOWN STATUS</div>
+<div id="sec-status" class="own-stat"></div>
+<div class="sec-levels" id="sec-levels"></div>
+<p class="own-note">0 = normal, 1 = watch, 2 = slow down, 3 = risky features off, 4 = full lockdown (everyone except you is locked out).</p></div>
+<div class="editor-card"><div class="label-heading">SETTINGS</div>
+<label class="sec-chk"><input type="checkbox" id="sec-enabled"> Automatic lockdown is on</label>
+<label class="sec-chk"><input type="checkbox" id="sec-dry"> Test mode (only write to the log, never lock)</label>
+<div class="own-row"><input class="form-control" id="sec-unlock" type="number" min="1" max="1440" placeholder="Auto-unlock (minutes)"><button class="btn-glass own-small" onclick="secSave()">Save</button></div>
+<div id="sec-triggers"></div>
+<p class="own-note">The owner, staff and TE Premium members are never slowed down or blocked.</p></div>
+<div class="editor-card"><div class="label-heading">TEMPORARY BLOCKS</div><div id="sec-blocks"></div></div>
+<div class="editor-card"><div class="label-heading">EVENT LOG</div><div id="sec-events"></div></div>
 </div>
 
 <div class="own-sec" id="own-users">
@@ -2766,6 +2787,46 @@ async function ownJob(type, params, after) {
     }
     ownMsg('The bot did not answer in 45 seconds. Is the bot online?', false);
 }
+
+let SEC = {data: null, timer: null};
+function secAgo(t) { const d = Math.max(0, Math.floor(Date.now() / 1000 - t)); return d < 60 ? d + 's ago' : d < 3600 ? Math.floor(d / 60) + ' min ago' : Math.floor(d / 3600) + ' h ago'; }
+async function secLoad(keepForm) {
+    if (!document.getElementById('own-security').classList.contains('on') || !document.getElementById('page-owner').classList.contains('active')) { clearInterval(SEC.timer); if (keepForm) return; }
+    const j = await ownApi('/api/owner/security');
+    if (j.error) { ownMsg(j.error, false); return; }
+    SEC.data = j;
+    const st = j.state || {};
+    const left = st.auto_unlock_at ? Math.max(0, Math.round((st.auto_unlock_at - j.now) / 60)) : 0;
+    document.getElementById('sec-status').innerHTML = '<b>Level ' + j.level + ': ' + escapeHtml(j.level_name) + '</b>' +
+        (j.level ? '<br><small>' + escapeHtml(st.reason || '') + '<br>Since ' + secAgo(st.since) + (left ? ' | auto-unlock in about ' + left + ' min' : '') + '</small>' : '<br><small>Everything is normal.</small>');
+    document.getElementById('sec-levels').innerHTML = [0, 1, 2, 3, 4].map(n => '<button class="btn-glass btn-secondary-link' + (n === j.level ? ' cur' : '') + '" data-lv="' + n + '">' + (n === 0 ? 'Off' : n) + '</button>').join('');
+    document.querySelectorAll('#sec-levels [data-lv]').forEach(b => b.onclick = () => secLevel(parseInt(b.dataset.lv, 10)));
+    if (!keepForm) {
+        document.getElementById('sec-enabled').checked = j.config.enabled;
+        document.getElementById('sec-dry').checked = j.config.dry_run;
+        document.getElementById('sec-unlock').value = j.config.auto_unlock_minutes;
+        document.getElementById('sec-triggers').innerHTML = Object.keys(j.triggers).map(k => '<div class="own-row"><label class="sec-chk" style="flex:1"><input type="checkbox" data-sec-on="' + k + '"' + (j.config.triggers[k].on ? ' checked' : '') + '> ' + escapeHtml(j.triggers[k].label) + '</label><input class="form-control" style="max-width:90px" type="number" min="1" data-sec-th="' + k + '" value="' + j.config.triggers[k].threshold + '"></div>').join('');
+    }
+    const bl = document.getElementById('sec-blocks');
+    bl.innerHTML = j.blocks.map(b => '<div class="own-list-item"><span><b>' + escapeHtml(b.kind === 'ip' ? 'IP ' + b.value : (b.label || 'User ' + b.value)) + '</b><br><small>' + escapeHtml(b.trigger) + ' | about ' + b.minutes + ' min left' + (b.kind === 'user' ? ' | ' + b.value : '') + '</small></span><button class="btn-glass" data-k="' + b.kind + '" data-v="' + escapeHtml(b.value) + '">Unblock</button></div>').join('') || '<p class="own-note">No temporary blocks.</p>';
+    bl.querySelectorAll('[data-k]').forEach(b => b.onclick = async () => { const r = await ownApi('/api/owner/security/unblock', {kind: b.dataset.k, value: b.dataset.v}); ownMsg(r.success ? 'Unblocked.' : (r.error || 'Failed.'), !!r.success); secLoad(true); });
+    document.getElementById('sec-events').innerHTML = j.events.map(e => '<div class="own-list-item"><span><b>' + escapeHtml(e.kind) + '</b> <small>' + secAgo(e.at) + '</small><br><small>' + escapeHtml(e.detail) + (e.action ? ' | ' + escapeHtml(e.action) : '') + '</small></span></div>').join('') || '<p class="own-note">No events yet.</p>';
+}
+async function secLevel(n) {
+    if (n === 4 && !confirm('Level 4 locks everyone out except you. Continue?')) return;
+    const r = await ownApi('/api/owner/security/level', {level: n});
+    ownMsg(r.success ? (n ? 'Level set to ' + n + '.' : 'Website unlocked.') : (r.error || 'Failed.'), !!r.success);
+    secLoad(true); livePoll();
+}
+async function secSave() {
+    const triggers = {};
+    document.querySelectorAll('[data-sec-on]').forEach(c => { triggers[c.dataset.secOn] = {on: c.checked}; });
+    document.querySelectorAll('[data-sec-th]').forEach(c => { triggers[c.dataset.secTh].threshold = parseInt(c.value, 10); });
+    const r = await ownApi('/api/owner/security/config', {enabled: document.getElementById('sec-enabled').checked, dry_run: document.getElementById('sec-dry').checked,
+        auto_unlock_minutes: parseInt(document.getElementById('sec-unlock').value, 10), triggers});
+    ownMsg(r.success ? 'Security settings saved.' : (r.error || 'Failed.'), !!r.success);
+    secLoad(false);
+}
 function openOwner() { navigateTo('page-owner'); ownRefresh(); ownTab('overview'); }
 function ownTab(name) {
     document.querySelectorAll('#own-tabs button').forEach(b => { const on = b.dataset.tab === name; b.classList.toggle('on', on); b.classList.toggle('btn-secondary-link', !on); });
@@ -2774,6 +2835,8 @@ function ownTab(name) {
     if (name === 'users') ownLoadPremium();
     if (name === 'servers') ownRenderServers();
     if (name === 'blocked') ownLoadBlocked();
+    clearInterval(SEC.timer);
+    if (name === 'security') { secLoad(false); SEC.timer = setInterval(() => secLoad(true), 10000); }
 }
 document.querySelectorAll('#own-tabs button').forEach(b => b.addEventListener('click', () => ownTab(b.dataset.tab)));
 function ownOpts(list, empty) {

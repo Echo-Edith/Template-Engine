@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import asyncio
 import requests
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort, render_template_string
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort, render_template_string, g
 from pymongo import MongoClient
 
 # Import ai_brain module
@@ -54,6 +54,10 @@ db_inbox = None
 db_promos = None
 db_import_requests = None
 LOCAL_IMPORTS = {}
+db_sec_counters = None
+db_sec_log = None
+db_sec_blocks = None
+db_sec_alerts = None
 db_owner_jobs = None
 LOCAL_WEB_USERS = {}
 LOCAL_INBOX = []
@@ -75,6 +79,15 @@ if MONGO_URI:
         db_inbox = db["web_inbox"]
         db_promos = db["promo_codes"]
         db_import_requests = db["import_requests"]
+        db_sec_counters = db["security_counters"]
+        db_sec_log = db["security_log"]
+        db_sec_blocks = db["security_blocks"]
+        db_sec_alerts = db["security_alerts"]
+        try:
+            db_sec_counters.create_index("exp", expireAfterSeconds=0)
+            db_sec_log.create_index([("at", -1)])
+        except Exception as _e:
+            print(f"[Security Index Error] {_e}")
         db_owner_jobs = db["owner_jobs"]
     except Exception as e:
         print(f"[MongoDB Warning in Flask] {e}")
@@ -159,10 +172,10 @@ def get_ai_per_day() -> int:
         try:
             value = (db_settings.find_one({"_id": "limits"}) or {}).get("ai_per_day")
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                return value
+                return _sec_ai_cap(value)
         except Exception as e:
             print(f"[Limits Read Error] {e}")
-    return DEFAULT_AI_PER_DAY
+    return _sec_ai_cap(DEFAULT_AI_PER_DAY)
 
 
 def ai_used_today(user_id: str) -> int:
@@ -477,7 +490,7 @@ def _jst_week_key_and_reset():
     return f"{iso[0]}-W{iso[1]:02d}", int((monday + timedelta(days=7)).timestamp())
 
 
-def _limit_settings() -> dict:
+def _limit_settings(raw: bool = False) -> dict:
     limits = {"ai_per_day": DEFAULT_AI_PER_DAY, "builds_per_week": 1}
     if db_settings is not None:
         try:
@@ -488,6 +501,8 @@ def _limit_settings() -> dict:
                     limits[key] = value
         except Exception as e:
             print(f"[Limits Read Error] {e}")
+    if not raw:
+        limits["ai_per_day"] = _sec_ai_cap(limits["ai_per_day"])
     return limits
 
 
@@ -642,6 +657,8 @@ def notify_design_received(to_id: str, from_id: str, from_name: str, counts: tup
 
 
 def _rate_ok(log: dict, key: str, limit: int, window: int) -> bool:
+    if sec_level() >= 2 and not is_owner():
+        limit = max(1, limit // 4)  # website lockdown: everything is 4 times stricter
     now = datetime.now().timestamp()
     hits = [t for t in log.get(key, []) if now - t < window]
     if len(hits) >= limit:
@@ -659,7 +676,9 @@ def remember_web_user(user_id, display_name, username, avatar):
         fields = {"name": str(display_name or username or "User")[:40], "username": str(username or "")[:40],
                   "username_lower": str(username or "").lower()[:40], "avatar": avatar}
         if db_web_users is not None:
-            db_web_users.update_one({"_id": uid}, {"$set": fields, "$setOnInsert": {"accepts": True, "blocked": []}}, upsert=True)
+            res = db_web_users.update_one({"_id": uid}, {"$set": fields, "$setOnInsert": {"accepts": True, "blocked": [], "created_at": datetime.now(timezone.utc).timestamp()}}, upsert=True)
+            if getattr(res, "upserted_id", None) is not None:
+                sec_new_account()
         else:
             doc = LOCAL_WEB_USERS.setdefault(uid, {"_id": uid, "accepts": True, "blocked": []})
             doc.update(fields)
@@ -836,6 +855,7 @@ def api_inbox_action(item_id, action):
             if sender not in blocked:
                 blocked.append(sender)
             _web_user_update(me, {"blocked": blocked})
+            sec_note_blocked_sender(sender)
             for other in [i for i in _inbox_items(me) if i["from"] == sender]:
                 _inbox_delete(other)
             return jsonify({"success": True})
@@ -905,6 +925,7 @@ def owner_only(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if not is_owner():
+            sec_wrong_access()
             abort(404)
         return fn(*args, **kwargs)
     return wrapper
@@ -955,7 +976,7 @@ def _owner_user_info(uid: str) -> dict:
 @app.route("/api/owner/overview")
 @owner_only
 def api_owner_overview():
-    out = {"maintenance": get_maintenance(), "free_mode": get_free_mode(), "theme": get_site_theme(), "limits": _limit_settings(),
+    out = {"maintenance": get_maintenance(), "free_mode": get_free_mode(), "theme": get_site_theme(), "limits": _limit_settings(raw=True),
            "themes": sorted(SITE_THEMES), "db": db_owner_jobs is not None,
            "counts": {}, "guilds": [], "bot_online": False, "jobs": []}
     if db_settings is not None:
@@ -1226,6 +1247,8 @@ DEFAULT_MAINTENANCE_TEXT = "Template Engine is being updated. Please try again i
 
 
 def get_maintenance() -> dict:
+    if sec_level() >= 4:  # automatic full lockdown acts like maintenance mode
+        return {"on": True, "message": "The website is locked for a short time because of suspicious activity. Please try again later."}
     now = datetime.now().timestamp()
     if now - _MAINT["at"] < 10:
         return _MAINT["data"]
@@ -1309,6 +1332,530 @@ def api_import_status(rid):
         save_design(str(user["id"]), "imported", layout.get("server_name") or "Imported server", layout)
         db_import_requests.update_one({"_id": req["_id"]}, {"$set": {"saved": True}})
     return jsonify({"success": True, "status": "done", "blueprint": layout, "truncated": truncated})
+
+
+# =====================================================================
+# SECURITY: automatic website lockdown (levels 0 to 4). Everything is saved in the database,
+# so it works on Vercel, where every request can run on a different machine.
+#   Level 1  watch: only written to the log
+#   Level 2  slow down: stricter limits, AI limit 1 per day, new accounts cannot use AI
+#   Level 3  AI generate, AI edit, send, import and share are off (except for premium and the owner)
+#   Level 4  full lockdown: like maintenance mode (only the owner gets in)
+# The bot sends the owner a DM with an Unlock button when the level goes up.
+# =====================================================================
+SEC_LEVEL_NAMES = {0: "Normal", 1: "Watch", 2: "Slow down", 3: "Risky features off", 4: "Full lockdown"}
+SEC_TRIGGERS = {
+    "traffic": {"label": "Traffic spike: requests per IP per minute", "threshold": 240, "level": 2, "block_min": 15},
+    "ai_abuse": {"label": "AI abuse: AI calls per account per 10 minutes", "threshold": 10, "level": 2, "block_min": 60},
+    "ai_global": {"label": "AI abuse: AI calls from everyone per 10 minutes", "threshold": 80, "level": 3, "block_min": 0},
+    "new_accounts": {"label": "Mass new accounts: new logins per 10 minutes", "threshold": 40, "level": 2, "block_min": 0},
+    "submit_spam": {"label": "Submit spam: submits per account per 10 minutes", "threshold": 6, "level": 2, "block_min": 60},
+    "same_server": {"label": "Same server ID used by this many accounts per hour", "threshold": 4, "level": 2, "block_min": 60},
+    "harassment": {"label": "Harassment: designs sent per account per hour", "threshold": 20, "level": 2, "block_min": 360},
+    "blocked_sender": {"label": "Harassment: people who blocked the same sender per day", "threshold": 3, "level": 2, "block_min": 360},
+    "failed_requests": {"label": "Failed requests per IP per 5 minutes", "threshold": 60, "level": 2, "block_min": 15},
+    "wrong_access": {"label": "Owner area tried by a non-owner per 10 minutes", "threshold": 3, "level": 3, "block_min": 1440},
+    "share_abuse": {"label": "Share link opened this many times per 10 minutes", "threshold": 300, "level": 2, "block_min": 0},
+}
+SEC_UNCOUNTED = ("/api/live", "/api/owner/", "/api/build-status/", "/api/import/", "/api/inbox", "/api/usage")
+SEC_FEATURES = [(_re.compile(r"^/generate-blueprint$"), "ai"), (_re.compile(r"^/edit-blueprint$"), "ai"),
+                (_re.compile(r"^/api/designs/[^/]+/send$"), "send"), (_re.compile(r"^/api/import/start$"), "import"),
+                (_re.compile(r"^/api/designs/[^/]+/share$"), "share")]
+SEC_FEATURE_TEXT = {"ai": "AI tools", "send": "Sending designs", "import": "Importing servers", "share": "Share links"}
+SEC_CACHE = {"state": [0.0, {}], "cfg": [0.0, None], "blocks": [0.0, {}], "prem": {}}
+LOCAL_SEC = {"state": {}, "cfg": {}, "counters": {}, "blocks": {}, "log": [], "alerts": []}
+
+
+def sec_default_config() -> dict:
+    return {"enabled": True, "dry_run": False, "auto_unlock_minutes": 30,
+            "triggers": {k: {"on": True, "threshold": v["threshold"]} for k, v in SEC_TRIGGERS.items()}}
+
+
+def sec_config() -> dict:
+    now = datetime.now().timestamp()
+    if SEC_CACHE["cfg"][1] is not None and now - SEC_CACHE["cfg"][0] < 10:
+        return SEC_CACHE["cfg"][1]
+    cfg = sec_default_config()
+    saved = LOCAL_SEC["cfg"]
+    if db_settings is not None:
+        try:
+            saved = db_settings.find_one({"_id": "security_config"}) or {}
+        except Exception as e:
+            print(f"[Security Config Error] {e}")
+    for key in ("enabled", "dry_run"):
+        if isinstance(saved.get(key), bool):
+            cfg[key] = saved[key]
+    if isinstance(saved.get("auto_unlock_minutes"), int) and 1 <= saved["auto_unlock_minutes"] <= 1440:
+        cfg["auto_unlock_minutes"] = saved["auto_unlock_minutes"]
+    for name, t in (saved.get("triggers") or {}).items():
+        if name in cfg["triggers"] and isinstance(t, dict):
+            if isinstance(t.get("on"), bool):
+                cfg["triggers"][name]["on"] = t["on"]
+            if isinstance(t.get("threshold"), int) and 1 <= t["threshold"] <= 1000000:
+                cfg["triggers"][name]["threshold"] = t["threshold"]
+    SEC_CACHE["cfg"] = [now, cfg]
+    return cfg
+
+
+def sec_save_config(cfg: dict):
+    saved = {"enabled": cfg["enabled"], "dry_run": cfg["dry_run"], "auto_unlock_minutes": cfg["auto_unlock_minutes"], "triggers": cfg["triggers"]}
+    LOCAL_SEC["cfg"] = saved
+    SEC_CACHE["cfg"] = [0.0, None]
+    if db_settings is not None:
+        db_settings.update_one({"_id": "security_config"}, {"$set": saved}, upsert=True)
+
+
+def sec_state() -> dict:
+    now = datetime.now().timestamp()
+    if now - SEC_CACHE["state"][0] < 5:
+        return SEC_CACHE["state"][1]
+    state = LOCAL_SEC["state"]
+    if db_settings is not None:
+        try:
+            state = db_settings.find_one({"_id": "security_state"}) or {}
+        except Exception as e:
+            print(f"[Security State Error] {e}")
+    state = dict(state)
+    SEC_CACHE["state"] = [now, state]
+    if int(state.get("level", 0)) > 0 and state.get("auto_unlock_at") and now > float(state["auto_unlock_at"]):
+        sec_set_level(0, "auto_unlock", "The lockdown time ended.", by="auto")
+        return SEC_CACHE["state"][1]
+    return state
+
+
+def sec_level() -> int:
+    try:
+        return int(sec_state().get("level", 0))
+    except Exception:
+        return 0
+
+
+def _sec_ai_cap(value: int) -> int:
+    if sec_level() >= 2:
+        return 1 if value == 0 or value > 1 else value  # lockdown: free AI limit is 1 per day
+    return value
+
+
+def sec_ip() -> str:
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return (fwd.split(",")[0].strip() or request.remote_addr or "?")[:64]
+
+
+def sec_hash(value: str) -> str:
+    import hashlib
+    return hashlib.sha256((str(app.secret_key) + "|" + str(value)).encode()).hexdigest()[:12]
+
+
+def sec_log(kind: str, level: int, detail: str, action: str = "", subject: str = ""):
+    entry = {"at": datetime.now(timezone.utc).timestamp(), "kind": kind, "level": level, "detail": str(detail)[:300], "action": str(action)[:200], "subject": str(subject)[:60]}
+    LOCAL_SEC["log"] = ([entry] + LOCAL_SEC["log"])[:100]
+    if db_sec_log is not None:
+        try:
+            db_sec_log.insert_one(dict(entry))
+            if secrets_chance():
+                db_sec_log.delete_many({"at": {"$lt": entry["at"] - 14 * 86400}})
+        except Exception as e:
+            print(f"[Security Log Error] {e}")
+    print(f"[Security] {kind} L{level} {detail} {action}")
+
+
+def secrets_chance() -> bool:
+    import random
+    return random.random() < 0.02
+
+
+def sec_count(key: str, window: int) -> int:
+    """Counts one more hit in the current time window and returns the total."""
+    now = datetime.now().timestamp()
+    cid = f"{key}:{int(now // window)}"
+    if db_sec_counters is not None:
+        try:
+            doc = db_sec_counters.find_one_and_update(
+                {"_id": cid}, {"$inc": {"n": 1}, "$setOnInsert": {"exp": datetime.utcnow() + timedelta(seconds=window * 2)}},
+                upsert=True, return_document=True)
+            return int(doc.get("n", 1))
+        except Exception as e:
+            print(f"[Security Count Error] {e}")
+    exp, n = LOCAL_SEC["counters"].get(cid, (now + window * 2, 0))
+    LOCAL_SEC["counters"][cid] = (exp, n + 1)
+    if len(LOCAL_SEC["counters"]) > 5000:
+        LOCAL_SEC["counters"] = {k: v for k, v in LOCAL_SEC["counters"].items() if v[0] > now}
+    return n + 1
+
+
+def sec_count_unique(key: str, window: int, member: str) -> int:
+    now = datetime.now().timestamp()
+    cid = f"{key}:{int(now // window)}"
+    if db_sec_counters is not None:
+        try:
+            doc = db_sec_counters.find_one_and_update(
+                {"_id": cid}, {"$addToSet": {"m": member}, "$setOnInsert": {"exp": datetime.utcnow() + timedelta(seconds=window * 2)}},
+                upsert=True, return_document=True)
+            return len(doc.get("m", []))
+        except Exception as e:
+            print(f"[Security Count Error] {e}")
+    exp, members = LOCAL_SEC["counters"].get(cid, (now + window * 2, set()))
+    members = set(members) | {member}
+    LOCAL_SEC["counters"][cid] = (exp, members)
+    return len(members)
+
+
+def sec_is_exempt(uid: str) -> bool:
+    """Allow list: the owner, permanent staff and TE Premium members are never slowed down or blocked."""
+    if not uid:
+        return False
+    if uid in OWNER_IDS or uid in HARDCODED_STAFF:
+        return True
+    cached = SEC_CACHE["prem"].get(uid)
+    now = datetime.now().timestamp()
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    value = bool(is_user_premium(uid))
+    SEC_CACHE["prem"][uid] = (now, value)
+    if len(SEC_CACHE["prem"]) > 2000:
+        SEC_CACHE["prem"].clear()
+    return value
+
+
+def sec_blocks() -> dict:
+    now = datetime.now().timestamp()
+    if now - SEC_CACHE["blocks"][0] < 8:
+        return SEC_CACHE["blocks"][1]
+    items = {}
+    docs = list(LOCAL_SEC["blocks"].values())
+    if db_sec_blocks is not None:
+        try:
+            docs = list(db_sec_blocks.find({"until": {"$gt": now}}).limit(500))
+        except Exception as e:
+            print(f"[Security Blocks Error] {e}")
+    for d in docs:
+        if float(d.get("until", 0)) > now:
+            items[(d["kind"], d["value"])] = d
+    SEC_CACHE["blocks"] = [now, items]
+    return items
+
+
+def sec_block(kind: str, value: str, minutes: int, reason: str, trigger: str, label: str = ""):
+    now = datetime.now().timestamp()
+    doc = {"_id": f"{kind}:{value}", "kind": kind, "value": value, "until": now + minutes * 60, "reason": reason[:200],
+           "trigger": trigger, "at": now, "label": label[:60]}
+    LOCAL_SEC["blocks"][doc["_id"]] = doc
+    SEC_CACHE["blocks"][1][(kind, value)] = doc
+    if db_sec_blocks is not None:
+        try:
+            db_sec_blocks.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+        except Exception as e:
+            print(f"[Security Block Save Error] {e}")
+
+
+def sec_unblock(kind: str, value: str):
+    LOCAL_SEC["blocks"].pop(f"{kind}:{value}", None)
+    SEC_CACHE["blocks"][1].pop((kind, value), None)
+    if db_sec_blocks is not None:
+        db_sec_blocks.delete_one({"_id": f"{kind}:{value}"})
+
+
+def sec_set_level(level: int, trigger: str, reason: str, detail: str = "", by: str = "auto"):
+    """Changes the lockdown level and tells the bot to DM the owner."""
+    level = max(0, min(4, int(level)))
+    now = datetime.now().timestamp()
+    old = int(SEC_CACHE["state"][1].get("level", 0)) if SEC_CACHE["state"][1] else 0
+    cfg = sec_config()
+    recent = list((SEC_CACHE["state"][1] or {}).get("recent", []))[-19:]
+    if level > 0:
+        recent.append({"t": trigger, "at": now})
+    state = {"level": level, "since": now if level != old else (SEC_CACHE["state"][1] or {}).get("since", now),
+             "reason": reason[:300], "trigger": trigger, "by": by, "recent": recent,
+             "auto_unlock_at": (now + cfg["auto_unlock_minutes"] * 60) if level > 0 else 0}
+    LOCAL_SEC["state"] = state
+    SEC_CACHE["state"] = [now, state]
+    if db_settings is not None:
+        try:
+            db_settings.replace_one({"_id": "security_state"}, {"_id": "security_state", **state}, upsert=True)
+        except Exception as e:
+            print(f"[Security State Save Error] {e}")
+    sec_log("level", level, f"{SEC_LEVEL_NAMES[old]} -> {SEC_LEVEL_NAMES[level]}: {reason}", by)
+    if by == "auto" and level != old and (level > old or old > 0):
+        alert = {"kind": "lockdown" if level > old else "unlocked", "level": level, "old_level": old, "trigger": trigger, "reason": reason[:300],
+                 "detail": detail[:300], "by": by, "at": now, "auto_unlock_at": state["auto_unlock_at"], "pending": True}
+        LOCAL_SEC["alerts"].append(alert)
+        if db_sec_alerts is not None:
+            try:
+                db_sec_alerts.insert_one(dict(alert))
+            except Exception as e:
+                print(f"[Security Alert Error] {e}")
+
+
+def sec_raise(level: int, trigger: str, reason: str, detail: str = ""):
+    cfg = sec_config()
+    if not cfg["enabled"] or not cfg["triggers"].get(trigger, {"on": True})["on"] and trigger in cfg["triggers"]:
+        return
+    current = sec_level()
+    if cfg["dry_run"]:
+        sec_log(trigger, level, f"DRY RUN: would raise the lockdown to level {level}. {reason}", "dry-run")
+        return
+    # three different warnings in 10 minutes means something bigger is going on
+    now = datetime.now().timestamp()
+    recent = [r for r in (SEC_CACHE["state"][1] or {}).get("recent", []) if now - r["at"] < 600] + [{"t": trigger, "at": now}]
+    if len({r["t"] for r in recent}) >= 3 and level < 4:
+        level, reason = 4, "3 different warnings in 10 minutes. " + reason
+    if level > current:
+        sec_set_level(level, trigger, reason, detail)
+    else:  # same level again: keep the lockdown going a bit longer
+        state = dict(SEC_CACHE["state"][1] or {})
+        if state.get("level"):
+            state["auto_unlock_at"] = now + cfg["auto_unlock_minutes"] * 60
+            state["recent"] = recent[-20:]
+            SEC_CACHE["state"] = [now, state]
+            LOCAL_SEC["state"] = state
+            if db_settings is not None:
+                try:
+                    db_settings.update_one({"_id": "security_state"}, {"$set": {"auto_unlock_at": state["auto_unlock_at"], "recent": state["recent"]}})
+                except Exception as e:
+                    print(f"[Security State Save Error] {e}")
+
+
+def sec_trip(trigger: str, kind: str, value: str, detail: str, label: str = ""):
+    """One source (an IP or an account) went over a limit: block it. If three sources do this, lock the whole site a bit."""
+    cfg = sec_config()
+    meta = SEC_TRIGGERS[trigger]
+    if not cfg["enabled"] or not cfg["triggers"][trigger]["on"]:
+        return
+    if cfg["dry_run"]:
+        if sec_count(f"dry:{trigger}:{value}", 600) == 1:  # write it once, not on every request
+            sec_log(trigger, 1, f"DRY RUN: would block {kind} {label or value}. {detail}", "dry-run", value)
+        return
+    sec_block(kind, value, meta["block_min"], meta["label"], trigger, label)
+    sec_log(trigger, 1, detail, f"blocked {kind} for {meta['block_min']} min", value)
+    if sec_count(f"strike:{trigger}", 600) >= 3:
+        sec_raise(meta["level"], trigger, f"3 different sources broke the rule: {meta['label']}.", detail)
+
+
+def sec_global(trigger: str, detail: str):
+    cfg = sec_config()
+    if cfg["enabled"] and cfg["triggers"][trigger]["on"]:
+        sec_raise(SEC_TRIGGERS[trigger]["level"], trigger, SEC_TRIGGERS[trigger]["label"] + ".", detail)
+
+
+def sec_over(trigger: str, count: int) -> bool:
+    cfg = sec_config()
+    return cfg["enabled"] and cfg["triggers"][trigger]["on"] and count > cfg["triggers"][trigger]["threshold"]
+
+
+def sec_new_account():
+    try:
+        if sec_over("new_accounts", sec_count("newacc", 600)):
+            sec_global("new_accounts", "Many new accounts logged in at the same time.")
+    except Exception as e:
+        print(f"[Security New Account Error] {e}")
+
+
+def sec_note_blocked_sender(sender: str):
+    try:
+        if sec_over("blocked_sender", sec_count_unique(f"blocked_sender:{sender}", 86400, str(session.get("user", {}).get("id", "?")))):
+            if not sec_is_exempt(str(sender)):
+                sec_trip("blocked_sender", "user", str(sender), "Many people blocked this sender.", (_web_user(sender) or {}).get("name", ""))
+    except Exception as e:
+        print(f"[Security Block Note Error] {e}")
+
+
+def sec_wrong_access():
+    try:
+        cfg = sec_config()
+        if not cfg["enabled"] or not cfg["triggers"]["wrong_access"]["on"]:
+            return
+        ip = sec_hash(sec_ip())
+        uid = str((session.get("user") or {}).get("id", ""))
+        n = sec_count(f"wrong:{ip}", 600)
+        if n > cfg["triggers"]["wrong_access"]["threshold"] - 1:
+            sec_trip("wrong_access", "ip", ip, f"Someone tried the owner area {n} times (account {uid or 'not logged in'}).", f"account {uid}" if uid else "")
+            if uid and not cfg["dry_run"]:
+                sec_block("user", uid, SEC_TRIGGERS["wrong_access"]["block_min"], "Tried the owner area", "wrong_access", (_web_user(uid) or {}).get("name", ""))
+            if n >= 10:
+                sec_raise(4, "wrong_access", "The owner area was tried 10 times in 10 minutes.", f"Account {uid or 'not logged in'}")
+            else:
+                sec_raise(SEC_TRIGGERS["wrong_access"]["level"], "wrong_access", SEC_TRIGGERS["wrong_access"]["label"] + ".", f"Account {uid or 'not logged in'}")
+    except Exception as e:
+        print(f"[Security Wrong Access Error] {e}")
+
+
+@app.before_request
+def security_gate():
+    try:
+        path = request.path
+        if path.startswith("/static/") or path == "/api/live":
+            return None
+        cfg = sec_config()
+        if not cfg["enabled"]:
+            return None
+        uid = str((session.get("user") or {}).get("id", ""))
+        g.sec_exempt = sec_is_exempt(uid)
+        if g.sec_exempt:
+            return None
+        ip = sec_hash(sec_ip())
+        g.sec_ip = ip
+        blocks = sec_blocks()
+        hit = blocks.get(("ip", ip)) or (blocks.get(("user", uid)) if uid else None)
+        if hit:
+            g.sec_skip = True
+            mins = max(1, int((float(hit["until"]) - datetime.now().timestamp()) // 60) + 1)
+            text = f"You are blocked for about {mins} more minute(s) because of suspicious activity. If this is a mistake, wait and try again."
+            if path.startswith("/api/") or request.method != "GET" or path in ("/generate-blueprint", "/edit-blueprint"):
+                return jsonify({"success": False, "error": text}), 429, {"Retry-After": str(mins * 60)}
+            return text, 429
+        level = sec_level()
+        # features that are switched off during a lockdown
+        for pattern, feature in SEC_FEATURES:
+            if request.method == "POST" and pattern.match(path):
+                if level >= 3:
+                    return jsonify({"success": False, "locked": True, "error": f"{SEC_FEATURE_TEXT[feature]} are switched off for a short time for safety. Please try again later."}), 503
+                if level == 2 and feature == "ai":
+                    created = (_web_user(uid) or {}).get("created_at", 0) if uid else 0
+                    if not created or datetime.now(timezone.utc).timestamp() - float(created) < 86400:
+                        return jsonify({"success": False, "locked": True, "error": "New accounts cannot use the AI tools right now. Please try again later."}), 503
+                break
+        # counting
+        if request.method == "POST":
+            if path in ("/generate-blueprint", "/edit-blueprint") and uid:
+                if sec_over("ai_abuse", sec_count(f"ai:{uid}", 600)):
+                    sec_trip("ai_abuse", "user", uid, "One account used the AI tools too often.", (_web_user(uid) or {}).get("name", ""))
+                if sec_over("ai_global", sec_count("ai_all", 600)):
+                    sec_global("ai_global", "The AI tools were used very often by many people.")
+            elif path == "/api/submit-design" and uid:
+                if sec_over("submit_spam", sec_count(f"submit:{uid}", 600)):
+                    sec_trip("submit_spam", "user", uid, "One account submitted designs too often.", (_web_user(uid) or {}).get("name", ""))
+                sid = str((request.get_json(silent=True) or {}).get("target_server_id", ""))[:20]
+                if sid.isdigit() and sec_over("same_server", sec_count_unique(f"srv:{sid}", 3600, uid) - 1 + 1):
+                    sec_trip("same_server", "user", uid, f"Many accounts used the same server ID ({sid}).", (_web_user(uid) or {}).get("name", ""))
+            elif _re.match(r"^/api/designs/[^/]+/send$", path) and uid:
+                if sec_over("harassment", sec_count(f"send:{uid}", 3600)):
+                    sec_trip("harassment", "user", uid, "One account tried to send too many designs.", (_web_user(uid) or {}).get("name", ""))
+        elif path.startswith("/s/") or path.startswith("/api/shared/"):
+            share_id = path.rsplit("/", 1)[-1][:20]
+            if sec_over("share_abuse", sec_count(f"share:{share_id}", 600)):
+                sec_revoke_share(share_id)
+        if path.startswith("/api/") and not path.startswith(SEC_UNCOUNTED):
+            if sec_over("traffic", sec_count(f"ip:{ip}", 60)):
+                sec_trip("traffic", "ip", ip, "One IP sent too many requests in one minute.")
+            if sec_count("all", 60) > 3000:
+                sec_global("traffic", "The website got more than 3000 requests in one minute.")
+    except Exception as e:  # security must never break the website
+        print(f"[Security Gate Error] {e}")
+    return None
+
+
+@app.after_request
+def security_after(resp):
+    try:
+        if resp.status_code in (401, 403, 404, 429) and request.path.startswith("/api/") and not request.path.startswith(("/api/live", "/api/usage", "/api/inbox")) \
+                and not getattr(g, "sec_skip", False) and getattr(g, "sec_ip", None) and not getattr(g, "sec_exempt", False):
+            if sec_over("failed_requests", sec_count(f"fail:{g.sec_ip}", 300)):
+                sec_trip("failed_requests", "ip", g.sec_ip, "One IP got many error answers in 5 minutes.")
+    except Exception as e:
+        print(f"[Security After Error] {e}")
+    return resp
+
+
+def sec_revoke_share(share_id: str):
+    cfg = sec_config()
+    if not cfg["triggers"]["share_abuse"]["on"]:
+        return
+    if cfg["dry_run"]:
+        sec_log("share_abuse", 1, f"DRY RUN: would turn off share link {share_id}.", "dry-run", share_id)
+        return
+    try:
+        if db_designs is not None:
+            db_designs.update_one({"share_id": share_id}, {"$unset": {"share_id": ""}, "$set": {"on_profile": False}})
+        else:
+            for d in LOCAL_DESIGNS:
+                if d.get("share_id") == share_id:
+                    d.pop("share_id", None)
+                    d["on_profile"] = False
+        sec_log("share_abuse", 1, f"Share link {share_id} was opened too often.", "link turned off", share_id)
+        if sec_count("strike:share_abuse", 600) >= 3:
+            sec_raise(2, "share_abuse", SEC_TRIGGERS["share_abuse"]["label"] + ".", f"Link {share_id}")
+    except Exception as e:
+        print(f"[Security Revoke Error] {e}")
+
+
+# ----- Owner Panel: Security tab -----
+@app.route("/api/owner/security")
+@owner_only
+def api_owner_security():
+    now = datetime.now(timezone.utc).timestamp()
+    state = dict(sec_state())
+    state.pop("_id", None)
+    blocks = [{"kind": d["kind"], "value": d["value"], "label": d.get("label", ""), "reason": d.get("reason", ""), "trigger": d.get("trigger", ""),
+               "minutes": max(1, int((float(d["until"]) - now) // 60) + 1)} for d in sec_blocks().values()]
+    events = LOCAL_SEC["log"][:50]
+    if db_sec_log is not None:
+        try:
+            events = [{k: v for k, v in e.items() if k != "_id"} for e in db_sec_log.find({}).sort("at", -1).limit(50)]
+        except Exception as e:
+            print(f"[Security Events Error] {e}")
+    return jsonify({"level": int(state.get("level", 0)), "level_name": SEC_LEVEL_NAMES[int(state.get("level", 0))], "state": state,
+                    "config": sec_config(), "triggers": {k: {"label": v["label"], "level": v["level"], "block_min": v["block_min"]} for k, v in SEC_TRIGGERS.items()},
+                    "levels": SEC_LEVEL_NAMES, "blocks": blocks, "events": events, "now": now})
+
+
+@app.route("/api/owner/security/config", methods=["POST"])
+@owner_only
+def api_owner_security_config():
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Bad request."}), 400
+    data = request.get_json(silent=True) or {}
+    cfg = sec_config()
+    try:
+        if isinstance(data.get("enabled"), bool):
+            cfg["enabled"] = data["enabled"]
+        if isinstance(data.get("dry_run"), bool):
+            cfg["dry_run"] = data["dry_run"]
+        if "auto_unlock_minutes" in data:
+            mins = int(data["auto_unlock_minutes"])
+            if not 1 <= mins <= 1440:
+                return jsonify({"success": False, "error": "Auto-unlock must be from 1 to 1440 minutes."}), 400
+            cfg["auto_unlock_minutes"] = mins
+        for name, t in (data.get("triggers") or {}).items():
+            if name in cfg["triggers"] and isinstance(t, dict):
+                if isinstance(t.get("on"), bool):
+                    cfg["triggers"][name]["on"] = t["on"]
+                if "threshold" in t:
+                    th = int(t["threshold"])
+                    if not 1 <= th <= 1000000:
+                        return jsonify({"success": False, "error": "A number is out of range."}), 400
+                    cfg["triggers"][name]["threshold"] = th
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Please type numbers only."}), 400
+    sec_save_config(cfg)
+    sec_log("config", 0, "Security settings changed by the owner.", "owner", str(session["user"]["id"]))
+    return jsonify({"success": True})
+
+
+@app.route("/api/owner/security/level", methods=["POST"])
+@owner_only
+def api_owner_security_level():
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Bad request."}), 400
+    try:
+        level = int((request.get_json(silent=True) or {}).get("level"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Choose a level from 0 to 4."}), 400
+    if not 0 <= level <= 4:
+        return jsonify({"success": False, "error": "Choose a level from 0 to 4."}), 400
+    sec_set_level(level, "manual", "Set by the owner in the Owner Panel." if level else "Unlocked by the owner in the Owner Panel.", by=str(session["user"]["id"]))
+    return jsonify({"success": True})
+
+
+@app.route("/api/owner/security/unblock", methods=["POST"])
+@owner_only
+def api_owner_security_unblock():
+    data = request.get_json(silent=True) or {}
+    kind, value = str(data.get("kind", "")), str(data.get("value", ""))
+    if kind not in ("ip", "user") or not value or len(value) > 64:
+        return jsonify({"success": False, "error": "Bad request."}), 400
+    sec_unblock(kind, value)
+    sec_log("unblock", 0, f"Unblocked {kind} {value}.", "owner", value)
+    return jsonify({"success": True})
 
 
 @app.route("/api/live")

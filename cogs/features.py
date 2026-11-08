@@ -44,6 +44,8 @@ db_shop = None
 db_tickets = None
 db_owner_jobs = None
 db_import_requests = None
+db_sec_alerts = None
+db_sec_log = None
 
 if MONGO_URI:
     try:
@@ -70,6 +72,8 @@ if MONGO_URI:
         db_tickets = db["tickets"]
         db_owner_jobs = db["owner_jobs"]
         db_import_requests = db["import_requests"]
+        db_sec_alerts = db["security_alerts"]
+        db_sec_log = db["security_log"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -3992,6 +3996,98 @@ async def run_owner_job(bot, job: dict) -> str:
     raise ValueError("Unknown job type.")
 
 
+# -------------------------------------------------------------
+# WEBSITE LOCKDOWN ALERTS: the website writes an alert, the bot DMs the owner with an Unlock button.
+# -------------------------------------------------------------
+SEC_LEVEL_INFO = {
+    1: ("Watch", 0xF59E0B, "Only written to the log. Nothing changed for users."),
+    2: ("Slow down", 0xF59E0B, "Limits are 4 times stricter. Free AI is 1 per day. New accounts cannot use AI."),
+    3: ("Risky features off", 0xEF4444, "AI generate, AI edit, send design, import and share are off for normal users."),
+    4: ("Full lockdown", 0xDC2626, "The website is closed for everyone except you (like maintenance mode)."),
+}
+
+
+def unlock_website(by: str) -> bool:
+    """Sets the website security level back to 0. Works without the website running."""
+    if db_settings is None:
+        return False
+    now = datetime.now(timezone.utc).timestamp()
+    db_settings.update_one({"_id": "security_state"}, {"$set": {"level": 0, "since": now, "reason": "Unlocked with the bot button.",
+                                                               "trigger": "manual", "by": by, "auto_unlock_at": 0}}, upsert=True)
+    if db_sec_log is not None:
+        db_sec_log.insert_one({"at": now, "kind": "level", "level": 0, "detail": "Unlocked with the bot button.", "action": by, "subject": ""})
+    return True
+
+
+class SiteUnlockView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        if WEBSITE_URL:
+            self.add_item(discord.ui.Button(label="Open Owner Panel", style=discord.ButtonStyle.link, url=WEBSITE_URL))
+
+    @discord.ui.button(label="Unlock Website", style=discord.ButtonStyle.success, custom_id="te_site_unlock", emoji="\U0001F513")
+    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) not in OWNER_IDS:
+            return await interaction.response.send_message("Only the bot owner can use this button.", ephemeral=True)
+        await interaction.response.defer()
+        try:
+            ok = await asyncio.to_thread(unlock_website, str(interaction.user.id))
+        except Exception as e:
+            return await interaction.followup.send(f"Could not unlock: `{e}`", ephemeral=True)
+        if not ok:
+            return await interaction.followup.send("The database is not connected.", ephemeral=True)
+        embed = discord.Embed(title="\U0001F513 Website unlocked", color=0x22C55E,
+                              description=f"Unlocked by {interaction.user.mention} at <t:{int(time.time())}:f>.\nThe website goes back to normal in a few seconds.")
+        done = discord.ui.View()
+        done.add_item(discord.ui.Button(label="Unlocked", style=discord.ButtonStyle.secondary, disabled=True, custom_id="te_site_unlock_done"))
+        await interaction.message.edit(embed=embed, view=done)
+
+
+def build_lockdown_embed(a: dict) -> discord.Embed:
+    level = int(a.get("level", 0))
+    name, color, changed = SEC_LEVEL_INFO.get(level, ("Lockdown", 0xEF4444, ""))
+    at = int(a.get("at", time.time()))
+    e = discord.Embed(title=f"\U0001F6A8 Website lockdown: Level {level} ({name})", color=color,
+                      description="The website found suspicious activity and locked itself.")
+    e.add_field(name="What happened", value=str(a.get("reason") or "-")[:900], inline=False)
+    if a.get("detail"):
+        e.add_field(name="Details", value=str(a["detail"])[:900], inline=False)
+    e.add_field(name="Trigger", value=f"`{a.get('trigger', '-')}`", inline=True)
+    e.add_field(name="Time (JST)", value=f"`{datetime.fromtimestamp(at, JST).strftime('%Y-%m-%d %H:%M:%S')}`", inline=True)
+    if a.get("auto_unlock_at"):
+        e.add_field(name="Auto-unlock", value=f"<t:{int(a['auto_unlock_at'])}:R>", inline=True)
+    e.add_field(name="What changed", value=changed, inline=False)
+    e.set_footer(text="Press the button to unlock the website now.")
+    return e
+
+
+def build_unlocked_embed(a: dict) -> discord.Embed:
+    return discord.Embed(title="\U0001F513 Website unlocked", color=0x22C55E,
+                         description=f"The lockdown ended by itself at <t:{int(a.get('at', time.time()))}:f>. The website is normal again.")
+
+
+async def process_security_alerts(bot):
+    if db_sec_alerts is None:
+        return
+    try:
+        alert = await asyncio.to_thread(lambda: db_sec_alerts.find_one_and_update({"pending": True}, {"$set": {"pending": False}}, sort=[("at", 1)]))
+    except Exception as e:
+        print(f"[Security Alert Error] {e}")
+        return
+    if not alert:
+        return
+    lock = alert.get("kind") == "lockdown"
+    for oid in OWNER_IDS:
+        try:
+            user = bot.get_user(int(oid)) or await bot.fetch_user(int(oid))
+            if lock:
+                await user.send(embed=build_lockdown_embed(alert), view=SiteUnlockView())
+            else:
+                await user.send(embed=build_unlocked_embed(alert))
+        except Exception as e:
+            print(f"[Security DM Error] {oid}: {e}")
+
+
 async def process_owner_jobs(bot):
     """Runs waiting owner jobs. Called every scheduler tick."""
     if db_owner_jobs is None:
@@ -4076,6 +4172,7 @@ class FeaturesCog(commands.Cog):
     async def owner_jobs_loop(self):
         await process_owner_jobs(self.bot)
         await process_import_requests(self.bot)
+        await process_security_alerts(self.bot)
 
     @owner_jobs_loop.before_loop
     async def before_owner_jobs_loop(self):
@@ -5119,6 +5216,7 @@ async def setup(bot: commands.Bot):
     bot.add_view(GiveawayView())
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
+    bot.add_view(SiteUnlockView())
     if HAS_CARD_LAYOUT:
         try:
             bot.add_view(GiveawayLayout())
