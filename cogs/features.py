@@ -3715,6 +3715,18 @@ async def run_owner_job(bot, job: dict) -> str:
             raise ValueError("Unknown theme or the database could not be reached.")
         return f"Website theme is now {SITE_THEMES[theme]}."
 
+    if t == "invite":
+        guild = bot.get_guild(_job_id(p, "guild_id"))
+        if guild is None:
+            raise ValueError("The bot is not in that server.")
+        me = guild.me
+        choices = [c for c in [guild.system_channel, guild.rules_channel] + list(guild.text_channels) if c is not None]
+        channel = next((c for c in choices if c.permissions_for(me).create_instant_invite), None)
+        if channel is None:
+            raise ValueError(f"I need the `Create Invite` permission in at least one channel of {guild.name}.")
+        invite = await channel.create_invite(max_age=3600, max_uses=0, unique=True, reason="Owner panel (website)")
+        return f"Invite for {guild.name} (works for 1 hour): {invite.url}"
+
     if t == "sync_roles":
         changed = await sync_premium_roles(bot)
         return f"TE Premium roles checked ({changed} changes)."
@@ -3758,7 +3770,7 @@ def publish_owner_data(bot):
     guilds = []
     for g in bot.guilds[:100]:
         guilds.append({
-            "id": str(g.id), "name": g.name,
+            "id": str(g.id), "name": g.name, "members": g.member_count or 0,
             "channels": [{"id": str(c.id), "name": c.name} for c in g.text_channels[:400]],
             "categories": [{"id": str(c.id), "name": c.name} for c in g.categories[:100]],
             "roles": [{"id": str(r.id), "name": r.name} for r in g.roles[:250] if not r.is_default() and not r.managed],

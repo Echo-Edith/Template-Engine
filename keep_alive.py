@@ -882,6 +882,7 @@ OWNER_JOB_SPECS = {
     "free": {"on"},
     "limit": {"key", "value"},
     "theme": {"theme"},
+    "invite": {"guild_id"},
     "sync_roles": set(),
 }
 

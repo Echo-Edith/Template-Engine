@@ -1114,6 +1114,7 @@ background: var(--accent-purple-glow) !important;
 <button class="btn-glass on" data-tab="overview">Overview</button>
 <button class="btn-glass btn-secondary-link" data-tab="panels">Panels</button>
 <button class="btn-glass btn-secondary-link" data-tab="codes">Codes</button>
+<button class="btn-glass btn-secondary-link" data-tab="servers">Servers</button>
 <button class="btn-glass btn-secondary-link" data-tab="users">Users</button>
 </div>
 <div id="own-msg" class="own-msg"></div>
@@ -1167,6 +1168,12 @@ background: var(--accent-purple-glow) !important;
 <div class="own-row"><input class="form-control" id="own-c-days" type="number" min="0" placeholder="Premium days"><input class="form-control" id="own-c-dur" placeholder="Works for (12h, 7d, 2w)"><input class="form-control" id="own-c-max" type="number" min="1" placeholder="Max uses"></div>
 <div class="own-row"><button class="btn-glass" onclick="ownCodeCreate()">Create code</button></div></div>
 <div class="editor-card"><div class="label-heading">CODES</div><div id="own-code-list"></div></div>
+</div>
+
+<div class="own-sec" id="own-servers">
+<div class="editor-card"><div class="label-heading">SERVERS THE BOT IS IN</div>
+<div id="own-server-list"></div>
+<p class="own-note">"Get invite" makes a new invite link that works for 1 hour. The bot needs the Create Invite permission in the server.</p></div>
 </div>
 
 <div class="own-sec" id="own-users">
@@ -2589,7 +2596,7 @@ function resetBuilder() {
 {% if is_owner %}
 <script>
 // OWNER PANEL (this script is only sent to the owner)
-let OWN = {guilds: [], loaded: false};
+let OWN = {guilds: [], loaded: false, invites: {}};
 function ownMsg(text, ok) {
     const el = document.getElementById('own-msg');
     el.textContent = text; el.className = 'own-msg ' + (ok ? 'ok' : 'err'); el.style.display = 'block';
@@ -2610,7 +2617,7 @@ async function ownJob(type, params, after) {
     for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 1500));
         const s = await ownApi('/api/owner/job/' + j.id);
-        if (s.status === 'done') { ownMsg(s.result || 'Done.', true); ownRefresh(); if (after) after(); return; }
+        if (s.status === 'done') { ownMsg(s.result || 'Done.', true); ownRefresh(); if (after) after(s.result); return; }
         if (s.status === 'error') { ownMsg(s.result || 'The bot could not do this.', false); ownRefresh(); return; }
     }
     ownMsg('The bot did not answer in 45 seconds. Is the bot online?', false);
@@ -2621,6 +2628,7 @@ function ownTab(name) {
     document.querySelectorAll('.own-sec').forEach(s => s.classList.toggle('on', s.id === 'own-' + name));
     if (name === 'codes') ownLoadCodes();
     if (name === 'users') ownLoadPremium();
+    if (name === 'servers') ownRenderServers();
 }
 document.querySelectorAll('#own-tabs button').forEach(b => b.addEventListener('click', () => ownTab(b.dataset.tab)));
 function ownOpts(list, empty) {
@@ -2645,6 +2653,7 @@ async function ownRefresh() {
     sel.innerHTML = ownOpts(OWN.guilds, OWN.guilds.length ? 'Choose a server' : 'No server data yet (is the bot online?)');
     if (keep) sel.value = keep;
     ownFillGuild();
+    ownRenderServers();
     const c = o.counts || {};
     document.getElementById('own-status').innerHTML =
         '<div><b>' + (o.bot_online ? 'Online' : 'Offline?') + '</b>Bot</div><div><b>' + (c.premium || 0) + '</b>Premium</div><div><b>' + (c.staff || 0) + '</b>Staff</div>' +
@@ -2657,6 +2666,21 @@ async function ownRefresh() {
     th.value = o.theme;
     document.getElementById('own-jobs').innerHTML = (o.jobs || []).map(j =>
         '<div class="own-list-item"><span><b>' + escapeHtml(j.type) + '</b> - ' + escapeHtml(j.status) + '</span><span style="color:var(--text-sub);">' + escapeHtml((j.result || '').slice(0, 90)) + '</span></div>').join('') || '<p class="own-note">Nothing yet.</p>';
+}
+function ownRenderServers() {
+    const box = document.getElementById('own-server-list');
+    if (!OWN.guilds.length) { box.innerHTML = '<p class="own-note">No server data yet. Is the bot online?</p>'; return; }
+    box.innerHTML = OWN.guilds.map(g => '<div class="own-list-item" data-gid="' + g.id + '"><span><b>' + escapeHtml(g.name) + '</b><br><small>' + (g.members || 0).toLocaleString() + ' members | ' + g.id + '</small><div class="own-invite"></div></span><button class="btn-glass" data-inv="' + g.id + '">Get invite</button></div>').join('');
+    box.querySelectorAll('[data-inv]').forEach(b => b.onclick = () => ownJob('invite', {guild_id: b.dataset.inv}, res => {
+        const m = (res || '').match(/https:\/\/discord\.gg\/\S+/);
+        if (m) { OWN.invites[b.dataset.inv] = m[0]; ownRenderServers(); }
+    }));
+    Object.keys(OWN.invites).forEach(gid => {
+        const slot = box.querySelector('[data-gid="' + gid + '"] .own-invite'); if (!slot) return;
+        const url = OWN.invites[gid];
+        slot.innerHTML = '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a> <button class="btn-glass">Copy</button>';
+        slot.querySelector('button').onclick = () => { try { navigator.clipboard.writeText(url); ownMsg('Invite copied.', true); } catch (e) { ownMsg(url, true); } };
+    });
 }
 function ownFree(on) { ownJob('free', {on}); }
 function ownLimit(key, id) { ownJob('limit', {key, value: parseInt(document.getElementById(id).value, 10)}); }
