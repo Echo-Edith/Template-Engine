@@ -906,6 +906,7 @@ OWNER_JOB_SPECS = {
     "free": {"on"},
     "limit": {"key", "value"},
     "theme": {"theme"},
+    "trivia": {"enabled", "channel_id", "interval", "ask_now"},
     "invite": {"guild_id"},
     "maintenance": {"on", "message"},
     "blacklist_add": {"kind", "id", "reason"},
@@ -978,9 +979,12 @@ def _owner_user_info(uid: str) -> dict:
 def api_owner_overview():
     out = {"maintenance": get_maintenance(), "free_mode": get_free_mode(), "theme": get_site_theme(), "limits": _limit_settings(raw=True),
            "themes": sorted(SITE_THEMES), "db": db_owner_jobs is not None,
-           "counts": {}, "guilds": [], "bot_online": False, "jobs": []}
+           "counts": {}, "guilds": [], "bot_online": False, "jobs": [], "trivia": {"enabled": True, "channel_id": "1569115319820230726", "interval": 30, "next_at": 0}}
     if db_settings is not None:
         try:
+            t = db_settings.find_one({"_id": "trivia_event"}) or {}
+            out["trivia"] = {"enabled": bool(t.get("enabled", True)), "channel_id": str(t.get("channel_id") or "1569115319820230726"),
+                             "interval": int(t.get("interval") or 30), "next_at": float(t.get("next_at") or 0)}
             g = db_settings.find_one({"_id": "owner_guilds"}) or {}
             out["guilds"] = g.get("guilds", [])
             out["bot_online"] = (datetime.now(timezone.utc).timestamp() - float(g.get("updated_at", 0))) < 180

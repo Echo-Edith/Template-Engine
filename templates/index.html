@@ -1160,6 +1160,13 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <div class="editor-card"><div class="label-heading">FREE LIMITS (0 = no limit)</div>
 <div class="own-row"><input class="form-control" id="own-lim-ai" type="number" min="0" placeholder="AI per day"><button class="btn-glass own-small" onclick="ownLimit('ai_per_day','own-lim-ai')">Save</button></div>
 <div class="own-row"><input class="form-control" id="own-lim-bw" type="number" min="0" placeholder="Builds per week"><button class="btn-glass own-small" onclick="ownLimit('builds_per_week','own-lim-bw')">Save</button></div></div>
+<div class="editor-card"><div class="label-heading">TRIVIA EVENT</div>
+<label class="sec-chk"><input type="checkbox" id="own-tr-on"> The bot asks trivia by itself</label>
+<input class="form-control" id="own-tr-ch" placeholder="Channel ID" inputmode="numeric">
+<div class="own-row"><input class="form-control" id="own-tr-int" type="number" min="1" max="1440" placeholder="Minutes between questions"><button class="btn-glass own-small" onclick="ownTrivia(false)">Save</button></div>
+<div class="own-row"><button class="btn-glass" onclick="ownTrivia(true)">Ask a question now</button></div>
+<p class="own-note" id="own-tr-note"></p>
+<p class="own-note">People cannot start trivia with /trivia. The bot asks a question in this channel on its own. Prizes: 2, 4 or 6 points.</p></div>
 <div class="editor-card"><div class="label-heading">WEBSITE THEME</div>
 <div class="own-row"><select class="form-control" id="own-theme"></select><button class="btn-glass own-small" onclick="ownTheme()">Save</button></div></div>
 <div class="editor-card"><div class="label-heading">TE PREMIUM ROLES</div>
@@ -2871,6 +2878,13 @@ async function ownRefresh() {
     document.getElementById('own-free-text').textContent = 'Free mode is ' + (o.free_mode ? 'ON' : 'OFF');
     document.getElementById('own-lim-ai').value = o.limits.ai_per_day;
     document.getElementById('own-lim-bw').value = o.limits.builds_per_week;
+    if (o.trivia) {
+        const tr = o.trivia, active = document.activeElement && document.activeElement.id;
+        if (active !== 'own-tr-ch') document.getElementById('own-tr-ch').value = tr.channel_id;
+        if (active !== 'own-tr-int') document.getElementById('own-tr-int').value = tr.interval;
+        if (active !== 'own-tr-on') document.getElementById('own-tr-on').checked = tr.enabled;
+        document.getElementById('own-tr-note').textContent = tr.enabled ? 'On. Next question ' + (tr.next_at > Date.now() / 1000 ? 'in about ' + Math.max(1, Math.round((tr.next_at - Date.now() / 1000) / 60)) + ' min.' : 'in a few seconds.') : 'Off.';
+    }
     const th = document.getElementById('own-theme');
     th.innerHTML = (o.themes || []).map(t => '<option value="' + t + '">' + t + '</option>').join('');
     th.value = o.theme;
@@ -2913,6 +2927,11 @@ async function ownLoadBlocked() {
 function ownMaint(on) {
     if (on && !confirm('Turn on maintenance mode? Everyone except the staff will be locked out.')) return;
     ownJob('maintenance', {on, message: document.getElementById('own-maint-msg').value});
+}
+function ownTrivia(now) {
+    const ch = document.getElementById('own-tr-ch').value.trim();
+    if (!ch) { ownMsg('Type the channel ID first.', false); return; }
+    ownJob('trivia', {enabled: document.getElementById('own-tr-on').checked, channel_id: ch, interval: parseInt(document.getElementById('own-tr-int').value, 10) || 30, ask_now: now});
 }
 function ownFree(on) { ownJob('free', {on}); }
 function ownLimit(key, id) { ownJob('limit', {key, value: parseInt(document.getElementById(id).value, 10)}); }

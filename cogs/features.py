@@ -1826,6 +1826,45 @@ def get_limits() -> dict:
     return limits
 
 
+# -------------------------------------------------------------
+# TRIVIA EVENT: the bot asks a trivia question by itself in one channel, every N minutes.
+# The settings are saved in the database and changed in the Owner Panel.
+# -------------------------------------------------------------
+TRIVIA_DEFAULT_CHANNEL = "1569115319820230726"
+TRIVIA_DEFAULT_INTERVAL = 30       # minutes
+_TRIVIA = {"at": 0.0, "data": None}
+LOCAL_TRIVIA = {}
+
+
+def get_trivia_event(fresh: bool = False) -> dict:
+    now = time.time()
+    if not fresh and _TRIVIA["data"] is not None and now - _TRIVIA["at"] < 10:
+        return _TRIVIA["data"]
+    saved = dict(LOCAL_TRIVIA)
+    if db_settings is not None:
+        try:
+            saved = db_settings.find_one({"_id": "trivia_event"}) or {}
+        except Exception as e:
+            print(f"[Trivia Read Error] {e}")
+    data = {"enabled": bool(saved.get("enabled", True)), "channel_id": str(saved.get("channel_id") or TRIVIA_DEFAULT_CHANNEL),
+            "interval": int(saved.get("interval") or TRIVIA_DEFAULT_INTERVAL), "next_at": float(saved.get("next_at") or 0)}
+    _TRIVIA["at"], _TRIVIA["data"] = now, data
+    return data
+
+
+def set_trivia_event(**changes) -> bool:
+    """Saves some trivia event settings (enabled, channel_id, interval, next_at)."""
+    LOCAL_TRIVIA.update(changes)
+    _TRIVIA["at"] = 0.0
+    if db_settings is not None:
+        try:
+            db_settings.update_one({"_id": "trivia_event"}, {"$set": changes}, upsert=True)
+        except Exception as e:
+            print(f"[Trivia Save Error] {e}")
+            return False
+    return True
+
+
 def set_limit(key: str, value: int) -> bool:
     if key not in DEFAULT_LIMITS:
         return False
@@ -3941,6 +3980,28 @@ async def run_owner_job(bot, job: dict) -> str:
         value = _job_int(p, "value", 0, 100000)
         set_limit(key, value)
         return f"{key} is now {value}" + (" (no limit)." if value == 0 else ".")
+
+    if t == "trivia":
+        changes = {}
+        if "enabled" in p:
+            changes["enabled"] = bool(p.get("enabled"))
+        if str(p.get("channel_id", "")).strip():
+            ch = await _job_text_channel(bot, p)
+            changes["channel_id"] = str(ch.id)
+        if str(p.get("interval", "")).strip():
+            changes["interval"] = _job_int(p, "interval", 1, 1440)
+        current = {**get_trivia_event(True), **changes}
+        if p.get("ask_now"):
+            if not current["enabled"]:
+                raise ValueError("Turn the trivia event on first.")
+            changes["next_at"] = 1.0         # a time in the past: the bot asks at the next check
+        elif "interval" in changes or "enabled" in changes:
+            changes["next_at"] = time.time() + current["interval"] * 60
+        if not set_trivia_event(**changes):
+            raise ValueError("Could not save to the database.")
+        if p.get("ask_now"):
+            return f"A question will be asked in <#{current['channel_id']}> in a few seconds."
+        return (f"Trivia event is {'ON' if current['enabled'] else 'OFF'}: a question every {current['interval']} min in channel {current['channel_id']}.")
 
     if t == "theme":
         theme = str(p.get("theme", ""))

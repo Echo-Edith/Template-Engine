@@ -8,7 +8,7 @@ from typing import Optional, List
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 
 from cogs.features import (
@@ -37,6 +37,9 @@ from cogs.features import (
     get_roblox_cookie_header,
     get_user_points,
     is_user_blacklisted,
+    get_trivia_event,
+    set_trivia_event,
+    OWNER_IDS,
     add_user_points,
     get_top_leaderboard,
     parse_duration_to_timedelta,
@@ -4643,8 +4646,9 @@ def trivia_wins_today(uid: str) -> int:
 class TriviaView(discord.ui.View):
     LETTERS = "ABCD"
 
-    def __init__(self, data: dict, channel_id: int):
-        super().__init__(timeout=20)
+    def __init__(self, data: dict, channel_id: int, seconds: int = 20):
+        super().__init__(timeout=seconds)
+        self.seconds = seconds
         self.data, self.channel_id = data, channel_id
         options = [data["correct"]] + data["wrong"][:3]
         _RNG.shuffle(options)
@@ -4662,7 +4666,7 @@ class TriviaView(discord.ui.View):
 
     def make_embed(self, note: str = "", color: int = C_GAME) -> discord.Embed:
         lines = "\n".join(f"**{self.LETTERS[i]}.** {o}" for i, o in enumerate(self.options))
-        e = gamble_embed("Trivia", f"**{self.data['question']}**\n\n{lines}\n\n{note or 'First correct answer wins! You have 20 seconds. One try each.'}", color)
+        e = gamble_embed("Trivia", f"**{self.data['question']}**\n\n{lines}\n\n{note or f'First correct answer wins! You have {self.seconds} seconds. One try each.'}", color)
         e.add_field(name="Difficulty", value=f"`{self.data['difficulty']}`", inline=True)
         e.add_field(name="Prize", value=f"`{self.reward}` points", inline=True)
         return e
@@ -4715,6 +4719,42 @@ class GamblingCog(commands.Cog):
 
     async def cog_load(self):
         self.bot.loop.create_task(self.prepare_cards())
+        self.trivia_event_loop.start()
+
+    async def cog_unload(self):
+        self.trivia_event_loop.cancel()
+
+    @tasks.loop(seconds=15)
+    async def trivia_event_loop(self):
+        """Trivia is a timed event: the bot asks a question in the chosen channel every N minutes."""
+        try:
+            cfg = get_trivia_event()
+            if not cfg["enabled"]:
+                return
+            now = _time.time()
+            if cfg["next_at"] <= 0:              # first start: wait one full interval
+                set_trivia_event(next_at=now + cfg["interval"] * 60)
+                return
+            if now < cfg["next_at"]:
+                return
+            cid = int(cfg["channel_id"])
+            set_trivia_event(next_at=now + cfg["interval"] * 60)    # set first, so a slow question can never be asked twice
+            if cid in TRIVIA_ACTIVE:
+                return
+            channel = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
+            TRIVIA_ACTIVE.add(cid)
+            try:
+                view = TriviaView(await fetch_trivia(), cid, seconds=45)
+                view.message = await channel.send(embed=view.make_embed(), view=view)
+            except Exception:
+                TRIVIA_ACTIVE.discard(cid)
+                raise
+        except Exception as e:
+            print(f"[Trivia Event Error] {e}")
+
+    @trivia_event_loop.before_loop
+    async def before_trivia_event_loop(self):
+        await self.bot.wait_until_ready()
 
     async def prepare_cards(self):
         await self.bot.wait_until_ready()
@@ -4750,7 +4790,7 @@ class GamblingCog(commands.Cog):
         e.add_field(name="Higher or Lower", value=f"`{p}highlow <bet>`\nGuess if the next card is higher or lower. The payout follows the real chance. Cash out any time after one correct guess.", inline=False)
         e.add_field(name="Coin Flip Duel", value=f"`{p}coinflip @user <bet>`\nChallenge a friend. Both bet the same, the winner takes it all. No house edge.", inline=False)
         e.add_field(name="Crash", value=f"`{p}crash <bet>`\nA rocket climbs higher every step. Cash out before it crashes!", inline=False)
-        e.add_field(name="Trivia", value=f"`{p}trivia`\nAnswer first to win `2`-`6` points (up to `{TRIVIA_DAILY_LIMIT}` rewards a day).", inline=False)
+        e.add_field(name="Trivia", value=f"Timed event: the bot asks a question by itself. Use `{p}trivia` to see when the next one comes. First correct answer wins `2`-`6` points (up to `{TRIVIA_DAILY_LIMIT}` rewards a day).", inline=False)
         await ctx.send(embed=e)
 
     # ----- blackjack -----
@@ -4901,23 +4941,27 @@ class GamblingCog(commands.Cog):
         self.bot.loop.create_task(view.run())
 
     # ----- trivia -----
-    @commands.hybrid_command(name="trivia", description="A trivia question. The first person with the right answer wins points.")
+    @commands.hybrid_command(name="trivia", description="Trivia is a timed event. See when the next question comes.")
     async def trivia_cmd(self, ctx: commands.Context):
-        cid = ctx.channel.id
-        if cid in TRIVIA_ACTIVE:
-            return await ctx.send(embed=gamble_error("A question is already running in this channel."), ephemeral=True)
-        wait = 15 - (_time.monotonic() - TRIVIA_LAST.get(cid, -1e9))
-        if wait > 0:
-            return await ctx.send(embed=gamble_error(f"Please wait `{int(wait) + 1}` second(s) for the next question."), ephemeral=True)
-        TRIVIA_ACTIVE.add(cid)
-        TRIVIA_LAST[cid] = _time.monotonic()
-        try:
-            data = await fetch_trivia()
-            view = TriviaView(data, cid)
-            view.message = await ctx.send(embed=view.make_embed(), view=view)
-        except Exception:
-            TRIVIA_ACTIVE.discard(cid)
-            raise
+        cfg = get_trivia_event()
+        if str(ctx.author.id) in OWNER_IDS:       # the owner can test a question anywhere
+            cid = ctx.channel.id
+            if cid in TRIVIA_ACTIVE:
+                return await ctx.send(embed=gamble_error("A question is already running in this channel."), ephemeral=True)
+            TRIVIA_ACTIVE.add(cid)
+            try:
+                view = TriviaView(await fetch_trivia(), cid)
+                view.message = await ctx.send(embed=view.make_embed(), view=view)
+            except Exception:
+                TRIVIA_ACTIVE.discard(cid)
+                raise
+            return
+        if not cfg["enabled"]:
+            return await ctx.send(embed=discord.Embed(title="Trivia is locked", description="The trivia event is off right now.", color=C_PUSH), ephemeral=True)
+        when = f"<t:{int(cfg['next_at'])}:R>" if cfg["next_at"] > _time.time() else "soon"
+        e = discord.Embed(title="\U0001F512 Trivia is a timed event", color=C_PUSH,
+                          description=f"Questions are asked by the bot in <#{cfg['channel_id']}> every `{cfg['interval']}` minutes.\nNext question: {when}.")
+        await ctx.send(embed=e, ephemeral=True)
 
     # ----- higher / lower -----
     @commands.hybrid_command(name="highlow", aliases=["hl", "higherlower"], description="Guess if the next card is higher or lower (bet 1-10).")
