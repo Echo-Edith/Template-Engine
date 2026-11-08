@@ -1095,9 +1095,17 @@ background: var(--accent-purple-glow) !important;
 .own-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; align-items:center; }
 .own-row > * { flex:1 1 140px; min-width:0; }
 .own-row > .own-small { flex:0 1 auto; }
-.own-msg { margin:10px 0; padding:10px 12px; border:1px dashed var(--panel-border); font-size:0.85rem; display:none; word-break:break-word; }
-.own-msg.ok { border-color: var(--accent-green); color: var(--accent-green); }
-.own-msg.err { border-color: var(--accent-red); color: var(--accent-red); }
+.own-toast { position:fixed; left:50%; bottom:18px; transform:translate(-50%, 24px); width:min(calc(100vw - 24px), 520px); z-index:9999;
+  display:flex; gap:12px; align-items:flex-start; padding:12px 14px 12px 12px; background:var(--panel-bg); color:var(--text-title);
+  border:2px solid var(--panel-border); border-left:8px solid var(--toast-c, var(--accent-purple)); box-shadow:5px 5px 0 rgba(0,0,0,.4);
+  opacity:0; pointer-events:none; transition:opacity .18s, transform .18s; }
+.own-toast.show { opacity:1; transform:translate(-50%, 0); pointer-events:auto; }
+.own-toast.ok { --toast-c: var(--accent-green); } .own-toast.err { --toast-c: var(--accent-red); } .own-toast.work { --toast-c: var(--accent-gold); }
+.own-toast i.t-icon { color: var(--toast-c); font-size:1.1rem; margin-top:2px; }
+.own-toast .t-body { flex:1; min-width:0; }
+.own-toast .t-title { font-family: var(--mono); font-size:.68rem; letter-spacing:.12em; text-transform:uppercase; color: var(--toast-c); margin-bottom:3px; }
+.own-toast .t-text { font-size:.88rem; line-height:1.35; word-break:break-word; }
+.own-toast .t-x { background:none; border:none; color:var(--text-sub); cursor:pointer; font-size:1rem; padding:0 2px; }
 .own-stat { display:grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap:8px; }
 .own-stat div { border:1px solid var(--glass-inner-border); padding:8px; text-align:center; background: var(--glass-inner-bg); }
 .own-stat b { display:block; font-size:1.2rem; }
@@ -1118,7 +1126,7 @@ background: var(--accent-purple-glow) !important;
 <button class="btn-glass btn-secondary-link" data-tab="blocked">Blocked</button>
 <button class="btn-glass btn-secondary-link" data-tab="users">Users</button>
 </div>
-<div id="own-msg" class="own-msg"></div>
+
 
 <div class="own-sec on" id="own-overview">
 <div class="editor-card"><div class="label-heading">STATUS</div><div id="own-status" class="own-stat"></div></div>
@@ -1204,6 +1212,7 @@ background: var(--accent-purple-glow) !important;
 </div>
 
 <button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
+
 </div>
 {% endif %}
 
@@ -2646,13 +2655,21 @@ function resetBuilder() {
 }
 </script>
 {% if is_owner %}
+<div id="own-toast" class="own-toast" role="status" aria-live="polite"><i class="t-icon fa-solid"></i><div class="t-body"><div class="t-title"></div><div class="t-text"></div></div><button class="t-x" onclick="ownToastHide()" aria-label="Close"><i class="fa-solid fa-xmark"></i></button></div>
 <script>
 // OWNER PANEL (this script is only sent to the owner)
 let OWN = {guilds: [], loaded: false, invites: {}};
-function ownMsg(text, ok) {
-    const el = document.getElementById('own-msg');
-    el.textContent = text; el.className = 'own-msg ' + (ok ? 'ok' : 'err'); el.style.display = 'block';
-    el.scrollIntoView({block: 'nearest'});
+let OWN_TOAST_TIMER = null;
+function ownToastHide() { document.getElementById('own-toast').classList.remove('show'); }
+function ownMsg(text, ok, working) {
+    const el = document.getElementById('own-toast');
+    const state = working ? 'work' : (ok ? 'ok' : 'err');
+    el.className = 'own-toast show ' + state;
+    el.querySelector('.t-icon').className = 't-icon fa-solid ' + (working ? 'fa-spinner fa-spin' : (ok ? 'fa-circle-check' : 'fa-circle-exclamation'));
+    el.querySelector('.t-title').textContent = working ? 'Working' : (ok ? 'Done' : 'Problem');
+    el.querySelector('.t-text').textContent = text;
+    clearTimeout(OWN_TOAST_TIMER);
+    if (!working) OWN_TOAST_TIMER = setTimeout(ownToastHide, ok ? 5000 : 9000);
 }
 async function ownApi(url, body) {
     const opt = body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {};
@@ -2662,10 +2679,10 @@ async function ownApi(url, body) {
     return j;
 }
 async function ownJob(type, params, after) {
-    ownMsg('Sending...', true);
+    ownMsg('Sending to the bot...', true, true);
     const j = await ownApi('/api/owner/job', {type, params});
     if (!j.success) { ownMsg(j.error || 'Failed.', false); return; }
-    ownMsg('Waiting for the bot...', true);
+    ownMsg('Waiting for the bot...', true, true);
     for (let i = 0; i < 90; i++) {
         await new Promise(r => setTimeout(r, i < 4 ? 350 : 700));
         const s = await ownApi('/api/owner/job/' + j.id);
