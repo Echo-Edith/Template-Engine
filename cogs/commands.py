@@ -4425,6 +4425,290 @@ class HigherLowerView(discord.ui.View):
                     print(f"[HigherLower Timeout Error] {e}")
 
 
+
+# ---------------- coin flip duel ----------------
+class CoinFlipView(discord.ui.View):
+    def __init__(self, challenger, target, bet: int):
+        super().__init__(timeout=60)
+        self.challenger, self.target, self.bet = challenger, target, bet
+        self.message = None
+        self.done = False
+        self.lock = asyncio.Lock()
+
+    async def refund(self, text: str, color: int = C_PUSH) -> discord.Embed:
+        self.done = True
+        for item in self.children:
+            item.disabled = True
+        gamble_end(str(self.challenger.id), self.bet)    # the challenger gets the bet back
+        return gamble_embed("Coin Flip Duel", text, color)
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            if interaction.user.id != self.target.id:
+                return await interaction.response.send_message(f"Only {self.target.mention} can accept this duel.", ephemeral=True)
+            error = gamble_begin(str(self.target.id), self.bet)
+            if error:
+                return await interaction.response.send_message(embed=gamble_error(error), ephemeral=True)
+            self.done = True
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(embed=gamble_embed("Coin Flip Duel", f"\U0001FA99 The coin is flying...\n{self.challenger.mention} vs {self.target.mention} for `{self.bet * 2}` points.", C_GAME), view=self)
+            await asyncio.sleep(2)
+            winner, loser = _RNG.sample([self.challenger, self.target], 2)   # a fair 50/50, decided only on the bot
+            win_balance = gamble_end(str(winner.id), self.bet * 2)
+            lose_balance = gamble_end(str(loser.id), 0)
+            e = gamble_embed("Coin Flip Duel", f"\U0001FA99 {winner.mention} wins the flip!", C_WIN)
+            e.add_field(name="Winner gets", value=f"`+{self.bet}`", inline=True)
+            e.add_field(name=f"{winner.display_name}", value=f"`{win_balance:,}`", inline=True)
+            e.add_field(name=f"{loser.display_name}", value=f"`{lose_balance:,}` (`-{self.bet}`)", inline=True)
+            try:
+                await self.message.edit(embed=e, view=self)
+            except Exception as err:
+                print(f"[CoinFlip Edit Error] {err}")
+            self.stop()
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            if interaction.user.id not in (self.target.id, self.challenger.id):
+                return await interaction.response.send_message("This duel is not for you.", ephemeral=True)
+            embed = await self.refund(f"{interaction.user.mention} ended the duel. The bet was returned.")
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+
+    async def on_timeout(self):
+        async with self.lock:
+            if not self.done:
+                embed = await self.refund(f"{self.target.mention} did not answer. The bet was returned to {self.challenger.mention}.")
+                try:
+                    await self.message.edit(embed=embed, view=self)
+                except Exception as err:
+                    print(f"[CoinFlip Timeout Error] {err}")
+
+
+# ---------------- crash ----------------
+CRASH_EDGE = 0.94        # the chance to reach x is 0.94 / x, so every cash-out plan returns at most 94 percent
+CRASH_GROWTH = 1.18
+CRASH_TICK = 1.5         # seconds between two steps
+CRASH_MAX = 50.0
+
+
+def crash_point() -> float:
+    """Secret crash multiplier. The chance that it is at least x equals 0.94 / x (x from 1)."""
+    u = _RNG.random()
+    return max(1.0, int(CRASH_EDGE * 100 / (1 - u)) / 100)
+
+
+class CrashView(discord.ui.View):
+    def __init__(self, user, bet: int, crash_at: float):
+        super().__init__(timeout=None)
+        self.user, self.bet, self.crash_at = user, bet, crash_at
+        self.step, self.mult = 0, 1.0
+        self.message = None
+        self.done = False
+        self.lock = asyncio.Lock()
+
+    def cash_value(self) -> int:
+        return min(HL_MAX_PAYOUT, int(self.bet * self.mult))
+
+    def make_embed(self, note: str = "", color: int = C_GAME, final: bool = False, payout: int = 0, balance: Optional[int] = None) -> discord.Embed:
+        icon = "\U0001F4A5" if final and payout == 0 else "\U0001F680"
+        e = gamble_embed("Crash", f"## {icon} x{self.mult:.2f}\n{note or 'Press Cash Out before the rocket crashes!'}", color)
+        e.add_field(name="Bet", value=f"`{self.bet}`", inline=True)
+        if final:
+            e.add_field(name="Result", value=gamble_net(payout, self.bet), inline=True)
+            e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
+        else:
+            e.add_field(name="Cash out now", value=f"`{self.cash_value()}`", inline=True)
+        return e
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message("This is not your game. Start your own with `/crash`.", ephemeral=True)
+            return False
+        return True
+
+    def close(self, payout: int, note: str, color: int) -> discord.Embed:
+        self.done = True
+        for item in self.children:
+            item.disabled = True
+        balance = gamble_end(str(self.user.id), payout)
+        return self.make_embed(note, color, True, payout, balance)
+
+    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success)
+    async def cash(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            payout = self.cash_value()
+            embed = self.close(payout, f"You cashed out at `x{self.mult:.2f}`!", C_WIN if payout > self.bet else C_PUSH)
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+
+    async def run(self):
+        """The rocket climbs one step at a time until it crashes (the crash point was chosen before the first step)."""
+        try:
+            while True:
+                await asyncio.sleep(CRASH_TICK)
+                async with self.lock:
+                    if self.done:
+                        return
+                    self.step += 1
+                    nxt = round(CRASH_GROWTH ** self.step, 2)
+                    if nxt >= self.crash_at:
+                        self.mult = self.crash_at
+                        embed = self.close(0, f"The rocket crashed at `x{self.crash_at:.2f}`. You lost `{self.bet}` points.", C_LOSE)
+                    elif nxt >= CRASH_MAX:
+                        self.mult = nxt
+                        embed = self.close(self.cash_value(), "The rocket hit the top! Paid out automatically.", C_WIN)
+                    else:
+                        self.mult = nxt
+                        self.cash.label = f"Cash Out ({self.cash_value()})"
+                        embed = self.make_embed()
+                    await self.message.edit(embed=embed, view=self)
+                    if self.done:
+                        self.stop()
+                        return
+        except Exception as e:
+            print(f"[Crash Error] {e}")
+            if not self.done:       # the message is gone: cash out what the player has
+                self.done = True
+                gamble_end(str(self.user.id), self.cash_value())
+
+
+# ---------------- trivia ----------------
+TRIVIA_REWARD = {"easy": 2, "medium": 4, "hard": 6}
+TRIVIA_DAILY_LIMIT = 10           # rewarded answers per person per day
+TRIVIA_ACTIVE = set()             # channels with a running question
+TRIVIA_LAST = {}
+TRIVIA_WINS = {}                  # user id -> (date, count)
+TRIVIA_BANK = [
+    ("What is the capital of Japan?", "Tokyo", ["Osaka", "Kyoto", "Nagoya"], "easy"),
+    ("How many continents are there?", "7", ["5", "6", "8"], "easy"),
+    ("Which planet is known as the Red Planet?", "Mars", ["Venus", "Jupiter", "Mercury"], "easy"),
+    ("What is the largest ocean on Earth?", "Pacific Ocean", ["Atlantic Ocean", "Indian Ocean", "Arctic Ocean"], "easy"),
+    ("How many days are there in a leap year?", "366", ["365", "364", "367"], "easy"),
+    ("Which animal is the largest mammal?", "Blue whale", ["African elephant", "Giraffe", "Hippopotamus"], "easy"),
+    ("What color do you get by mixing blue and yellow?", "Green", ["Purple", "Orange", "Brown"], "easy"),
+    ("How many players are on the field for one soccer team?", "11", ["9", "10", "12"], "easy"),
+    ("What gas do plants take in from the air?", "Carbon dioxide", ["Oxygen", "Nitrogen", "Hydrogen"], "easy"),
+    ("Which company created the game Minecraft?", "Mojang", ["Nintendo", "Valve", "Epic Games"], "easy"),
+    ("What is the chemical symbol for gold?", "Au", ["Ag", "Go", "Gd"], "medium"),
+    ("Who painted the Mona Lisa?", "Leonardo da Vinci", ["Michelangelo", "Raphael", "Vincent van Gogh"], "medium"),
+    ("What is the smallest prime number?", "2", ["1", "3", "0"], "medium"),
+    ("Which country has the most people living in it (2023 and later)?", "India", ["China", "United States", "Indonesia"], "medium"),
+    ("What is the hardest natural material?", "Diamond", ["Gold", "Iron", "Quartz"], "medium"),
+    ("In which year did the first Roblox game platform launch to the public?", "2006", ["2001", "2010", "2013"], "medium"),
+    ("Which element has the atomic number 1?", "Hydrogen", ["Helium", "Oxygen", "Carbon"], "medium"),
+    ("How many bones does an adult human body have?", "206", ["186", "256", "300"], "medium"),
+    ("What is the longest river in South America?", "Amazon", ["Orinoco", "Parana", "Madeira"], "medium"),
+    ("Which language has the most native speakers?", "Mandarin Chinese", ["English", "Spanish", "Hindi"], "medium"),
+    ("What is the speed of light in a vacuum (about)?", "300,000 km/s", ["150,000 km/s", "30,000 km/s", "3,000,000 km/s"], "hard"),
+    ("Who wrote the play Hamlet?", "William Shakespeare", ["Christopher Marlowe", "Charles Dickens", "Ben Jonson"], "hard"),
+    ("Which planet has the most known moons (as of 2023)?", "Saturn", ["Jupiter", "Uranus", "Neptune"], "hard"),
+    ("What is the capital of Australia?", "Canberra", ["Sydney", "Melbourne", "Perth"], "hard"),
+    ("What is the square root of 144?", "12", ["14", "11", "13"], "easy"),
+]
+
+
+async def fetch_trivia() -> dict:
+    """Gets one question from the Open Trivia Database. If that fails, a question from the built-in list is used."""
+    import html
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("https://opentdb.com/api.php?amount=1&type=multiple") as resp:
+                data = await resp.json()
+        if data.get("response_code") == 0 and data.get("results"):
+            q = data["results"][0]
+            return {"question": html.unescape(q["question"]), "correct": html.unescape(q["correct_answer"]),
+                    "wrong": [html.unescape(x) for x in q["incorrect_answers"]], "difficulty": q.get("difficulty", "medium")}
+    except Exception as e:
+        print(f"[Trivia API Error] {e}")
+    question, correct, wrong, difficulty = _RNG.choice(TRIVIA_BANK)
+    return {"question": question, "correct": correct, "wrong": list(wrong), "difficulty": difficulty}
+
+
+def trivia_wins_today(uid: str) -> int:
+    today = datetime.now(timezone(timedelta(hours=9))).date().isoformat()
+    day, count = TRIVIA_WINS.get(uid, (today, 0))
+    return count if day == today else 0
+
+
+class TriviaView(discord.ui.View):
+    LETTERS = "ABCD"
+
+    def __init__(self, data: dict, channel_id: int):
+        super().__init__(timeout=20)
+        self.data, self.channel_id = data, channel_id
+        options = [data["correct"]] + data["wrong"][:3]
+        _RNG.shuffle(options)
+        self.options = options
+        self.correct_index = options.index(data["correct"])
+        self.reward = TRIVIA_REWARD.get(data["difficulty"], 4)
+        self.locked_out = set()
+        self.message = None
+        self.done = False
+        self.lock = asyncio.Lock()
+        for i in range(len(options)):
+            button = discord.ui.Button(label=self.LETTERS[i], style=discord.ButtonStyle.primary)
+            button.callback = self.make_callback(i)
+            self.add_item(button)
+
+    def make_embed(self, note: str = "", color: int = C_GAME) -> discord.Embed:
+        lines = "\n".join(f"**{self.LETTERS[i]}.** {o}" for i, o in enumerate(self.options))
+        e = gamble_embed("Trivia", f"**{self.data['question']}**\n\n{lines}\n\n{note or 'First correct answer wins! You have 20 seconds. One try each.'}", color)
+        e.add_field(name="Difficulty", value=f"`{self.data['difficulty']}`", inline=True)
+        e.add_field(name="Prize", value=f"`{self.reward}` points", inline=True)
+        return e
+
+    def make_callback(self, index: int):
+        async def callback(interaction: discord.Interaction):
+            async with self.lock:
+                if self.done:
+                    return await interaction.response.defer()
+                uid = interaction.user.id
+                if uid in self.locked_out:
+                    return await interaction.response.send_message("You already tried this question.", ephemeral=True)
+                if index != self.correct_index:
+                    self.locked_out.add(uid)
+                    return await interaction.response.send_message("Wrong answer! You are out for this question.", ephemeral=True)
+                self.done = True
+                for item in self.children:
+                    item.disabled = True
+                key = str(uid)
+                today = datetime.now(timezone(timedelta(hours=9))).date().isoformat()
+                count = trivia_wins_today(key)
+                if count < TRIVIA_DAILY_LIMIT:
+                    TRIVIA_WINS[key] = (today, count + 1)
+                    balance = add_user_points(key, self.reward)
+                    note = f"✅ {interaction.user.mention} got it right: **{self.options[index]}**\nThey win `{self.reward}` points! Balance: `{balance:,}`"
+                else:
+                    note = f"✅ {interaction.user.mention} got it right: **{self.options[index]}**\nNo points: the daily limit of `{TRIVIA_DAILY_LIMIT}` rewards is used up."
+                TRIVIA_ACTIVE.discard(self.channel_id)
+                await interaction.response.edit_message(embed=self.make_embed(note, C_WIN), view=self)
+                self.stop()
+        return callback
+
+    async def on_timeout(self):
+        async with self.lock:
+            if self.done:
+                return
+            self.done = True
+            for item in self.children:
+                item.disabled = True
+            TRIVIA_ACTIVE.discard(self.channel_id)
+            try:
+                await self.message.edit(embed=self.make_embed(f"⏰ Time is up! The answer was **{self.options[self.correct_index]}**.", C_LOSE), view=self)
+            except Exception as e:
+                print(f"[Trivia Timeout Error] {e}")
+
+
 class GamblingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -4464,6 +4748,9 @@ class GamblingCog(commands.Cog):
         e.add_field(name="Roulette", value=f"`{p}roulette <bet> <choice>`\nChoices: `red` `black` `even` `odd` `low` `high` (pay `2x`), `1st` `2nd` `3rd` dozen (pay `3x`), or a number `0`-`36` (pays `36x`). There is one green `0`.", inline=False)
         e.add_field(name="Slots", value=f"`{p}slots <bet>`\nThree matching symbols win up to `250x`. Exactly two cherries pay `2x`. Return to player: `{slot_rtp() * 100:.1f}%`.", inline=False)
         e.add_field(name="Higher or Lower", value=f"`{p}highlow <bet>`\nGuess if the next card is higher or lower. The payout follows the real chance. Cash out any time after one correct guess.", inline=False)
+        e.add_field(name="Coin Flip Duel", value=f"`{p}coinflip @user <bet>`\nChallenge a friend. Both bet the same, the winner takes it all. No house edge.", inline=False)
+        e.add_field(name="Crash", value=f"`{p}crash <bet>`\nA rocket climbs higher every step. Cash out before it crashes!", inline=False)
+        e.add_field(name="Trivia", value=f"`{p}trivia`\nAnswer first to win `2`-`6` points (up to `{TRIVIA_DAILY_LIMIT}` rewards a day).", inline=False)
         await ctx.send(embed=e)
 
     # ----- blackjack -----
@@ -4572,6 +4859,65 @@ class GamblingCog(commands.Cog):
         e.add_field(name="Result", value=gamble_net(payout, bet), inline=True)
         e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
         await msg.edit(embed=e)
+
+
+    # ----- coin flip duel -----
+    @commands.hybrid_command(name="coinflip", aliases=["cf", "duel"], description="Challenge someone to a coin flip for TE points (bet 1-10 each).")
+    @app_commands.describe(user="Who you want to play against.", bet="How many points each of you bets (1-10).")
+    async def coinflip_cmd(self, ctx: commands.Context, user: discord.Member, bet: int):
+        if user.bot or user.id == ctx.author.id:
+            return await ctx.send(embed=gamble_error("Choose another real person to play against."), ephemeral=True)
+        if is_user_blacklisted(user.id):
+            return await ctx.send(embed=gamble_error("That person cannot play."), ephemeral=True)
+        error = gamble_begin(str(ctx.author.id), bet)
+        if error:
+            return await ctx.send(embed=gamble_error(error), ephemeral=True)
+        view = CoinFlipView(ctx.author, user, bet)
+        embed = gamble_embed("Coin Flip Duel", f"{ctx.author.mention} challenges {user.mention}!\nEach person bets `{bet}` points. The winner takes `{bet * 2}`.\n{user.mention}, press **Accept** within 60 seconds.", C_GAME)
+        try:
+            view.message = await ctx.send(content=user.mention, embed=embed, view=view, allowed_mentions=discord.AllowedMentions(users=[user]))
+        except Exception:
+            gamble_end(str(ctx.author.id), bet)     # the challenge could not be sent: give the bet back
+            raise
+
+    # ----- crash -----
+    @commands.hybrid_command(name="crash", description="Cash out before the rocket crashes (bet 1-10).")
+    @app_commands.describe(bet="How many points to bet (1-10).")
+    async def crash_cmd(self, ctx: commands.Context, bet: int):
+        uid = str(ctx.author.id)
+        error = gamble_begin(uid, bet)
+        if error:
+            return await ctx.send(embed=gamble_error(error), ephemeral=True)
+        crash_at = crash_point()               # chosen now, nobody can change it
+        view = CrashView(ctx.author, bet, crash_at)
+        if crash_at <= 1.0:                    # some rockets crash right at the start
+            embed = view.close(0, "The rocket crashed at once! Better luck next time.", C_LOSE)
+            return await ctx.send(embed=embed)
+        try:
+            view.message = await ctx.send(embed=view.make_embed(), view=view)
+        except Exception:
+            gamble_end(uid, bet)
+            raise
+        self.bot.loop.create_task(view.run())
+
+    # ----- trivia -----
+    @commands.hybrid_command(name="trivia", description="A trivia question. The first person with the right answer wins points.")
+    async def trivia_cmd(self, ctx: commands.Context):
+        cid = ctx.channel.id
+        if cid in TRIVIA_ACTIVE:
+            return await ctx.send(embed=gamble_error("A question is already running in this channel."), ephemeral=True)
+        wait = 15 - (_time.monotonic() - TRIVIA_LAST.get(cid, -1e9))
+        if wait > 0:
+            return await ctx.send(embed=gamble_error(f"Please wait `{int(wait) + 1}` second(s) for the next question."), ephemeral=True)
+        TRIVIA_ACTIVE.add(cid)
+        TRIVIA_LAST[cid] = _time.monotonic()
+        try:
+            data = await fetch_trivia()
+            view = TriviaView(data, cid)
+            view.message = await ctx.send(embed=view.make_embed(), view=view)
+        except Exception:
+            TRIVIA_ACTIVE.discard(cid)
+            raise
 
     # ----- higher / lower -----
     @commands.hybrid_command(name="highlow", aliases=["hl", "higherlower"], description="Guess if the next card is higher or lower (bet 1-10).")
