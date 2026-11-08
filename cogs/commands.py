@@ -4502,15 +4502,34 @@ class GamblingCog(commands.Cog):
         if error:
             return await ctx.send(embed=gamble_error(error), ephemeral=True)
         label, test, multiplier = parsed
-        number = _RNG.randrange(37)
+        number = _RNG.randrange(37)          # decided now; the timer below only shows it
         won = bool(test(number))
         payout = bet * multiplier if won else 0
+        msg = None
+        try:
+            spin = gamble_embed("Roulette", "\U0001F3A1 The wheel is spinning...", C_GAME)
+            spin.add_field(name="Your bet", value=f"`{label}`", inline=True)
+            spin.add_field(name="Stake", value=f"`{bet}`", inline=True)
+            msg = await ctx.send(embed=spin)
+            for left in (3, 2, 1):
+                await asyncio.sleep(1.1)
+                fake = _RNG.randrange(37)    # a number flying past, only for the look
+                spin.description = f"\U0001F3A1 The wheel is spinning...\n## {roulette_color(fake)} `{fake}`\nResult in `{left}`..."
+                await msg.edit(embed=spin)
+            await asyncio.sleep(1.1)
+        except Exception as e:
+            print(f"[Roulette Animation Error] {e}")   # the result is still paid below
         balance = gamble_end(uid, payout)
         e = gamble_embed("Roulette", f"The ball landed on {roulette_color(number)} `{number}`.", C_WIN if won else C_LOSE)
         e.add_field(name="Your bet", value=f"`{label}`", inline=True)
         e.add_field(name="Stake", value=f"`{bet}`", inline=True)
         e.add_field(name="Result", value=gamble_net(payout, bet), inline=True)
         e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
+        if msg is not None:
+            try:
+                return await msg.edit(embed=e)
+            except Exception as err:
+                print(f"[Roulette Edit Error] {err}")
         await ctx.send(embed=e)
 
     @roulette_cmd.autocomplete("choice")
