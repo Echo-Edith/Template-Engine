@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ site_theme or 'blueprint' }}">
+<html lang="en" data-theme="{{ site_theme or 'blueprint' }}" data-free="{{ 1 if free_mode else 0 }}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -14,7 +14,7 @@ const DISCORD_CLIENT_ID = "{{ discord_client_id or '' }}".trim();
 const IS_USER_LOGGED_IN = {{ 'true' if user else 'false' }};
 const IS_TE_PREMIUM = {{ 'true' if is_premium else 'false' }};
 const PENDING_SHARE = {{ (pending_share or '')|tojson }};
-const FREE_MODE = {{ 'true' if free_mode else 'false' }};
+let FREE_MODE = {{ 'true' if free_mode else 'false' }};
 
 function checkAuthStatus() {
     const btn = document.getElementById('verify-continue-btn');
@@ -976,6 +976,13 @@ background: var(--accent-purple-glow) !important;
 @keyframes deco-fall-sway { 0% { translate: 0 -8vh; rotate: 0deg; } 50% { translate: 30px 50vh; rotate: 180deg; } 100% { translate: -10px 108vh; rotate: 360deg; } }
 @media (max-width: 640px) { .hide-sm { display: none; } }
 @media (prefers-reduced-motion: reduce) { .float, .flap, .spin, .snow { animation: none; } .snow { display: none; } }
+html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { display:none !important; }
+#live-lock { position:fixed; inset:0; z-index:99999; display:none; align-items:center; justify-content:center; padding:16px; background:var(--bg-base); }
+#live-lock.show { display:flex; }
+#live-lock .box { max-width:460px; text-align:center; border:2px solid var(--accent-gold); background:var(--panel-bg); color:var(--text-title); padding:24px; box-shadow:8px 8px 0 rgba(0,0,0,.4); }
+#live-lock h2 { margin:0 0 10px; color:var(--accent-gold); text-transform:uppercase; letter-spacing:.08em; font-size:1.2rem; }
+#live-banner { position:fixed; left:50%; top:12px; transform:translateX(-50%); width:min(calc(100vw - 24px), 520px); z-index:9998; display:none; align-items:center; gap:10px; justify-content:space-between; padding:10px 12px; background:var(--panel-bg); color:var(--text-title); border:2px solid var(--accent-gold); box-shadow:4px 4px 0 rgba(0,0,0,.4); font-size:.85rem; }
+#live-banner.show { display:flex; }
 </style>
 </head>
 <body>
@@ -1400,7 +1407,7 @@ background: var(--accent-purple-glow) !important;
 <i class="fa-solid fa-circle-check fa-3x" style="color: var(--accent-green); margin-bottom: 18px;"></i>
 <div class="brand-header">
 <h1 id="final-title-heading">Blueprint Submitted!</h1>
-<p id="final-desc-text">{% if free_mode %}Your blueprint has been sent to the bot. It will be built automatically.{% else %}Your blueprint has been sent to the bot. It will be built automatically once your payment (points or TE Premium) is verified.{% endif %}</p>
+<p id="final-desc-text"><span data-fm="on">Your blueprint has been sent to the bot. It will be built automatically.</span><span data-fm="off">Your blueprint has been sent to the bot. It will be built automatically once your payment (points or TE Premium) is verified.</span></p>
 </div>
 <div class="editor-card" id="build-progress-card" style="display:none; text-align:left;">
 <div class="label-heading">BUILD PROGRESS</div>
@@ -1474,17 +1481,14 @@ Continue in 5s
 </h3>
 <i class="fa-solid fa-xmark" onclick="closePaymentNoticeModal()" style="cursor:pointer; font-size:1.2rem;"></i>
 </div>
-{% if free_mode %}
-<div class="notice-badge" style="border-color: var(--accent-green); color: var(--accent-green);">
+<div data-fm="on" class="notice-badge" style="border-color: var(--accent-green); color: var(--accent-green);">
 <strong>Free right now:</strong> Building a server layout needs no payment at the moment. Submit your design and the bot builds it.
 </div>
-{% else %}
-<div class="notice-badge">
+<div data-fm="off" class="notice-badge">
 <strong><i class="fa-solid fa-circle-info"></i> Notice:</strong> Building a custom server layout costs server points, unless you have an active <strong>TE Premium</strong> subscription. Standard members also get a limited number of free AI generations per day and server builds per week. TE Premium has no limits.
 </div>
-{% endif %}
 <p style="font-size:0.88rem; color: var(--text-sub); margin-bottom: 20px; line-height: 1.5;">
-{% if free_mode %}Submitting this design sends your blueprint to the bot. It builds your server automatically. No staff review is needed.{% else %}Submitting this design sends your blueprint to the bot. The bot then DMs you the ways to pay (server points or TE Premium) and builds your server automatically once your payment is verified. No staff review is needed.{% endif %}
+<span data-fm="on">Submitting this design sends your blueprint to the bot. It builds your server automatically. No staff review is needed.</span><span data-fm="off">Submitting this design sends your blueprint to the bot. The bot then DMs you the ways to pay (server points or TE Premium) and builds your server automatically once your payment is verified. No staff review is needed.</span>
 </p>
 <div style="display:flex; gap:10px;">
 <button class="btn-glass btn-secondary" onclick="closePaymentNoticeModal()">
@@ -2624,7 +2628,7 @@ async function handleSubmitDesign() {
                 if (desc) desc.innerText = "Your layout blueprint has been sent directly to the bot for auto-deployment!";
             } else {
                 if (heading) heading.innerText = "Blueprint Submitted!";
-                if (desc) desc.innerText = {{ 'true' if free_mode else 'false' }}
+                if (desc) desc.innerText = FREE_MODE
                     ? "Your blueprint has been sent to the bot. It will be built automatically."
                     : "Your blueprint has been sent to the bot. It will be built automatically once your payment (points or TE Premium) is verified.";
             }
@@ -2659,6 +2663,37 @@ function resetBuilder() {
     navigateTo('page-generator');
 }
 </script>
+<div id="live-lock"><div class="box"><h2>Back soon</h2><p id="live-lock-text"></p><small style="color:var(--text-sub);">This page will open again by itself.</small></div></div>
+<div id="live-banner"><span>Your plan changed. Refresh to see the new features.</span><button class="btn-glass" onclick="location.reload()" style="padding:6px 10px; font-size:.75rem;">Refresh</button></div>
+<script>
+// LIVE UPDATES: asks the server every few seconds, so changes made in the Owner Panel show up without a refresh.
+let LIVE_POLLING = false;
+async function livePoll() {
+    if (LIVE_POLLING) return;
+    LIVE_POLLING = true;
+    try {
+        const r = await fetch('/api/live', {cache: 'no-store'});
+        if (!r.ok) return;
+        const j = await r.json();
+        if (j.theme && document.documentElement.dataset.theme !== j.theme) document.documentElement.dataset.theme = j.theme;
+        const free = !!j.free_mode;
+        if (free !== FREE_MODE) {
+            FREE_MODE = free;
+            document.documentElement.dataset.free = free ? '1' : '0';
+            if (typeof refreshUsage === 'function') refreshUsage();
+        }
+        const lock = document.getElementById('live-lock');
+        document.getElementById('live-lock-text').textContent = (j.maintenance && j.maintenance.message) || '';
+        lock.classList.toggle('show', !!(j.maintenance && j.maintenance.on));
+        document.getElementById('live-banner').classList.toggle('show', !!j.premium !== IS_TE_PREMIUM);
+    } catch (e) {
+    } finally {
+        LIVE_POLLING = false;
+    }
+}
+setInterval(() => { if (!document.hidden) livePoll(); }, 6000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) livePoll(); });
+</script>
 {% if is_owner %}
 <div id="own-toast" class="own-toast" role="status" aria-live="polite"><i class="t-icon fa-solid"></i><div class="t-body"><div class="t-title"></div><div class="t-text"></div></div><button class="t-x" onclick="ownToastHide()" aria-label="Close"><i class="fa-solid fa-xmark"></i></button></div>
 <script>
@@ -2691,7 +2726,7 @@ async function ownJob(type, params, after) {
     for (let i = 0; i < 90; i++) {
         await new Promise(r => setTimeout(r, i < 4 ? 350 : 700));
         const s = await ownApi('/api/owner/job/' + j.id);
-        if (s.status === 'done') { ownMsg(s.result || 'Done.', true); if (after) after(s.result); ownRefresh(); return; }
+        if (s.status === 'done') { ownMsg(s.result || 'Done.', true); if (after) after(s.result); ownRefresh(); livePoll(); return; }
         if (s.status === 'error') { ownMsg(s.result || 'The bot could not do this.', false); ownRefresh(); return; }
     }
     ownMsg('The bot did not answer in 45 seconds. Is the bot online?', false);

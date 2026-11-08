@@ -1239,7 +1239,7 @@ def get_maintenance() -> dict:
 
 @app.before_request
 def maintenance_gate():
-    if request.path.startswith(("/static/", "/login", "/callback", "/logout")):
+    if request.path.startswith(("/static/", "/login", "/callback", "/logout", "/api/live")):
         return None
     m = get_maintenance()
     if not m["on"] or is_owner() or request.path.startswith("/api/owner/"):
@@ -1257,6 +1257,23 @@ MAINTENANCE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"
 h1{margin:0 0 10px;color:#c9962b;font-size:1.3rem;text-transform:uppercase;letter-spacing:.08em}p{margin:0 0 8px;line-height:1.5;word-break:break-word}small{color:#9db6cf}
 @media (prefers-color-scheme: light){body{background:#e8eff6;color:#0d2238}.box{background:#fffaf0;border-color:#b8862a}h1{color:#8a6100}small{color:#35546f}}</style></head>
 <body><div class="box"><h1>Back soon</h1><p>{{ text }}</p><small>This page checks again every minute.</small></div></body></html>"""
+
+
+@app.route("/api/live")
+def api_live():
+    """Small status check the page asks for every few seconds, so owner changes show up without a refresh."""
+    user = session.get("user") or {}
+    uid = str(user.get("id", ""))
+    personal = ((_web_user(uid) or {}).get("theme_mode") if uid else "") or ""
+    m = get_maintenance()
+    resp = jsonify({
+        "theme": personal if personal in ("dark", "light") else get_site_theme(),
+        "free_mode": get_free_mode(),
+        "premium": bool(uid) and is_user_premium(uid),
+        "maintenance": {"on": bool(m["on"]) and not is_owner(), "message": m["message"] or DEFAULT_MAINTENANCE_TEXT},
+    })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/")
