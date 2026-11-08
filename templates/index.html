@@ -2666,10 +2666,10 @@ async function ownJob(type, params, after) {
     const j = await ownApi('/api/owner/job', {type, params});
     if (!j.success) { ownMsg(j.error || 'Failed.', false); return; }
     ownMsg('Waiting for the bot...', true);
-    for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 1500));
+    for (let i = 0; i < 90; i++) {
+        await new Promise(r => setTimeout(r, i < 4 ? 350 : 700));
         const s = await ownApi('/api/owner/job/' + j.id);
-        if (s.status === 'done') { ownMsg(s.result || 'Done.', true); ownRefresh(); if (after) after(s.result); return; }
+        if (s.status === 'done') { ownMsg(s.result || 'Done.', true); if (after) after(s.result); ownRefresh(); return; }
         if (s.status === 'error') { ownMsg(s.result || 'The bot could not do this.', false); ownRefresh(); return; }
     }
     ownMsg('The bot did not answer in 45 seconds. Is the bot online?', false);

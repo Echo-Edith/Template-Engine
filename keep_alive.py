@@ -906,6 +906,16 @@ def owner_only(fn):
     return wrapper
 
 
+def _names_fast(ids) -> dict:
+    """Looks up many Discord names at the same time (one by one would be slow)."""
+    from concurrent.futures import ThreadPoolExecutor
+    ids = list(dict.fromkeys(str(i) for i in ids))
+    if not ids:
+        return {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(zip(ids, pool.map(_discord_name, ids)))
+
+
 def _owner_user_info(uid: str) -> dict:
     uid = str(uid)
     info = {"id": uid, "name": _discord_name(uid), "points": 0, "premium": "none", "staff": False}
@@ -1032,8 +1042,9 @@ def api_owner_premium():
                     items.append({"id": uid, "expires": str(d.get("expires_at") or "")[:10], "staff": bool(d.get("staff"))})
         except Exception as e:
             print(f"[Owner Premium List Error] {e}")
+    names = _names_fast(it["id"] for it in items[:25])
     for it in items[:25]:
-        it["name"] = _discord_name(it["id"])
+        it["name"] = names.get(it["id"], it["id"])
     return jsonify({"items": items})
 
 
@@ -1088,7 +1099,8 @@ def api_owner_blacklist():
             guild_names[g["id"]] = g["name"]
     except Exception:
         pass
-    users = [{"id": uid, "name": _discord_name(uid), "reason": v.get("reason", ""), "at": v.get("at", 0)} for uid, v in list(data["users"].items())[:60]]
+    names = _names_fast(list(data["users"])[:60])
+    users = [{"id": uid, "name": names.get(uid, uid), "reason": v.get("reason", ""), "at": v.get("at", 0)} for uid, v in list(data["users"].items())[:60]]
     guilds = [{"id": gid, "name": guild_names.get(gid, "Server " + gid[-4:]), "reason": v.get("reason", ""), "at": v.get("at", 0)} for gid, v in list(data["guilds"].items())[:60]]
     return jsonify({"users": users, "guilds": guilds})
 

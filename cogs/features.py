@@ -3851,9 +3851,12 @@ async def process_owner_jobs(bot):
         return
     now = datetime.now(timezone.utc).timestamp()
     try:
-        # a job that was running when the bot stopped would wait forever
-        db_owner_jobs.update_many({"status": "running", "started_at": {"$lt": now - 300}},
-                                  {"$set": {"status": "error", "result": "The bot stopped while running this.", "finished_at": now}})
+        if now - OWNER_PUBLISH.get("maint", 0.0) >= 60:
+            OWNER_PUBLISH["maint"] = now
+            # a job that was running when the bot stopped would wait forever
+            db_owner_jobs.update_many({"status": "running", "started_at": {"$lt": now - 300}},
+                                      {"$set": {"status": "error", "result": "The bot stopped while running this.", "finished_at": now}})
+            db_owner_jobs.delete_many({"finished_at": {"$lt": now - 14 * 86400}})
         for _ in range(10):
             job = db_owner_jobs.find_one_and_update(
                 {"status": "pending"}, {"$set": {"status": "running", "started_at": now}},
@@ -3869,7 +3872,6 @@ async def process_owner_jobs(bot):
                 result, status = f"Unexpected error: {e!r}"[:300], "error"
             db_owner_jobs.update_one({"_id": job["_id"]}, {"$set": {"status": status, "result": result,
                                      "finished_at": datetime.now(timezone.utc).timestamp()}})
-        db_owner_jobs.delete_many({"finished_at": {"$lt": now - 14 * 86400}})
     except Exception as e:
         print(f"[Owner Jobs Error] {e!r}")
 
@@ -3915,9 +3917,26 @@ class FeaturesCog(commands.Cog):
     async def cog_load(self):
         load_runtime_state()
         self.scheduler_loop.start()
+        self.owner_jobs_loop.start()
 
     async def cog_unload(self):
         self.scheduler_loop.cancel()
+        self.owner_jobs_loop.cancel()
+
+    # Own fast loop: website owner panel actions start within about 1 second,
+    # even while the slower scheduler is busy with giveaways.
+    @tasks.loop(seconds=1)
+    async def owner_jobs_loop(self):
+        await process_owner_jobs(self.bot)
+
+    @owner_jobs_loop.before_loop
+    async def before_owner_jobs_loop(self):
+        await self.bot.wait_until_ready()
+        if db_owner_jobs is not None:
+            try:
+                db_owner_jobs.create_index([("status", 1), ("created_at", 1)])
+            except Exception as e:
+                print(f"[Owner Jobs Index Error] {e}")
 
     @tasks.loop(seconds=10)
     async def scheduler_loop(self):
@@ -3964,7 +3983,6 @@ class FeaturesCog(commands.Cog):
             print(f"[Premium Role Sync Error] {e!r}")
         # Website owner panel: run waiting jobs, and refresh the server list every minute
         try:
-            await process_owner_jobs(self.bot)
             if datetime.now(timezone.utc).timestamp() - OWNER_PUBLISH["last"] >= 60:
                 OWNER_PUBLISH["last"] = datetime.now(timezone.utc).timestamp()
                 publish_owner_data(self.bot)
