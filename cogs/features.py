@@ -43,6 +43,7 @@ db_backups = None
 db_shop = None
 db_tickets = None
 db_owner_jobs = None
+db_import_requests = None
 
 if MONGO_URI:
     try:
@@ -68,6 +69,7 @@ if MONGO_URI:
         db_shop = db["shop_items"]
         db_tickets = db["tickets"]
         db_owner_jobs = db["owner_jobs"]
+        db_import_requests = db["import_requests"]
     except Exception as e:
         print(f"[MongoDB Warning] {e}")
 
@@ -3566,6 +3568,104 @@ async def blocked_check(interaction: discord.Interaction) -> bool:
 
 
 # =====================================================================
+# IMPORT A REAL SERVER: the website asks, the bot reads the server and gives back a layout.
+# Only people with Administrator or Manage Server in that server can import it.
+# =====================================================================
+IMPORT_LIMITS = {"categories": 50, "channels": 300, "roles": 100}
+IMPORT_CHANNEL_TYPES = {"text": "text", "voice": "voice", "news": "announcement", "forum": "forum", "stage_voice": "stage"}
+IMPORT_ROLE_PERMS = ("administrator", "manage_guild", "manage_roles", "manage_messages", "kick_members", "ban_members", "manage_channels")
+
+
+def read_guild_layout(guild: discord.Guild) -> dict:
+    """Turns a real server into the website's layout format (roles, categories, channels)."""
+    everyone = guild.default_role
+    roles = []
+    truncated = False
+    for r in sorted(guild.roles, key=lambda x: x.position, reverse=True):
+        if r.is_default() or r.managed:
+            continue
+        if len(roles) >= IMPORT_LIMITS["roles"]:
+            truncated = True
+            break
+        perms = {("manage_server" if k == "manage_guild" else k): True for k in IMPORT_ROLE_PERMS if getattr(r.permissions, k, False)}
+        roles.append({"name": r.name[:100], "color": f"#{r.color.value:06x}" if r.color.value else "#99aab5",
+                      "hoist": bool(r.hoist), "mentionable": bool(r.mentionable), "permissions": perms})
+
+    def read_channel(ch):
+        kind = IMPORT_CHANNEL_TYPES.get(ch.type.name)
+        if kind is None:
+            return None
+        ow = ch.overwrites_for(everyone)
+        perms = {}
+        if ow.view_channel is False:
+            perms["view"] = False
+        if ow.send_messages is False and kind in ("text", "announcement", "forum"):
+            perms["send"] = False
+        return {"name": ch.name[:100], "type": kind, "topic": (getattr(ch, "topic", None) or "")[:1000], "emoji": "",
+                "read_only": ow.send_messages is False and kind in ("text", "announcement"), "permissions": perms,
+                "formatted_name": ch.name[:100]}
+
+    categories, total = [], 0
+    groups = [(c.name, c.channels) for c in guild.categories]
+    loose = [c for c in guild.channels if getattr(c, "category", None) is None and not isinstance(c, discord.CategoryChannel)]
+    if loose:
+        groups.append(("NO CATEGORY", sorted(loose, key=lambda c: c.position)))
+    for name, chans in groups:
+        if len(categories) >= IMPORT_LIMITS["categories"]:
+            truncated = True
+            break
+        items = []
+        for ch in chans:
+            if total >= IMPORT_LIMITS["channels"]:
+                truncated = True
+                break
+            item = read_channel(ch)
+            if item:
+                items.append(item)
+                total += 1
+        categories.append({"name": name[:100], "emoji": "", "channels": items})
+    return {"server_name": guild.name[:100], "description": (guild.description or "")[:300], "roles": roles,
+            "categories": categories, "truncated": truncated}
+
+
+async def process_import_requests(bot):
+    if db_import_requests is None:
+        return
+    try:
+        for _ in range(5):
+            req = db_import_requests.find_one_and_update({"status": "pending"}, {"$set": {"status": "running"}},
+                                                         sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+            if not req:
+                break
+            result = {"status": "error", "error": "Something went wrong."}
+            try:
+                guild = bot.get_guild(int(req["guild_id"]))
+                if guild is None:
+                    raise ValueError("The bot is not in that server. Add the bot first, then try again.")
+                uid = int(req["user_id"])
+                member = guild.get_member(uid)
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(uid)
+                    except Exception:
+                        member = None
+                if member is None:
+                    raise ValueError("You are not a member of that server.")
+                gp = member.guild_permissions
+                if not (guild.owner_id == uid or gp.administrator or gp.manage_guild):
+                    raise ValueError("You need the Administrator or Manage Server permission in that server.")
+                result = {"status": "done", "layout": read_guild_layout(guild)}
+            except ValueError as e:
+                result = {"status": "error", "error": str(e)}
+            except Exception as e:
+                print(f"[Import Error] {e!r}")
+            db_import_requests.update_one({"_id": req["_id"]}, {"$set": result})
+        db_import_requests.delete_many({"created_at": {"$lt": datetime.now(timezone.utc).timestamp() - 3600}})
+    except Exception as e:
+        print(f"[Import Requests Error] {e!r}")
+
+
+# =====================================================================
 # OWNER PANEL (website): the website saves a "job" in the database and the bot runs it here.
 # This way the website uses the exact same code as the slash commands.
 # Only jobs made by an owner ID are run.
@@ -3975,6 +4075,7 @@ class FeaturesCog(commands.Cog):
     @tasks.loop(seconds=1)
     async def owner_jobs_loop(self):
         await process_owner_jobs(self.bot)
+        await process_import_requests(self.bot)
 
     @owner_jobs_loop.before_loop
     async def before_owner_jobs_loop(self):
@@ -3982,6 +4083,7 @@ class FeaturesCog(commands.Cog):
         if db_owner_jobs is not None:
             try:
                 db_owner_jobs.create_index([("status", 1), ("created_at", 1)])
+                db_import_requests.create_index([("status", 1), ("created_at", 1)])
             except Exception as e:
                 print(f"[Owner Jobs Index Error] {e}")
 

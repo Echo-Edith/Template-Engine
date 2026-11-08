@@ -52,6 +52,8 @@ db_shop = None
 db_web_users = None
 db_inbox = None
 db_promos = None
+db_import_requests = None
+LOCAL_IMPORTS = {}
 db_owner_jobs = None
 LOCAL_WEB_USERS = {}
 LOCAL_INBOX = []
@@ -72,6 +74,7 @@ if MONGO_URI:
         db_web_users = db["web_users"]
         db_inbox = db["web_inbox"]
         db_promos = db["promo_codes"]
+        db_import_requests = db["import_requests"]
         db_owner_jobs = db["owner_jobs"]
     except Exception as e:
         print(f"[MongoDB Warning in Flask] {e}")
@@ -333,7 +336,7 @@ def api_template_use(template_id):
 # -------------------------------------------------------------
 # MY DESIGNS: everything a member did (no limit)
 # -------------------------------------------------------------
-DESIGN_KINDS = {"generated", "ai_edit", "template", "submitted", "shared"}
+DESIGN_KINDS = {"generated", "ai_edit", "template", "submitted", "shared", "imported"}
 
 
 def save_design(user_id: str, kind: str, title: str, layout: dict, extra: Optional[dict] = None):
@@ -1257,6 +1260,55 @@ MAINTENANCE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"
 h1{margin:0 0 10px;color:#c9962b;font-size:1.3rem;text-transform:uppercase;letter-spacing:.08em}p{margin:0 0 8px;line-height:1.5;word-break:break-word}small{color:#9db6cf}
 @media (prefers-color-scheme: light){body{background:#e8eff6;color:#0d2238}.box{background:#fffaf0;border-color:#b8862a}h1{color:#8a6100}small{color:#35546f}}</style></head>
 <body><div class="box"><h1>Back soon</h1><p>{{ text }}</p><small>This page checks again every minute.</small></div></body></html>"""
+
+
+# -------------------------------------------------------------
+# IMPORT A REAL SERVER: the bot reads the server (only for people with Manage Server) and gives back a layout
+# -------------------------------------------------------------
+_IMPORT_LOG = {}
+
+
+@app.route("/api/import/start", methods=["POST"])
+def api_import_start():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Bad request."}), 400
+    uid = str(user["id"])
+    gid = str((request.get_json(silent=True) or {}).get("server_id", "")).strip()
+    if not _re.fullmatch(r"\d{17,20}", gid):
+        return jsonify({"success": False, "error": "That is not a valid server ID."}), 400
+    if gid in get_blacklist()["guilds"]:
+        return jsonify({"success": False, "error": "This server is blocked from using Template Engine."}), 403
+    if not _rate_ok(_IMPORT_LOG, uid, 4, 600):
+        return jsonify({"success": False, "error": "Too many imports. Please wait a few minutes."}), 429
+    if db_import_requests is None:
+        return jsonify({"success": False, "error": "Import is not available right now."}), 503
+    rid = uuid.uuid4().hex[:14]
+    db_import_requests.insert_one({"rid": rid, "user_id": uid, "guild_id": gid, "status": "pending",
+                                   "created_at": datetime.now(timezone.utc).timestamp()})
+    return jsonify({"success": True, "id": rid})
+
+
+@app.route("/api/import/<rid>")
+def api_import_status(rid):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    req = db_import_requests.find_one({"rid": str(rid), "user_id": str(user["id"])}) if db_import_requests is not None else None
+    if not req:
+        return jsonify({"success": False, "error": "Not found."}), 404
+    if req["status"] == "error":
+        return jsonify({"success": False, "status": "error", "error": req.get("error", "Import failed.")})
+    if req["status"] != "done":
+        return jsonify({"success": True, "status": req["status"]})
+    layout = req.get("layout") or {}
+    truncated = bool(layout.pop("truncated", False))
+    if not req.get("saved"):
+        save_design(str(user["id"]), "imported", layout.get("server_name") or "Imported server", layout)
+        db_import_requests.update_one({"_id": req["_id"]}, {"$set": {"saved": True}})
+    return jsonify({"success": True, "status": "done", "blueprint": layout, "truncated": truncated})
 
 
 @app.route("/api/live")
