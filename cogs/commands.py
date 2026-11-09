@@ -4610,9 +4610,12 @@ class HigherLowerView(PersistentGame):
 
     async def expire(self):
         async with self.lock:
-            if not self.done:  # no answer for a long time: cash out what the player has (the bet comes back at streak 0)
+            if not self.done:  # no answer for a long time: cash out a streak, but a player who never guessed loses the bet (no free skip)
                 try:
-                    await self.finish(None, self.cash_value(), "No answer for a long time, so you were cashed out.", C_PUSH)
+                    if self.steps == 0:
+                        await self.finish(None, 0, "No answer in time. The bet is lost.", C_LOSE)
+                    else:
+                        await self.finish(None, self.cash_value(), "No answer in time, so you were cashed out.", C_PUSH)
                 except Exception as e:
                     print(f"[HigherLower Expire Error] {e}")
 
