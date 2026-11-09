@@ -4704,6 +4704,7 @@ CRASH_EDGE = 0.94        # the chance to reach x is 0.94 / x, so every cash-out 
 CRASH_GROWTH = 1.18
 CRASH_TICK = 1.5         # seconds between two steps
 CRASH_MAX = 50.0
+CRASH_LAG = 0.7          # seconds a player needs to see a new number on screen and press the button
 
 
 def crash_point() -> float:
@@ -4719,6 +4720,17 @@ class CrashView(PersistentGame):
         super().__init__()
         self.user, self.bet, self.crash_at = user, bet, crash_at
         self.step, self.mult = 0, 1.0
+        self.hist = [(0.0, 1.0)]      # (time the number was sent, number): a press is paid with the number the player saw
+        self.clicks = []              # presses of Cash Out that wait for the lock
+        self.crash_t = None           # time of the crash step (the crash is shown a little later, see CRASH_LAG)
+
+    def mult_at(self, when: float) -> float:
+        """The number the player saw on screen when pressing the button at this time."""
+        seen = 1.0
+        for ts, m in self.hist:
+            if ts + CRASH_LAG <= when:
+                seen = m
+        return seen
 
     def owner_ids(self) -> list:
         return [str(self.user.id)]
@@ -4730,6 +4742,7 @@ class CrashView(PersistentGame):
     def from_state(cls, st: dict):
         view = cls(_Person.load(st["user"]), st["bet"], st["crash_at"])
         view.step, view.mult = st["step"], st["mult"]
+        view.hist.append((0.0, view.mult))
         return view
 
     def on_restore(self, bot):
@@ -4766,43 +4779,69 @@ class CrashView(PersistentGame):
 
     @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success, custom_id="te_cr_cash")
     async def cash(self, interaction: discord.Interaction, button: discord.ui.Button):
-        async with self.lock:
-            if self.done:
-                return await interaction.response.defer()
-            payout = self.cash_value()
-            embed = await self.close(payout, f"You cashed out at `x{self.mult:.2f}`!", C_WIN if payout > self.bet else C_PUSH)
-            if embed is None:
-                return await interaction.response.defer()
-            await interaction.response.edit_message(embed=embed, view=self)
-            self.stop()
+        arrive = _time.time()            # when the press reached the bot (before any waiting for the lock)
+        self.clicks.append(arrive)
+        try:
+            async with self.lock:
+                if self.done:
+                    return await interaction.response.defer()
+                if self.crash_t and arrive >= self.crash_t + CRASH_LAG:     # the player already saw the crash
+                    return await interaction.response.defer()
+                self.mult = self.mult_at(arrive)                              # pay the number that was on screen
+                payout = self.cash_value()
+                embed = await self.close(payout, f"You cashed out at `x{self.mult:.2f}`!", C_WIN if payout > self.bet else C_PUSH)
+                if embed is None:
+                    return await interaction.response.defer()
+                await interaction.response.edit_message(embed=embed, view=self)
+                self.stop()
+        finally:
+            if arrive in self.clicks:
+                self.clicks.remove(arrive)
 
     async def run(self):
         """The rocket climbs one step at a time until it crashes (the crash point was chosen before the first step)."""
         try:
             while True:
                 await asyncio.sleep(CRASH_TICK)
+                crashed = False
                 async with self.lock:
                     if self.done:
                         return
+                    if self.clicks:             # a Cash Out press came before this step: it is paid with the old number
+                        continue
+                    now = _time.time()
                     self.step += 1
                     nxt = round(CRASH_GROWTH ** self.step, 2)
                     if nxt >= self.crash_at:
-                        self.mult = self.crash_at
-                        embed = await self.close(0, f"The rocket crashed at `x{self.crash_at:.2f}`. You lost `{self.bet}` points.", C_LOSE)
+                        self.crash_t, crashed = now, True
                     elif nxt >= CRASH_MAX:
                         self.mult = nxt
                         embed = await self.close(self.cash_value(), "The rocket hit the top! Paid out automatically.", C_WIN)
                     else:
                         self.mult = nxt
+                        self.hist.append((now, nxt))
                         self.cash.label = f"Cash Out ({self.cash_value()})"
                         embed = self.make_embed()
-                    if embed is None:
-                        return
-                    await self.edit(embed=embed, view=self)
-                    if self.done:
+                    if not crashed:
+                        if embed is None:
+                            return
+                        await self.edit(embed=embed, view=self)
+                        if self.done:
+                            self.stop()
+                            return
+                        await self.save()
+                if crashed:
+                    await asyncio.sleep(CRASH_LAG)      # a press that was sent before the player saw the crash still counts
+                    async with self.lock:
+                        if self.done:
+                            return
+                        self.mult = self.crash_at
+                        embed = await self.close(0, f"The rocket crashed at `x{self.crash_at:.2f}`. You lost `{self.bet}` points.", C_LOSE)
+                        if embed is None:
+                            return
+                        await self.edit(embed=embed, view=self)
                         self.stop()
                         return
-                    await self.save()
         except Exception as e:
             print(f"[Crash Error] {e}")
             if not self.done:       # the message is gone: cash out what the player has
