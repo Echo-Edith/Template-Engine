@@ -44,6 +44,7 @@ db_shop = None
 db_tickets = None
 db_owner_jobs = None
 db_import_requests = None
+db_gamble = None
 db_sec_alerts = None
 db_sec_log = None
 
@@ -72,6 +73,7 @@ if MONGO_URI:
         db_tickets = db["tickets"]
         db_owner_jobs = db["owner_jobs"]
         db_import_requests = db["import_requests"]
+        db_gamble = db["gamble_games"]
         db_sec_alerts = db["security_alerts"]
         db_sec_log = db["security_log"]
     except Exception as e:

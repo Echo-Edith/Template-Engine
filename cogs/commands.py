@@ -3882,8 +3882,9 @@ import secrets as _secrets
 _RNG = _secrets.SystemRandom()
 GAMBLE_MIN_BET = 1
 GAMBLE_MAX_BET = 10
-GAMBLE_COOLDOWN = 3          # seconds between two games of the same person
-GAMBLE_ACTIVE = set()        # people who have a game running (one game at a time)
+GAMBLE_COOLDOWN = 1          # seconds between two games of the same person
+GAMBLE_MAX_OPEN = 5          # games one person can have open at the same time
+GAMBLE_OPEN = {}             # user id -> number of open games
 GAMBLE_LAST = {}
 C_WIN, C_LOSE, C_PUSH, C_GAME = 0x22C55E, 0xEF4444, 0xF59E0B, 0x8B5CF6
 FAIR_FOOTER = "Fair play: every result uses the secure random generator. Max bet is 10 points."
@@ -3893,8 +3894,8 @@ def gamble_begin(uid: str, bet) -> Optional[str]:
     """Checks the bet and takes it. Returns an error text, or None when the game can start."""
     if isinstance(bet, bool) or not isinstance(bet, int) or not GAMBLE_MIN_BET <= bet <= GAMBLE_MAX_BET:
         return f"You can bet from `{GAMBLE_MIN_BET}` to `{GAMBLE_MAX_BET}` points in one round."
-    if uid in GAMBLE_ACTIVE:
-        return "You already have a game running. Finish it first."
+    if GAMBLE_OPEN.get(uid, 0) >= GAMBLE_MAX_OPEN:
+        return f"You already have `{GAMBLE_MAX_OPEN}` games open. Finish one first."
     wait = GAMBLE_COOLDOWN - (_time.monotonic() - GAMBLE_LAST.get(uid, -1e9))
     if wait > 0:
         return f"Slow down! You can play again in `{int(wait) + 1}` second(s)."
@@ -3902,17 +3903,22 @@ def gamble_begin(uid: str, bet) -> Optional[str]:
     if balance < bet:
         return f"You only have `{balance:,}` points."
     add_user_points(uid, -bet)           # no await between the check and the payment, so it cannot be abused
-    GAMBLE_ACTIVE.add(uid)
+    GAMBLE_OPEN[uid] = GAMBLE_OPEN.get(uid, 0) + 1
     GAMBLE_LAST[uid] = _time.monotonic()
     return None
 
 
 def gamble_end(uid: str, payout: int) -> int:
     """Pays the winnings (the total that goes back to the player) and returns the new balance."""
-    GAMBLE_ACTIVE.discard(uid)
+    gamble_forget(uid)
     if payout > 0:
         return add_user_points(uid, payout)
     return get_user_points(uid)
+
+
+def gamble_forget(uid: str):
+    """One game of this person is closed."""
+    GAMBLE_OPEN[uid] = max(0, GAMBLE_OPEN.get(uid, 0) - 1)
 
 
 def gamble_net(payout: int, bet: int) -> str:
@@ -3928,6 +3934,131 @@ def gamble_embed(title: str, desc: str, color: int = C_GAME) -> discord.Embed:
 
 def gamble_error(text: str) -> discord.Embed:
     return discord.Embed(title="Cannot Play", description=text, color=C_LOSE)
+
+
+
+# ---------------- games that survive a restart ----------------
+# Every open game is saved in the database (collection gamble_games). The buttons use fixed custom ids,
+# and when the bot starts it loads the saved games and connects their buttons to the old messages again.
+import uuid as _uuid
+import cogs.features as _features
+
+GAME_VIEWS = {}           # game id -> view that is waiting for a button
+GAME_KINDS = {}           # kind name -> class
+GAME_IDLE = 600           # seconds without a button press before blackjack and higher/lower finish by themselves
+GAME_BOT = {"bot": None}
+
+
+class _Person:
+    """A small copy of a Discord user, so a game can be rebuilt after a restart."""
+    def __init__(self, uid, name: str, avatar: str = ""):
+        self.id = int(uid)
+        self.display_name = name
+        self.mention = f"<@{int(uid)}>"
+        self.display_avatar = type("Avatar", (), {"url": avatar})()
+
+    @classmethod
+    def of(cls, member) -> "_Person":
+        return cls(member.id, member.display_name, str(member.display_avatar.url))
+
+    def dump(self) -> dict:
+        return {"id": self.id, "name": self.display_name, "avatar": self.display_avatar.url}
+
+    @classmethod
+    def load(cls, d: dict) -> "_Person":
+        return cls(d["id"], d["name"], d.get("avatar", ""))
+
+
+class PersistentGame(discord.ui.View):
+    kind = ""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.gid = _uuid.uuid4().hex[:16]
+        self.channel_id = 0
+        self.message_id = 0
+        self.expires_at = 0.0        # 0 = never finishes by itself
+        self.done = False
+        self.saved = False
+        self.lock = asyncio.Lock()
+
+    def owner_ids(self) -> list:
+        return []
+
+    def get_state(self) -> dict:
+        return {}
+
+    def on_restore(self, bot):
+        pass
+
+    def attach(self, msg, channel_id: int):
+        self.message_id, self.channel_id = msg.id, channel_id
+
+    def touch(self, seconds: int = GAME_IDLE):
+        self.expires_at = _time.time() + seconds
+
+    async def save(self):
+        GAME_VIEWS[self.gid] = self
+        col = _features.db_gamble
+        if col is None:
+            return
+        doc = {"_id": self.gid, "kind": self.kind, "channel_id": self.channel_id, "message_id": self.message_id,
+               "expires_at": self.expires_at, "owners": self.owner_ids(), "state": self.get_state(), "saved_at": _time.time()}
+        try:
+            await asyncio.to_thread(lambda: col.replace_one({"_id": self.gid}, doc, upsert=True))
+            self.saved = True
+        except Exception as e:
+            print(f"[Game Save Error] {e}")
+
+    async def claim(self) -> bool:
+        """Takes the game out of the database before the points are paid. This way a restart can never pay twice."""
+        GAME_VIEWS.pop(self.gid, None)
+        col = _features.db_gamble
+        if col is None or not self.saved:
+            return True
+        try:
+            res = await asyncio.to_thread(lambda: col.delete_one({"_id": self.gid}))
+            return res.deleted_count > 0
+        except Exception as e:
+            print(f"[Game Claim Error] {e}")
+            return True
+
+    async def edit(self, **kwargs):
+        """Edits the game message (works also after a restart)."""
+        bot = GAME_BOT["bot"]
+        channel = bot.get_channel(self.channel_id) or await bot.fetch_channel(self.channel_id)
+        await channel.get_partial_message(self.message_id).edit(**kwargs)
+
+    async def expire(self):
+        pass
+
+
+async def restore_games(bot):
+    col = _features.db_gamble
+    if col is None:
+        return
+    try:
+        docs = await asyncio.to_thread(lambda: list(col.find({})))
+    except Exception as e:
+        print(f"[Game Restore Error] {e}")
+        return
+    count = 0
+    for doc in docs:
+        cls = GAME_KINDS.get(doc.get("kind"))
+        try:
+            view = cls.from_state(doc["state"])
+            view.gid, view.saved = doc["_id"], True
+            view.channel_id, view.message_id = int(doc["channel_id"]), int(doc["message_id"])
+            view.expires_at = float(doc.get("expires_at", 0))
+            bot.add_view(view, message_id=view.message_id)
+            GAME_VIEWS[view.gid] = view
+            for owner in view.owner_ids():
+                GAMBLE_OPEN[owner] = GAMBLE_OPEN.get(owner, 0) + 1
+            view.on_restore(bot)
+            count += 1
+        except Exception as e:
+            print(f"[Game Restore Error] {doc.get('kind')} {doc.get('_id')}: {e}")
+    print(f"[Games] {count} open game(s) restored.")
 
 
 # ---------------- cards ----------------
@@ -4076,16 +4207,35 @@ class BJHand:
         self.doubled = False
 
 
-class BlackjackView(discord.ui.View):
+class BlackjackView(PersistentGame):
+    kind = "blackjack"
+
     def __init__(self, user, bet: int, deck: list, player: list, dealer: list):
-        super().__init__(timeout=90)
+        super().__init__()
         self.user, self.owner_id, self.deck, self.dealer = user, user.id, deck, dealer
         self.hands = [BJHand(player, bet)]
         self.idx = 0
-        self.message = None
-        self.done = False
-        self.lock = asyncio.Lock()
+        self.touch()
         self.update_buttons()
+
+    def owner_ids(self) -> list:
+        return [str(self.owner_id)]
+
+    def get_state(self) -> dict:
+        return {"user": self.user.dump(), "idx": self.idx, "dealer": [list(c) for c in self.dealer], "deck": [list(c) for c in self.deck],
+                "hands": [{"cards": [list(c) for c in h.cards], "bet": h.bet, "done": h.done, "doubled": h.doubled} for h in self.hands]}
+
+    @classmethod
+    def from_state(cls, st: dict):
+        view = cls(_Person.load(st["user"]), 1, [tuple(c) for c in st["deck"]], [], [tuple(c) for c in st["dealer"]])
+        view.hands = []
+        for h in st["hands"]:
+            hand = BJHand([tuple(c) for c in h["cards"]], h["bet"])
+            hand.done, hand.doubled = h["done"], h["doubled"]
+            view.hands.append(hand)
+        view.idx = st["idx"]
+        view.update_buttons()
+        return view
 
     @property
     def total_bet(self) -> int:
@@ -4131,8 +4281,11 @@ class BlackjackView(discord.ui.View):
     async def show(self, interaction: Optional[discord.Interaction], embed: discord.Embed):
         if interaction is not None:
             await interaction.response.edit_message(embed=embed, view=self)
-        elif self.message is not None:
-            await self.message.edit(embed=embed, view=self)
+        else:
+            await self.edit(embed=embed, view=self)
+        if not self.done:               # the game goes on: remember it
+            self.touch()
+            await self.save()
 
     async def advance(self, interaction: Optional[discord.Interaction]):
         """Goes to the next hand that is still playing, or lets the dealer play when all hands are finished."""
@@ -4145,6 +4298,8 @@ class BlackjackView(discord.ui.View):
 
     async def settle(self, interaction: Optional[discord.Interaction], note: str = ""):
         self.done = True
+        if not await self.claim():      # this game was already paid
+            return
         self.update_buttons()
         if any(hand_value(h.cards) <= 21 for h in self.hands):
             while hand_value(self.dealer) < 17:     # the dealer stands on every 17
@@ -4169,7 +4324,7 @@ class BlackjackView(discord.ui.View):
         await self.show(interaction, self.make_embed(True, note, color, results, payout, balance))
         self.stop()
 
-    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, custom_id="te_bj_hit")
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             if self.done:
@@ -4180,7 +4335,7 @@ class BlackjackView(discord.ui.View):
                 hand.done = True
             await self.advance(interaction)
 
-    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success, custom_id="te_bj_stand")
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             if self.done:
@@ -4188,7 +4343,7 @@ class BlackjackView(discord.ui.View):
             self.hands[self.idx].done = True
             await self.advance(interaction)
 
-    @discord.ui.button(label="Double Down", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Double Down", style=discord.ButtonStyle.secondary, custom_id="te_bj_double")
     async def double(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             hand = self.hands[self.idx]
@@ -4203,7 +4358,7 @@ class BlackjackView(discord.ui.View):
             hand.done = True
             await self.advance(interaction)
 
-    @discord.ui.button(label="Split", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Split", style=discord.ButtonStyle.secondary, custom_id="te_bj_split")
     async def split(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             hand = self.hands[self.idx]
@@ -4221,7 +4376,7 @@ class BlackjackView(discord.ui.View):
                     h.done = True
             await self.advance(interaction)
 
-    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, emoji="❓")
+    @discord.ui.button(label="Help", style=discord.ButtonStyle.secondary, emoji="❓", custom_id="te_bj_help")
     async def help(self, interaction: discord.Interaction, button: discord.ui.Button):
         e = discord.Embed(title="Blackjack Help", color=BJ_BLUE, description=(
             "Get closer to `21` than the dealer without going over.\n"
@@ -4232,16 +4387,18 @@ class BlackjackView(discord.ui.View):
             f"You can use at most `{GAMBLE_MAX_BET}` points in one round, so Double Down and Split need room under that."))
         await interaction.response.send_message(embed=e, ephemeral=True)
 
-    async def on_timeout(self):
+    async def expire(self):
         async with self.lock:
-            if not self.done:  # no answer: every hand stands
+            if not self.done:  # no answer for a long time: every hand stands
                 try:
                     for h in self.hands:
                         h.done = True
-                    await self.settle(None, "Time ran out, so your hand stood.")
+                    await self.settle(None, "No answer for a long time, so your hand stood.")
                 except Exception as e:
-                    GAMBLE_ACTIVE.discard(str(self.owner_id))
-                    print(f"[Blackjack Timeout Error] {e}")
+                    print(f"[Blackjack Expire Error] {e}")
+
+
+GAME_KINDS["blackjack"] = BlackjackView
 
 
 # ---------------- roulette ----------------
@@ -4314,17 +4471,33 @@ def card_rank(card) -> int:
     return CARD_RANKS.index(card[0]) + 1    # Ace is low (1), King is high (13)
 
 
-class HigherLowerView(discord.ui.View):
+class HigherLowerView(PersistentGame):
+    kind = "highlow"
+
     def __init__(self, owner_id: int, bet: int, deck: list):
-        super().__init__(timeout=90)
+        super().__init__()
         self.owner_id, self.bet, self.deck = owner_id, bet, deck
         self.current = deck.pop()
         self.mult = 1.0
         self.steps = 0
-        self.message = None
-        self.done = False
-        self.lock = asyncio.Lock()
+        self.touch()
         self.refresh_buttons()
+
+    def owner_ids(self) -> list:
+        return [str(self.owner_id)]
+
+    def get_state(self) -> dict:
+        return {"owner_id": self.owner_id, "bet": self.bet, "deck": [list(c) for c in self.deck], "current": list(self.current),
+                "mult": self.mult, "steps": self.steps}
+
+    @classmethod
+    def from_state(cls, st: dict):
+        deck = [tuple(c) for c in st["deck"]]
+        deck.append(tuple(st["current"]))        # the constructor takes the current card from the end
+        view = cls(st["owner_id"], st["bet"], deck)
+        view.mult, view.steps = st["mult"], st["steps"]
+        view.refresh_buttons()
+        return view
 
     def chances(self):
         rank = card_rank(self.current)
@@ -4373,14 +4546,16 @@ class HigherLowerView(discord.ui.View):
 
     async def finish(self, interaction: Optional[discord.Interaction], payout: int, note: str, color: int, last=None):
         self.done = True
+        if not await self.claim():      # this game was already paid
+            return
         for item in self.children:
             item.disabled = True
         balance = gamble_end(str(self.owner_id), payout)
         embed = self.make_embed(note, color, True, payout, balance, last)
         if interaction is not None:
             await interaction.response.edit_message(embed=embed, view=self)
-        elif self.message is not None:
-            await self.message.edit(embed=embed, view=self)
+        else:
+            await self.edit(embed=embed, view=self)
         self.stop()
 
     async def guess(self, interaction: discord.Interaction, higher: bool):
@@ -4402,50 +4577,65 @@ class HigherLowerView(discord.ui.View):
                 return await self.finish(interaction, self.cash_value(), f"Perfect streak of {HL_MAX_STEPS}! Paid out automatically.", C_WIN)
             self.refresh_buttons()
             await interaction.response.edit_message(embed=self.make_embed(f"Correct! {card_text(previous)} then {card_text(nxt)}. Keep going or cash out.", C_WIN), view=self)
+            self.touch()
+            await self.save()
 
-    @discord.ui.button(label="Higher", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Higher", style=discord.ButtonStyle.success, custom_id="te_hl_higher")
     async def higher_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.guess(interaction, True)
 
-    @discord.ui.button(label="Lower", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Lower", style=discord.ButtonStyle.danger, custom_id="te_hl_lower")
     async def lower_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.guess(interaction, False)
 
-    @discord.ui.button(label="Cash out", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cash out", style=discord.ButtonStyle.secondary, custom_id="te_hl_cash")
     async def cash_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             if self.done:
                 return await interaction.response.defer()
             await self.finish(interaction, self.cash_value(), "You cashed out!", C_WIN)
 
-    async def on_timeout(self):
+    async def expire(self):
         async with self.lock:
-            if not self.done:  # no answer: cash out what the player has (the bet comes back at streak 0)
+            if not self.done:  # no answer for a long time: cash out what the player has (the bet comes back at streak 0)
                 try:
-                    await self.finish(None, self.cash_value(), "Time ran out, so you were cashed out.", C_PUSH)
+                    await self.finish(None, self.cash_value(), "No answer for a long time, so you were cashed out.", C_PUSH)
                 except Exception as e:
-                    GAMBLE_ACTIVE.discard(str(self.owner_id))
-                    print(f"[HigherLower Timeout Error] {e}")
+                    print(f"[HigherLower Expire Error] {e}")
+
+
+GAME_KINDS["highlow"] = HigherLowerView
 
 
 
 # ---------------- coin flip duel ----------------
-class CoinFlipView(discord.ui.View):
-    def __init__(self, challenger, target, bet: int):
-        super().__init__(timeout=None)
-        self.challenger, self.target, self.bet = challenger, target, bet
-        self.message = None
-        self.done = False
-        self.lock = asyncio.Lock()
+class CoinFlipView(PersistentGame):
+    kind = "coinflip"
 
-    async def refund(self, text: str, color: int = C_PUSH) -> discord.Embed:
+    def __init__(self, challenger, target, bet: int):
+        super().__init__()
+        self.challenger, self.target, self.bet = challenger, target, bet
+
+    def owner_ids(self) -> list:
+        return [str(self.challenger.id)]
+
+    def get_state(self) -> dict:
+        return {"challenger": self.challenger.dump(), "target": self.target.dump(), "bet": self.bet}
+
+    @classmethod
+    def from_state(cls, st: dict):
+        return cls(_Person.load(st["challenger"]), _Person.load(st["target"]), st["bet"])
+
+    async def refund(self, text: str, color: int = C_PUSH) -> Optional[discord.Embed]:
         self.done = True
+        if not await self.claim():          # already finished somewhere else
+            return None
         for item in self.children:
             item.disabled = True
         gamble_end(str(self.challenger.id), self.bet)    # the challenger gets the bet back
         return gamble_embed("Coin Flip Duel", text, color)
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="te_cf_accept")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             if self.done:
@@ -4456,6 +4646,9 @@ class CoinFlipView(discord.ui.View):
             if error:
                 return await interaction.response.send_message(embed=gamble_error(error), ephemeral=True)
             self.done = True
+            if not await self.claim():      # already finished somewhere else: give the new bet back
+                gamble_end(str(self.target.id), self.bet)
+                return await interaction.response.defer()
             for item in self.children:
                 item.disabled = True
             await interaction.response.edit_message(embed=gamble_embed("Coin Flip Duel", f"\U0001FA99 The coin is flying...\n{self.challenger.mention} vs {self.target.mention} for `{self.bet * 2}` points.", C_GAME), view=self)
@@ -4468,12 +4661,12 @@ class CoinFlipView(discord.ui.View):
             e.add_field(name=f"{winner.display_name}", value=f"`{win_balance:,}`", inline=True)
             e.add_field(name=f"{loser.display_name}", value=f"`{lose_balance:,}` (`-{self.bet}`)", inline=True)
             try:
-                await self.message.edit(embed=e, view=self)
+                await self.edit(embed=e, view=self)
             except Exception as err:
                 print(f"[CoinFlip Edit Error] {err}")
             self.stop()
 
-    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, custom_id="te_cf_decline")
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             if self.done:
@@ -4481,17 +4674,13 @@ class CoinFlipView(discord.ui.View):
             if interaction.user.id not in (self.target.id, self.challenger.id):
                 return await interaction.response.send_message("This duel is not for you.", ephemeral=True)
             embed = await self.refund(f"{interaction.user.mention} ended the duel. The bet was returned.")
+            if embed is None:
+                return await interaction.response.defer()
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
 
-    async def on_timeout(self):
-        async with self.lock:
-            if not self.done:
-                embed = await self.refund(f"{self.target.mention} did not answer. The bet was returned to {self.challenger.mention}.")
-                try:
-                    await self.message.edit(embed=embed, view=self)
-                except Exception as err:
-                    print(f"[CoinFlip Timeout Error] {err}")
+
+GAME_KINDS["coinflip"] = CoinFlipView
 
 
 # ---------------- crash ----------------
@@ -4507,14 +4696,28 @@ def crash_point() -> float:
     return max(1.0, int(CRASH_EDGE * 100 / (1 - u)) / 100)
 
 
-class CrashView(discord.ui.View):
+class CrashView(PersistentGame):
+    kind = "crash"
+
     def __init__(self, user, bet: int, crash_at: float):
-        super().__init__(timeout=None)
+        super().__init__()
         self.user, self.bet, self.crash_at = user, bet, crash_at
         self.step, self.mult = 0, 1.0
-        self.message = None
-        self.done = False
-        self.lock = asyncio.Lock()
+
+    def owner_ids(self) -> list:
+        return [str(self.user.id)]
+
+    def get_state(self) -> dict:
+        return {"user": self.user.dump(), "bet": self.bet, "crash_at": self.crash_at, "step": self.step, "mult": self.mult}
+
+    @classmethod
+    def from_state(cls, st: dict):
+        view = cls(_Person.load(st["user"]), st["bet"], st["crash_at"])
+        view.step, view.mult = st["step"], st["mult"]
+        return view
+
+    def on_restore(self, bot):
+        bot.loop.create_task(self.run())      # the rocket goes on climbing
 
     def cash_value(self) -> int:
         return min(HL_MAX_PAYOUT, int(self.bet * self.mult))
@@ -4536,20 +4739,24 @@ class CrashView(discord.ui.View):
             return False
         return True
 
-    def close(self, payout: int, note: str, color: int) -> discord.Embed:
+    async def close(self, payout: int, note: str, color: int, saved: bool = True) -> Optional[discord.Embed]:
         self.done = True
+        if saved and not await self.claim():     # already paid somewhere else
+            return None
         for item in self.children:
             item.disabled = True
         balance = gamble_end(str(self.user.id), payout)
         return self.make_embed(note, color, True, payout, balance)
 
-    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success, custom_id="te_cr_cash")
     async def cash(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.lock:
             if self.done:
                 return await interaction.response.defer()
             payout = self.cash_value()
-            embed = self.close(payout, f"You cashed out at `x{self.mult:.2f}`!", C_WIN if payout > self.bet else C_PUSH)
+            embed = await self.close(payout, f"You cashed out at `x{self.mult:.2f}`!", C_WIN if payout > self.bet else C_PUSH)
+            if embed is None:
+                return await interaction.response.defer()
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
 
@@ -4565,23 +4772,30 @@ class CrashView(discord.ui.View):
                     nxt = round(CRASH_GROWTH ** self.step, 2)
                     if nxt >= self.crash_at:
                         self.mult = self.crash_at
-                        embed = self.close(0, f"The rocket crashed at `x{self.crash_at:.2f}`. You lost `{self.bet}` points.", C_LOSE)
+                        embed = await self.close(0, f"The rocket crashed at `x{self.crash_at:.2f}`. You lost `{self.bet}` points.", C_LOSE)
                     elif nxt >= CRASH_MAX:
                         self.mult = nxt
-                        embed = self.close(self.cash_value(), "The rocket hit the top! Paid out automatically.", C_WIN)
+                        embed = await self.close(self.cash_value(), "The rocket hit the top! Paid out automatically.", C_WIN)
                     else:
                         self.mult = nxt
                         self.cash.label = f"Cash Out ({self.cash_value()})"
                         embed = self.make_embed()
-                    await self.message.edit(embed=embed, view=self)
+                    if embed is None:
+                        return
+                    await self.edit(embed=embed, view=self)
                     if self.done:
                         self.stop()
                         return
+                    await self.save()
         except Exception as e:
             print(f"[Crash Error] {e}")
             if not self.done:       # the message is gone: cash out what the player has
                 self.done = True
-                gamble_end(str(self.user.id), self.cash_value())
+                if await self.claim():
+                    gamble_end(str(self.user.id), self.cash_value())
+
+
+GAME_KINDS["crash"] = CrashView
 
 
 # ---------------- trivia ----------------
@@ -4643,26 +4857,38 @@ def trivia_wins_today(uid: str) -> int:
     return count if day == today else 0
 
 
-class TriviaView(discord.ui.View):
+class TriviaView(PersistentGame):
+    kind = "trivia"
     LETTERS = "ABCD"
 
-    def __init__(self, data: dict, channel_id: int, seconds: int = 20):
-        super().__init__(timeout=seconds)
+    def __init__(self, data: dict, channel_id: int, seconds: int = 20, options: Optional[list] = None):
+        super().__init__()
         self.seconds = seconds
         self.data, self.channel_id = data, channel_id
-        options = [data["correct"]] + data["wrong"][:3]
-        _RNG.shuffle(options)
+        self.touch(seconds)
+        if options is None:
+            options = [data["correct"]] + data["wrong"][:3]
+            _RNG.shuffle(options)
         self.options = options
         self.correct_index = options.index(data["correct"])
         self.reward = TRIVIA_REWARD.get(data["difficulty"], 4)
         self.locked_out = set()
-        self.message = None
-        self.done = False
-        self.lock = asyncio.Lock()
         for i in range(len(options)):
-            button = discord.ui.Button(label=self.LETTERS[i], style=discord.ButtonStyle.primary)
+            button = discord.ui.Button(label=self.LETTERS[i], style=discord.ButtonStyle.primary, custom_id=f"te_tv_{i}")
             button.callback = self.make_callback(i)
             self.add_item(button)
+
+    def get_state(self) -> dict:
+        return {"data": self.data, "channel_id": self.channel_id, "seconds": self.seconds, "options": self.options, "locked_out": list(self.locked_out)}
+
+    @classmethod
+    def from_state(cls, st: dict):
+        view = cls(st["data"], st["channel_id"], st["seconds"], st["options"])
+        view.locked_out = set(st["locked_out"])
+        return view
+
+    def on_restore(self, bot):
+        TRIVIA_ACTIVE.add(self.channel_id)
 
     def make_embed(self, note: str = "", color: int = C_GAME) -> discord.Embed:
         lines = "\n".join(f"**{self.LETTERS[i]}.** {o}" for i, o in enumerate(self.options))
@@ -4681,8 +4907,11 @@ class TriviaView(discord.ui.View):
                     return await interaction.response.send_message("You already tried this question.", ephemeral=True)
                 if index != self.correct_index:
                     self.locked_out.add(uid)
+                    await self.save()
                     return await interaction.response.send_message("Wrong answer! You are out for this question.", ephemeral=True)
                 self.done = True
+                if not await self.claim():      # someone else was faster (or a restart already finished it)
+                    return await interaction.response.defer()
                 for item in self.children:
                     item.disabled = True
                 key = str(uid)
@@ -4699,18 +4928,22 @@ class TriviaView(discord.ui.View):
                 self.stop()
         return callback
 
-    async def on_timeout(self):
+    async def expire(self):
         async with self.lock:
             if self.done:
                 return
             self.done = True
+            await self.claim()
             for item in self.children:
                 item.disabled = True
             TRIVIA_ACTIVE.discard(self.channel_id)
             try:
-                await self.message.edit(embed=self.make_embed(f"⏰ Time is up! The answer was **{self.options[self.correct_index]}**.", C_LOSE), view=self)
+                await self.edit(embed=self.make_embed(f"⏰ Time is up! The answer was **{self.options[self.correct_index]}**.", C_LOSE), view=self)
             except Exception as e:
-                print(f"[Trivia Timeout Error] {e}")
+                print(f"[Trivia Expire Error] {e}")
+
+
+GAME_KINDS["trivia"] = TriviaView
 
 
 class GamblingCog(commands.Cog):
@@ -4718,11 +4951,34 @@ class GamblingCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
+        GAME_BOT["bot"] = self.bot
         self.bot.loop.create_task(self.prepare_cards())
+        self.bot.loop.create_task(self.restore())
         self.trivia_event_loop.start()
+        self.game_sweeper.start()
 
     async def cog_unload(self):
         self.trivia_event_loop.cancel()
+        self.game_sweeper.cancel()
+
+    async def restore(self):
+        await self.bot.wait_until_ready()
+        await restore_games(self.bot)
+
+    @tasks.loop(seconds=10)
+    async def game_sweeper(self):
+        """Finishes games where nobody pressed a button for a long time (works also after a restart)."""
+        now = _time.time()
+        for view in list(GAME_VIEWS.values()):
+            if view.expires_at and now >= view.expires_at and not view.done:
+                try:
+                    await view.expire()
+                except Exception as e:
+                    print(f"[Game Sweeper Error] {e}")
+
+    @game_sweeper.before_loop
+    async def before_game_sweeper(self):
+        await self.bot.wait_until_ready()
 
     @tasks.loop(seconds=15)
     async def trivia_event_loop(self):
@@ -4745,7 +5001,9 @@ class GamblingCog(commands.Cog):
             TRIVIA_ACTIVE.add(cid)
             try:
                 view = TriviaView(await fetch_trivia(), cid, seconds=45)
-                view.message = await channel.send(embed=view.make_embed(), view=view)
+                msg = await channel.send(embed=view.make_embed(), view=view)
+                view.attach(msg, cid)
+                await view.save()
             except Exception:
                 TRIVIA_ACTIVE.discard(cid)
                 raise
@@ -4773,7 +5031,7 @@ class GamblingCog(commands.Cog):
             usage = f"{ctx.clean_prefix}{ctx.command.qualified_name} {ctx.command.signature}".strip()
             return await ctx.send(embed=gamble_error(f"Please use it like this:\n`{usage}`\nThe bet must be a whole number from `{GAMBLE_MIN_BET}` to `{GAMBLE_MAX_BET}`."))
         print(f"[Gambling Error] {error!r}")
-        GAMBLE_ACTIVE.discard(str(ctx.author.id))
+        gamble_forget(str(ctx.author.id))
         try:
             await ctx.send(embed=gamble_error("Something went wrong. If your bet was taken, it is gone. Please tell the owner."))
         except Exception:
@@ -4802,7 +5060,7 @@ class GamblingCog(commands.Cog):
         if error:
             return await ctx.send(embed=gamble_error(error), ephemeral=True)
         deck = new_deck(BJ_DECKS)
-        view = BlackjackView(ctx.author, bet, deck, [deck.pop(), deck.pop()], [deck.pop(), deck.pop()])
+        view = BlackjackView(_Person.of(ctx.author), bet, deck, [deck.pop(), deck.pop()], [deck.pop(), deck.pop()])
         pv, dv = hand_value(view.hands[0].cards), hand_value(view.dealer)
         if pv == 21 or dv == 21:  # a natural blackjack ends the round at once
             view.done = True
@@ -4815,7 +5073,9 @@ class GamblingCog(commands.Cog):
                 text, color, payout, result = "The dealer has blackjack. You lose.", C_LOSE, 0, f"Lost {bet}"
             balance = gamble_end(uid, payout)
             return await ctx.send(embed=view.make_embed(True, text, color, [result], payout, balance), view=view)
-        view.message = await ctx.send(embed=view.make_embed(), view=view)
+        msg = await ctx.send(embed=view.make_embed(), view=view)
+        view.attach(msg, ctx.channel.id)
+        await view.save()
 
     # ----- roulette -----
     @commands.hybrid_command(name="roulette", description="Bet on the roulette wheel with TE points (bet 1-10).")
@@ -4912,10 +5172,12 @@ class GamblingCog(commands.Cog):
         error = gamble_begin(str(ctx.author.id), bet)
         if error:
             return await ctx.send(embed=gamble_error(error), ephemeral=True)
-        view = CoinFlipView(ctx.author, user, bet)
+        view = CoinFlipView(_Person.of(ctx.author), _Person.of(user), bet)
         embed = gamble_embed("Coin Flip Duel", f"{ctx.author.mention} challenges {user.mention}!\nEach person bets `{bet}` points. The winner takes `{bet * 2}`.\n{user.mention}, press **Accept** or **Decline**.\n{ctx.author.mention} can press **Decline** to cancel.", C_GAME)
         try:
-            view.message = await ctx.send(content=user.mention, embed=embed, view=view, allowed_mentions=discord.AllowedMentions(users=[user]))
+            msg = await ctx.send(content=user.mention, embed=embed, view=view, allowed_mentions=discord.AllowedMentions(users=[user]))
+            view.attach(msg, ctx.channel.id)
+            await view.save()
         except Exception:
             gamble_end(str(ctx.author.id), bet)     # the challenge could not be sent: give the bet back
             raise
@@ -4929,12 +5191,14 @@ class GamblingCog(commands.Cog):
         if error:
             return await ctx.send(embed=gamble_error(error), ephemeral=True)
         crash_at = crash_point()               # chosen now, nobody can change it
-        view = CrashView(ctx.author, bet, crash_at)
+        view = CrashView(_Person.of(ctx.author), bet, crash_at)
         if crash_at <= 1.0:                    # some rockets crash right at the start
-            embed = view.close(0, "The rocket crashed at once! Better luck next time.", C_LOSE)
+            embed = await view.close(0, "The rocket crashed at once! Better luck next time.", C_LOSE, saved=False)
             return await ctx.send(embed=embed)
         try:
-            view.message = await ctx.send(embed=view.make_embed(), view=view)
+            msg = await ctx.send(embed=view.make_embed(), view=view)
+            view.attach(msg, ctx.channel.id)
+            await view.save()
         except Exception:
             gamble_end(uid, bet)
             raise
@@ -4951,7 +5215,9 @@ class GamblingCog(commands.Cog):
             TRIVIA_ACTIVE.add(cid)
             try:
                 view = TriviaView(await fetch_trivia(), cid)
-                view.message = await ctx.send(embed=view.make_embed(), view=view)
+                msg = await ctx.send(embed=view.make_embed(), view=view)
+                view.attach(msg, cid)
+                await view.save()
             except Exception:
                 TRIVIA_ACTIVE.discard(cid)
                 raise
@@ -4971,7 +5237,9 @@ class GamblingCog(commands.Cog):
         if error:
             return await ctx.send(embed=gamble_error(error), ephemeral=True)
         view = HigherLowerView(ctx.author.id, bet, new_deck())
-        view.message = await ctx.send(embed=view.make_embed(), view=view)
+        msg = await ctx.send(embed=view.make_embed(), view=view)
+        view.attach(msg, ctx.channel.id)
+        await view.save()
 
 
 async def setup(bot: commands.Bot):
