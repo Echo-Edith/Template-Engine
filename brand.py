@@ -119,6 +119,19 @@ def apply(text, cfg: dict = None):
 
 
 # ---------------- Discord side ----------------
+def _walk(node, keys=("label", "placeholder", "title", "content", "description", "text")):
+    """Changes the texts inside a component (button, select, text input, text display ...)."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(v, str) and k in keys:
+                node[k] = apply(v)
+            elif isinstance(v, (dict, list)):
+                _walk(v, keys)
+    elif isinstance(node, list):
+        for v in node:
+            _walk(v, keys)
+
+
 def _embed_dict(d: dict):
     for key in ("title", "description"):
         if isinstance(d.get(key), str):
@@ -134,6 +147,7 @@ def _embed_dict(d: dict):
 
 def install_discord_hooks():
     """Makes every embed, button and message text pass through apply() when it is sent."""
+    import copy
     import functools
     import discord
     if getattr(discord, "_brand_hooked", False):
@@ -145,20 +159,35 @@ def install_discord_hooks():
     def embed_to_dict(self):
         d = orig_embed(self)
         try:
+            d = copy.deepcopy(d)       # discord.py gives back the embed's own data: never change the original
             _embed_dict(d)
         except Exception as e:
             print(f"[Brand Embed Error] {e}")
         return d
     discord.Embed.to_dict = embed_to_dict
 
-    orig_button = discord.ui.Button.to_component_dict
+    def hook_dict(owner, name):
+        fn = getattr(owner, name, None)
+        if fn is None:
+            return
 
-    def button_dict(self):
-        d = orig_button(self)
-        if isinstance(d.get("label"), str):
-            d["label"] = apply(d["label"])
-        return d
-    discord.ui.Button.to_component_dict = button_dict
+        @functools.wraps(fn)
+        def hooked(self, *a, **kw):
+            d = fn(self, *a, **kw)
+            try:
+                _walk(d)
+            except Exception as e:
+                print(f"[Brand Component Error] {e}")
+            return d
+        setattr(owner, name, hooked)
+
+    # buttons, selects, text inputs, text displays (layout messages) and modal titles
+    for cls_name in ("Button", "Select", "TextInput", "TextDisplay"):
+        cls = getattr(discord.ui, cls_name, None)
+        if cls is not None:
+            hook_dict(cls, "to_component_dict")
+    if getattr(discord.ui, "Modal", None) is not None:
+        hook_dict(discord.ui.Modal, "to_dict")
 
     def wrap(owner, name):
         fn = getattr(owner, name, None)

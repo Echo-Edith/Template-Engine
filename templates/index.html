@@ -2971,7 +2971,10 @@ async function rbLoad() {
     document.getElementById('rb-name').value = j.brand.name;
     document.getElementById('rb-short').value = j.brand.short;
     document.getElementById('rb-tag').value = j.brand.tagline;
-    document.getElementById('rb-note').textContent = j.brand.name === j.default.name ? 'The first brand is in use.' : 'The first brand was: ' + j.default.name;
+    let botTxt = 'The bot has not reported yet. Restart the bot with the newest code.';
+    if (j.bot) botTxt = j.bot.age > 90 ? 'The bot last reported ' + Math.round(j.bot.age / 60) + ' min ago. Is it running?'
+        : (j.bot.name === j.brand.name ? 'The bot uses this brand now.' : 'The bot still uses "' + j.bot.name + '". It changes within a few seconds.');
+    document.getElementById('rb-note').textContent = (j.brand.name === j.default.name ? 'The first brand is in use. ' : 'The first brand was: ' + j.default.name + '. ') + botTxt;
     rbPreview();
 }
 ['rb-name', 'rb-short', 'rb-tag'].forEach(id => document.getElementById(id).addEventListener('input', rbPreview));

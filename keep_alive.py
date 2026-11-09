@@ -1963,7 +1963,15 @@ def api_owner_heist_save():
 @owner_only
 def api_owner_brand():
     brand.refresh(force=True)
-    return jsonify({"brand": brand.get(), "default": brand.DEFAULT, "limits": brand.LIMITS})
+    bot = None
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "brand_bot"}) or {}
+            if doc.get("at"):
+                bot = {"name": doc.get("name"), "short": doc.get("short"), "age": int(datetime.now().timestamp() - float(doc["at"]))}
+        except Exception as e:
+            print(f"[Brand Bot Status Error] {e}")
+    return jsonify({"brand": brand.get(), "default": brand.DEFAULT, "limits": brand.LIMITS, "bot": bot})
 
 
 @app.route("/api/owner/brand", methods=["POST"])

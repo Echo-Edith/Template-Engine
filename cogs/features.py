@@ -5346,7 +5346,13 @@ async def process_brand_change(bot):
     """The owner can change the brand on the website. The bot picks it up here: the next embeds use the new
     name at once, and the slash command descriptions are saved again at Discord."""
     try:
-        if not await asyncio.to_thread(brand.refresh):
+        changed = await asyncio.to_thread(brand.refresh)
+        now = time.time()
+        if db_settings is not None and (changed or now - BRAND_SEEN.get("report", 0) > 20):
+            BRAND_SEEN["report"] = now       # tells the website which brand the bot is using (shown in Owner Panel > Rebrand)
+            cfg = brand.get()
+            await asyncio.to_thread(lambda: db_settings.update_one({"_id": "brand_bot"}, {"$set": {"name": cfg["name"], "short": cfg["short"], "at": now}}, upsert=True))
+        if not changed:
             return
         if BRAND_SEEN["ver"] is None:       # the first read at start (main.py already used it for the first sync)
             BRAND_SEEN["ver"] = brand.version()
