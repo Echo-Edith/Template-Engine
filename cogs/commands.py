@@ -4814,6 +4814,188 @@ class CrashView(PersistentGame):
 GAME_KINDS["crash"] = CrashView
 
 
+# ---------------- heist ----------------
+HEIST_MAX = 1000          # the vault never gives more than this in one heist
+HEIST_MAX_INVITES = 5     # people you can invite (the crew is at most 6)
+HEIST_WAIT = 90           # seconds the crew has to answer
+HEIST_COOLDOWN = 1800     # seconds before the same person can join another heist
+HEIST_LAST = {}           # user id -> time of the last heist
+
+
+def heist_loot(crew: int) -> int:
+    """The best of `crew` fair rolls from 1 to 1000: a bigger crew gets a higher loot most of the time."""
+    return max(_RNG.randint(1, HEIST_MAX) for _ in range(max(1, crew)))
+
+
+def heist_split(total: int, ids: list) -> dict:
+    """Equal shares. Points that cannot be split are given one by one to random people."""
+    share, rest = divmod(total, len(ids))
+    out = {i: share for i in ids}
+    for i in _RNG.sample(ids, rest):
+        out[i] += 1
+    return out
+
+
+def heist_wait_left(uid) -> int:
+    return int(HEIST_COOLDOWN - (_time.time() - HEIST_LAST.get(str(uid), 0)))
+
+
+class HeistView(PersistentGame):
+    kind = "heist"
+
+    def __init__(self, leader, invited: list, joined: list, declined: list):
+        super().__init__()
+        self.leader, self.invited = leader, invited          # invited = list of _Person
+        self.joined, self.declined = list(joined), list(declined)   # lists of user ids (the leader is always in joined)
+
+    def owner_ids(self) -> list:
+        return []
+
+    def get_state(self) -> dict:
+        return {"leader": self.leader.dump(), "invited": [p.dump() for p in self.invited], "joined": self.joined, "declined": self.declined}
+
+    @classmethod
+    def from_state(cls, st: dict):
+        return cls(_Person.load(st["leader"]), [_Person.load(d) for d in st["invited"]], st["joined"], st["declined"])
+
+    def make_embed(self, note: str = "", color: int = C_GAME) -> discord.Embed:
+        lines = [f"✅ {self.leader.mention} (leader)"]
+        for p in self.invited:
+            mark = "✅" if p.id in self.joined else ("❌" if p.id in self.declined else "⏳")
+            lines.append(f"{mark} {p.mention}")
+        e = discord.Embed(title="\U0001F4B0 Vault Heist", color=color,
+                          description=note or f"{self.leader.mention} wants to rob the **Template Engine Vault**!\nPress **Join** to be part of the crew.")
+        e.add_field(name="Crew", value="\n".join(lines), inline=False)
+        e.add_field(name="Loot", value=f"`1` - `{HEIST_MAX:,}` points, shared equally. More people means more loot!", inline=False)
+        e.set_footer(text=f"The crew has {HEIST_WAIT} seconds to answer. Anyone who says no is left out, the others can still go.")
+        return e
+
+    def answered(self) -> bool:
+        return all(p.id in self.joined or p.id in self.declined for p in self.invited)
+
+    def update_buttons(self):
+        self.start_btn.disabled = len(self.joined) < 2
+
+    async def cancel(self, text: str):
+        self.done = True
+        await self.claim()
+        for item in self.children:
+            item.disabled = True
+        return discord.Embed(title="\U0001F4B0 Vault Heist", description=text, color=C_LOSE)
+
+    async def go(self, interaction=None):
+        """Called with the lock held. Starts the heist with everyone who joined."""
+        self.done = True
+        if not await self.claim():
+            return
+        for item in self.children:
+            item.disabled = True
+        ids = list(dict.fromkeys(self.joined))
+        crew = {self.leader.id: self.leader, **{p.id: p for p in self.invited}}
+        intro = discord.Embed(title="\U0001F4B0 Vault Heist", color=C_GAME,
+                              description=f"\U0001F510 The crew is breaking into the vault...\n{', '.join(crew[i].mention for i in ids)}")
+        if interaction is not None and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=intro, view=self)
+        else:
+            await self.edit(embed=intro, view=self)
+        await asyncio.sleep(3)
+        total = heist_loot(len(ids))
+        shares = heist_split(total, ids)
+        now = _time.time()
+        lines = []
+        for i in ids:
+            HEIST_LAST[str(i)] = now
+            bal = add_user_points(str(i), shares[i])
+            lines.append(f"{crew[i].mention}  `+{shares[i]:,}`  •  Balance `{bal:,}`")
+        e = discord.Embed(title="\U0001F4B0 Vault Heist: Success!", color=C_WIN,
+                          description=f"The crew got away with `{total:,}` points!")
+        e.add_field(name="Crew", value=f"`{len(ids)}` people", inline=True)
+        e.add_field(name="Each share", value=f"`{total // len(ids):,}`", inline=True)
+        e.add_field(name="Payout", value="\n".join(lines), inline=False)
+        e.set_footer(text=f"Crew of {len(ids)}: the loot is the best of {len(ids)} rolls from 1 to {HEIST_MAX:,}.")
+        try:
+            await self.edit(embed=e, view=self)
+        except Exception as err:
+            print(f"[Heist Edit Error] {err}")
+        self.stop()
+
+    async def after_answer(self, interaction: discord.Interaction):
+        """Updates the message after one person answered."""
+        if self.answered():
+            if len(self.joined) >= 2:
+                return await self.go(interaction)
+            embed = await self.cancel("Everyone said no. The heist was called off.")
+            await interaction.response.edit_message(embed=embed, view=self)
+            return self.stop()
+        self.update_buttons()
+        await self.save()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success, custom_id="te_heist_join")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            uid = interaction.user.id
+            if uid not in [p.id for p in self.invited]:
+                return await interaction.response.send_message("You were not invited to this heist.", ephemeral=True)
+            if uid in self.joined:
+                return await interaction.response.send_message("You already joined.", ephemeral=True)
+            wait = heist_wait_left(uid)
+            if wait > 0:
+                return await interaction.response.send_message(f"You are resting after the last heist. Try again <t:{int(_time.time()) + wait}:R>.", ephemeral=True)
+            if uid in self.declined:
+                self.declined.remove(uid)
+            self.joined.append(uid)
+            await self.after_answer(interaction)
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, custom_id="te_heist_decline")
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            uid = interaction.user.id
+            if uid == self.leader.id:
+                embed = await self.cancel(f"{interaction.user.mention} called off the heist.")
+                await interaction.response.edit_message(embed=embed, view=self)
+                return self.stop()
+            if uid not in [p.id for p in self.invited]:
+                return await interaction.response.send_message("You were not invited to this heist.", ephemeral=True)
+            if uid in self.joined:
+                self.joined.remove(uid)
+            if uid not in self.declined:
+                self.declined.append(uid)
+            await self.after_answer(interaction)
+
+    @discord.ui.button(label="Start Now", style=discord.ButtonStyle.primary, custom_id="te_heist_start", disabled=True)
+    async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if self.done:
+                return await interaction.response.defer()
+            if interaction.user.id != self.leader.id:
+                return await interaction.response.send_message(f"Only {self.leader.mention} can start the heist.", ephemeral=True)
+            if len(self.joined) < 2:
+                return await interaction.response.send_message("At least one more person must join first.", ephemeral=True)
+            await self.go(interaction)
+
+    async def expire(self):
+        async with self.lock:
+            if self.done:
+                return
+            try:
+                if len(self.joined) >= 2:      # the people who did not answer are left out
+                    await self.go()
+                else:
+                    embed = await self.cancel("Nobody joined in time. The heist was called off.")
+                    await self.edit(embed=embed, view=self)
+                    self.stop()
+            except Exception as e:
+                print(f"[Heist Expire Error] {e}")
+
+
+GAME_KINDS["heist"] = HeistView
+
+
 # ---------------- trivia ----------------
 TRIVIA_REWARD = {"easy": 2, "medium": 4, "hard": 6}
 TRIVIA_DAILY_LIMIT = 10           # rewarded answers per person per day
@@ -5073,6 +5255,7 @@ class GamblingCog(commands.Cog):
         e.add_field(name="Roulette", value=f"`{p}roulette <bet> <choice>`\nChoices: `red` `black` `even` `odd` `low` `high` (pay `2x`), `1st` `2nd` `3rd` dozen (pay `3x`), or a number `0`-`36` (pays `36x`). There is one green `0`.", inline=False)
         e.add_field(name="Slots", value=f"`{p}slots <bet>`\nThree matching symbols win up to `250x`. Exactly two cherries pay `2x`. Return to player: `{slot_rtp() * 100:.1f}%`.", inline=False)
         e.add_field(name="Higher or Lower", value=f"`{p}highlow <bet>`\nGuess if the next card is higher or lower. The payout follows the real chance. Cash out any time after one correct guess.", inline=False)
+        e.add_field(name="Vault Heist", value=f"`{p}heist @Ann, @Bob`\nRob the vault with friends. Loot is `1`-`1000` points, shared equally. A bigger crew gets more loot. No bet needed.", inline=False)
         e.add_field(name="Coin Flip Duel", value=f"`{p}coinflip @user <bet>`\nChallenge a friend. Both bet the same, the winner takes it all. No house edge.", inline=False)
         e.add_field(name="Crash", value=f"`{p}crash <bet>`\nA rocket climbs higher every step. Cash out before it crashes!", inline=False)
         e.add_field(name="Trivia", value=f"Timed event: the bot asks a question by itself. Use `{p}trivia` to see when the next one comes. First correct answer wins `2`-`6` points (up to `{TRIVIA_DAILY_LIMIT}` rewards a day). One try each.", inline=False)
@@ -5230,6 +5413,52 @@ class GamblingCog(commands.Cog):
             gamble_end(uid, bet)
             raise
         self.bot.loop.create_task(view.run())
+
+    # ----- heist -----
+    @commands.hybrid_command(name="heist", description="Rob the Template Engine Vault with friends. Share 1-1000 points.")
+    @app_commands.describe(users="Who you want in your crew. Use commas: @Ann, @Bob (max 5).")
+    async def heist_cmd(self, ctx: commands.Context, *, users: str):
+        if ctx.guild is None:
+            return await ctx.send(embed=gamble_error("Heists only work in a server."), ephemeral=True)
+        members, missing = [], []
+        for raw in [x.strip() for x in users.split(",") if x.strip()]:
+            m = None
+            mid = re.fullmatch(r"<@!?(\d+)>|(\d{15,20})", raw)
+            if mid:
+                uid = int(mid.group(1) or mid.group(2))
+                m = ctx.guild.get_member(uid)
+                if m is None:
+                    try:
+                        m = await ctx.guild.fetch_member(uid)
+                    except Exception:
+                        m = None
+            else:
+                name = raw.lstrip("@").lower()
+                pool = ctx.guild.members
+                m = (discord.utils.find(lambda x: name in (x.name.lower(), x.display_name.lower(), (x.global_name or "").lower()), pool)
+                     or discord.utils.find(lambda x: x.display_name.lower().startswith(name) or x.name.lower().startswith(name), pool))
+            if m is None:
+                missing.append(raw)
+            elif m.bot or m.id == ctx.author.id or is_user_blacklisted(m.id) or any(m.id == k.id for k in members):
+                continue
+            else:
+                members.append(m)
+        if missing:
+            return await ctx.send(embed=gamble_error("I could not find: " + ", ".join(f"`{x[:32]}`" for x in missing[:5]) + "\nUse mentions with commas, like `@Ann, @Bob`."), ephemeral=True)
+        if not members:
+            return await ctx.send(embed=gamble_error("Invite at least one other real person.\nExample: `!heist @Ann, @Bob`"), ephemeral=True)
+        if len(members) > HEIST_MAX_INVITES:
+            return await ctx.send(embed=gamble_error(f"You can invite at most `{HEIST_MAX_INVITES}` people."), ephemeral=True)
+        wait = heist_wait_left(ctx.author.id)
+        if wait > 0:
+            return await ctx.send(embed=gamble_error(f"You are resting after the last heist. Try again <t:{int(_time.time()) + wait}:R>."), ephemeral=True)
+        view = HeistView(_Person.of(ctx.author), [_Person.of(m) for m in members], [ctx.author.id], [])
+        view.update_buttons()
+        view.touch(HEIST_WAIT)
+        msg = await ctx.send(content=" ".join(m.mention for m in members), embed=view.make_embed(), view=view,
+                             allowed_mentions=discord.AllowedMentions(users=members))
+        view.attach(msg, ctx.channel.id)
+        await view.save()
 
     # ----- trivia -----
     @commands.hybrid_command(name="trivia", description="Trivia is a timed event. See when the next question comes.")
