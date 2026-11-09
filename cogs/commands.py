@@ -4115,12 +4115,13 @@ def card_points(card) -> int:
 # The card pictures are drawn with Pillow and uploaded once as application emojis of the bot.
 def render_card(rank: str, suit: str) -> bytes:
     """Draws one playing card on a 128x128 transparent square (used as a Discord emoji). suit: S H D C or 'back'."""
+    from PIL import Image, ImageDraw, ImageFont
     SS = 4  # draw big, then shrink for smooth edges
     W = 128 * SS
     im = Image.new("RGBA", (W, W), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    x0, y0, x1, y1 = 22 * SS, 3 * SS, 106 * SS, 125 * SS
-    r = 11 * SS
+    x0, y0, x1, y1 = 12 * SS, 2 * SS, 116 * SS, 126 * SS
+    r = 12 * SS
     if suit == "back":
         d.rounded_rectangle((x0, y0, x1, y1), r, fill=(255, 255, 255, 255))
         d.rounded_rectangle((x0 + 4 * SS, y0 + 4 * SS, x1 - 4 * SS, y1 - 4 * SS), r - 3 * SS, fill=(30, 110, 215, 255))
@@ -4129,15 +4130,17 @@ def render_card(rank: str, suit: str) -> bytes:
     red = suit in ("H", "D")
     color = (196, 30, 48, 255) if red else (20, 20, 24, 255)
     try:
-        font = ImageFont.load_default(size=44 * SS)
+        font = ImageFont.load_default(size=58 * SS)
     except TypeError:
         font = ImageFont.load_default()
     cx = (x0 + x1) // 2
-    d.text((cx, y0 + 6 * SS), rank, fill=color, font=font, anchor="mt")
-    _suit(d, suit, cx, y0 + 84 * SS, 26 * SS, color)
+    d.text((cx, y0 + 4 * SS), rank, fill=color, font=font, anchor="mt")
+    _suit(d, suit, cx, y0 + 92 * SS, 30 * SS, color)
     return _out(im)
 
 def _out(im):
+    import io
+    from PIL import Image
     im = im.resize((128, 128), Image.LANCZOS)
     buf = io.BytesIO(); im.save(buf, "PNG", optimize=True)
     return buf.getvalue()
@@ -4173,12 +4176,18 @@ async def ensure_card_emojis(bot) -> None:
     except ImportError:
         print("[Cards] Pillow is not installed, cards are shown as text.")
         return
-    wanted = {"back": "te_back"}
+    wanted = {"back": "tc_back"}
     for r in CARD_RANKS:
         for letter in "SHDC":
-            wanted[f"{r}{letter}"] = f"te_{r}{letter}"
+            wanted[f"{r}{letter}"] = f"tc_{r}{letter}"
     try:
         have = {e.name: e for e in await bot.fetch_application_emojis()}
+        for old in [e for n, e in have.items() if n.startswith("te_") and (n == "te_back" or n[3:-1] in CARD_RANKS)]:
+            try:                       # the first version of the pictures was smaller: remove it
+                await old.delete()
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
         for key, name in wanted.items():
             emoji = have.get(name)
             if emoji is None:
@@ -4250,26 +4259,30 @@ class BlackjackView(PersistentGame):
         self.hit.disabled = self.stand.disabled = self.done
 
     def make_embed(self, final: bool = False, note: str = "", color: int = BJ_BLUE, results=None, payout: int = 0, balance: Optional[int] = None) -> discord.Embed:
-        e = discord.Embed(description=note or None, color=color)
+        # Cards sit alone in their own field: Discord then shows them as big pictures. Few words, big numbers.
+        top = note
+        if final:
+            net = payout - self.total_bet
+            word = "Win" if net > 0 else ("Lose" if net < 0 else "Push")
+            top = f"**{word}** {gamble_net(payout, self.total_bet)}  \u2022  Balance `{balance:,}`" + (f"\n{note}" if note else "")
+        e = discord.Embed(description=top or None, color=color)
         e.set_author(name=self.user.display_name, icon_url=self.user.display_avatar.url)
         for i, hand in enumerate(self.hands):
             if len(self.hands) == 1:
                 name = "Your Hand"
             else:
-                name = f"Hand {i + 1}" + (" ◀" if (not final and i == self.idx) else "")
-            value = f"{hand_text(hand.cards)}\n\nValue: {hand_value(hand.cards)}"
+                name = f"Hand {i + 1}" + (" \u25C0" if (not final and i == self.idx) else "")
+            value = f"Value: {hand_value(hand.cards)}"
             if hand.doubled:
-                value += " (Doubled)"
+                value += " (2x)"
             if results:
-                value += f"\n**{results[i]}**"
-            e.add_field(name=name, value=value, inline=False)
+                value += f"  \u2022  {results[i]}"
+            e.add_field(name=name, value=hand_text(hand.cards), inline=False)
+            e.add_field(name="\u200b", value=value, inline=False)
         shown = self.dealer if final else self.dealer[:1]
-        e.add_field(name="Dealer Hand", value=f"{hand_text(self.dealer, hide_second=not final)}\n\nValue: {hand_value(shown)}", inline=False)
-        e.add_field(name="Bet", value=f"`{self.total_bet}`", inline=True)
-        if final:
-            e.add_field(name="Result", value=gamble_net(payout, self.total_bet), inline=True)
-            e.add_field(name="Balance", value=f"`{balance:,}`", inline=True)
-        e.set_footer(text=f"Cards remaining: {len(self.deck)}")
+        e.add_field(name="Dealer Hand", value=hand_text(self.dealer, hide_second=not final), inline=False)
+        e.add_field(name="\u200b", value=f"Value: {hand_value(shown)}", inline=False)
+        e.set_footer(text=f"Bet {self.total_bet}  \u2022  Cards remaining: {len(self.deck)}")
         return e
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -4309,15 +4322,15 @@ class BlackjackView(PersistentGame):
         for hand in self.hands:
             pv = hand_value(hand.cards)
             if pv > 21:
-                results.append(f"Bust! Lost {hand.bet}")
+                results.append("Bust")
             elif dv > 21 or pv > dv:
-                results.append(f"Win! +{hand.bet}")
+                results.append("Win")
                 payout += hand.bet * 2
             elif pv == dv:
-                results.append("Push, bet returned")
+                results.append("Push")
                 payout += hand.bet
             else:
-                results.append(f"Lost {hand.bet}")
+                results.append("Lose")
         balance = gamble_end(str(self.owner_id), payout)
         net = payout - self.total_bet
         color = C_WIN if net > 0 else (C_LOSE if net < 0 else C_PUSH)
@@ -5077,11 +5090,11 @@ class GamblingCog(commands.Cog):
             view.done = True
             view.update_buttons()
             if pv == 21 and dv == 21:
-                text, color, payout, result = "Both have blackjack. Your bet comes back.", C_PUSH, bet, "Push, bet returned"
+                text, color, payout, result = "Both have blackjack.", C_PUSH, bet, "Push"
             elif pv == 21:
-                text, color, payout, result = "Blackjack! You win `2.5x`.", C_WIN, bet * 5 // 2, f"Blackjack! +{bet * 5 // 2 - bet}"
+                text, color, payout, result = "Blackjack! `2.5x`", C_WIN, bet * 5 // 2, "Blackjack"
             else:
-                text, color, payout, result = "The dealer has blackjack. You lose.", C_LOSE, 0, f"Lost {bet}"
+                text, color, payout, result = "Dealer has blackjack.", C_LOSE, 0, "Lose"
             balance = gamble_end(uid, payout)
             return await ctx.send(embed=view.make_embed(True, text, color, [result], payout, balance), view=view)
         msg = await ctx.send(embed=view.make_embed(), view=view)
