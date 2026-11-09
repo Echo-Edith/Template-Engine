@@ -29,6 +29,27 @@ NAME_COLORS = {
 }
 
 
+# Prices the owner changed in the Owner Panel (item id -> price). The website and the bot load them from the database.
+OVERRIDES = {}
+
+
+def set_overrides(prices: dict):
+    OVERRIDES.clear()
+    for key, value in (prices or {}).items():
+        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 1000000:
+            OVERRIDES[str(key)] = value
+
+
+def base_price(item_id: str):
+    """The built-in price (without the owner's change)."""
+    kind, _, key = str(item_id).partition(":")
+    if kind == "skin" and key in SKINS:
+        return SKINS[key][1]
+    if kind == "color" and key in NAME_COLORS:
+        return NAME_COLORS[key][1]
+    return None
+
+
 def _hsl(h, s, l):
     r, g, b = colorsys.hls_to_rgb(h / 360.0, l, s)
     return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
@@ -41,12 +62,10 @@ def _rgba(h, s, l, a):
 
 def price_of(item_id: str):
     """Price of an item id like 'skin:sakura' or 'color:gold'. None when the item does not exist."""
-    kind, _, key = str(item_id).partition(":")
-    if kind == "skin" and key in SKINS:
-        return SKINS[key][1]
-    if kind == "color" and key in NAME_COLORS:
-        return NAME_COLORS[key][1]
-    return None
+    base = base_price(item_id)
+    if base is None:
+        return None
+    return OVERRIDES.get(str(item_id), base)
 
 
 def name_of(item_id: str) -> str:
@@ -57,10 +76,10 @@ def name_of(item_id: str) -> str:
 def catalog() -> list:
     items = []
     for key, (name, price, bg, ah, sat) in SKINS.items():
-        items.append({"id": f"skin:{key}", "kind": "skin", "key": key, "name": name, "price": price,
+        items.append({"id": f"skin:{key}", "kind": "skin", "key": key, "name": name, "price": price_of(f"skin:{key}"),
                       "swatch": [_hsl(bg, 0.45, 0.07), _hsl(bg, 0.40, 0.14), _hsl(ah, sat / 100.0, 0.62)]})
     for key, (name, price, css) in NAME_COLORS.items():
-        items.append({"id": f"color:{key}", "kind": "color", "key": key, "name": name, "price": price})
+        items.append({"id": f"color:{key}", "kind": "color", "key": key, "name": name, "price": price_of(f"color:{key}")})
     return items
 
 

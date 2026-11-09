@@ -564,6 +564,21 @@ def _discord_name(user_id: str) -> str:
 # Buying goes through the bot (it owns the points). Equipping only changes a setting, so the website does it.
 # =====================================================================
 _SHOP_LOG = {}
+_PRICES = {"at": 0.0}
+
+
+def load_cosmetic_prices(force: bool = False):
+    """Loads the prices the owner changed (saved in the database, checked every 10 seconds)."""
+    now = datetime.now().timestamp()
+    if not force and now - _PRICES["at"] < 10:
+        return
+    _PRICES["at"] = now
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "shop_prices"}) or {}
+            shop_items.set_overrides(doc.get("prices") or {})
+        except Exception as e:
+            print(f"[Shop Prices Error] {e}")
 
 
 def _owned_items(uid: str) -> list:
@@ -590,6 +605,7 @@ def api_shop_cosmetics():
     user = session.get("user")
     if not user:
         return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    load_cosmetic_prices()
     uid = str(user["id"])
     points = 0
     if db_users is not None:
@@ -616,6 +632,7 @@ def api_shop_buy():
         return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
     uid = str(user["id"])
     item = str((request.get_json(silent=True) or {}).get("id", ""))
+    load_cosmetic_prices()
     if shop_items.price_of(item) is None:
         return jsonify({"success": False, "error": "This item does not exist."}), 400
     if item in _owned_items(uid):
@@ -1964,6 +1981,63 @@ def api_owner_security_unblock():
     sec_unblock(kind, value)
     sec_log("unblock", 0, f"Unblocked {kind} {value}.", "owner", value)
     return jsonify({"success": True})
+
+
+# ----- Owner Panel: Shop prices (Discord shop items and website cosmetics) -----
+@app.route("/api/owner/shop")
+@owner_only
+def api_owner_shop():
+    load_cosmetic_prices(force=True)
+    discord_items = []
+    if db_shop is not None:
+        try:
+            for it in db_shop.find({}, {"_id": 0}):
+                discord_items.append({"key": str(it.get("key", "")), "name": str(it.get("name", "Item")), "price": int(it.get("price", 0)),
+                                      "stock": "Unlimited" if it.get("stock") is None else int(it.get("stock", 0)), "sold": int(it.get("sold", 0))})
+            discord_items.sort(key=lambda i: (i["price"], i["name"].lower()))
+        except Exception as e:
+            print(f"[Owner Shop Error] {e}")
+    cosmetics = [{"id": it["id"], "kind": it["kind"], "name": it["name"], "price": it["price"], "default": shop_items.base_price(it["id"]),
+                  "changed": it["id"] in shop_items.OVERRIDES} for it in shop_items.catalog()]
+    return jsonify({"discord": discord_items, "cosmetics": cosmetics})
+
+
+@app.route("/api/owner/shop/price", methods=["POST"])
+@owner_only
+def api_owner_shop_price():
+    data = request.get_json(silent=True) or {}
+    source, key = str(data.get("source", "")), str(data.get("key", ""))
+    reset = data.get("price") in (None, "")
+    price = None
+    if not reset:
+        try:
+            price = int(data.get("price"))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "Please type a whole number."}), 400
+        if not 1 <= price <= 1000000:
+            return jsonify({"success": False, "error": "The price must be from 1 to 1,000,000."}), 400
+    if source == "discord":
+        if db_shop is None or reset:
+            return jsonify({"success": False, "error": "Type a new price for this item."}), 400
+        res = db_shop.update_one({"key": key}, {"$set": {"price": price}})
+        if not getattr(res, "matched_count", 1):
+            return jsonify({"success": False, "error": "This item does not exist anymore."}), 404
+        return jsonify({"success": True})
+    if source == "cosmetic":
+        if shop_items.base_price(key) is None:
+            return jsonify({"success": False, "error": "This item does not exist."}), 404
+        if db_settings is None:
+            return jsonify({"success": False, "error": "The database is not connected."}), 503
+        load_cosmetic_prices(force=True)
+        prices = dict(shop_items.OVERRIDES)
+        if reset:
+            prices.pop(key, None)
+        else:
+            prices[key] = price
+        db_settings.update_one({"_id": "shop_prices"}, {"$set": {"prices": prices}}, upsert=True)
+        shop_items.set_overrides(prices)
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Bad request."}), 400
 
 
 @app.route("/api/live")

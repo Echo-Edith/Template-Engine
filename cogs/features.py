@@ -4159,10 +4159,28 @@ async def process_security_alerts(bot):
 # COSMETICS SHOP: the website asks the bot to buy a theme or name color. Only the bot changes points
 # (the bot keeps points in memory, so the website must never write them itself).
 # -------------------------------------------------------------
+_SHOP_PRICES_AT = [0.0]
+
+
+def refresh_cosmetic_prices(force: bool = False):
+    """Loads the prices the owner changed in the Owner Panel."""
+    import shop_items
+    now = time.time()
+    if not force and now - _SHOP_PRICES_AT[0] < 5:
+        return
+    _SHOP_PRICES_AT[0] = now
+    if db_settings is not None:
+        try:
+            shop_items.set_overrides((db_settings.find_one({"_id": "shop_prices"}) or {}).get("prices") or {})
+        except Exception as e:
+            print(f"[Shop Prices Error] {e}")
+
+
 async def process_shop_requests(bot):
     if db_shop_requests is None or db_web_users is None:
         return
     import shop_items
+    refresh_cosmetic_prices()
     try:
         for _ in range(10):
             req = db_shop_requests.find_one_and_update({"status": "pending"}, {"$set": {"status": "running"}},

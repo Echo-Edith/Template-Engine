@@ -1160,6 +1160,7 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <button class="btn-glass btn-secondary-link" data-tab="servers">Servers</button>
 <button class="btn-glass btn-secondary-link" data-tab="blocked">Blocked</button>
 <button class="btn-glass btn-secondary-link" data-tab="users">Users</button>
+<button class="btn-glass btn-secondary-link" data-tab="shop">Shop</button>
 <button class="btn-glass btn-secondary-link" data-tab="security">Security</button>
 </div>
 
@@ -1242,6 +1243,13 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <p class="own-note">Blocked users cannot use the bot or the website. For a blocked server, the bot leaves and stays out. The main staff cannot be blocked.</p></div>
 <div class="editor-card"><div class="label-heading">BLOCKED USERS</div><div id="own-b-users"></div></div>
 <div class="editor-card"><div class="label-heading">BLOCKED SERVERS</div><div id="own-b-guilds"></div></div>
+</div>
+
+<div class="own-sec" id="own-shop">
+<div class="editor-card"><div class="label-heading">DISCORD SHOP ITEMS</div>
+<p class="own-note">Items from <code>/shop</code>. A new price works at once in Discord and on the website.</p><div id="shop-discord"></div></div>
+<div class="editor-card"><div class="label-heading">WEBSITE THEMES</div><div id="shop-skins"></div></div>
+<div class="editor-card"><div class="label-heading">NAME COLORS</div><div id="shop-colors"></div></div>
 </div>
 
 <div class="own-sec" id="own-security">
@@ -2888,6 +2896,30 @@ async function ownJob(type, params, after) {
     ownMsg('The bot did not answer in 45 seconds. Is the bot online?', false);
 }
 
+async function shopLoad() {
+    const j = await ownApi('/api/owner/shop');
+    if (j.error) { ownMsg(j.error, false); return; }
+    const row = (src, key, name, price, extra, canReset) => '<div class="own-list-item"><span><b>' + escapeHtml(name) + '</b><br><small>' + extra + '</small></span>' +
+        '<span style="display:flex;gap:6px;align-items:center"><input class="form-control" style="width:90px" type="number" min="1" max="1000000" value="' + price + '" data-src="' + src + '" data-key="' + escapeHtml(key) + '">' +
+        '<button class="btn-glass own-small" data-save="1">Save</button>' + (canReset ? '<button class="btn-glass btn-secondary-link own-small" data-reset="1">Reset</button>' : '') + '</span></div>';
+    document.getElementById('shop-discord').innerHTML = j.discord.map(i => row('discord', i.key, i.name, i.price, 'Stock: ' + i.stock + ' | Sold: ' + i.sold, false)).join('') || '<p class="own-note">No items. Add some with /shop in Discord.</p>';
+    const cos = k => j.cosmetics.filter(i => i.kind === k).map(i => row('cosmetic', i.id, i.name, i.price, 'Normal price: ' + i.default + (i.changed ? ' | changed' : ''), i.changed)).join('');
+    document.getElementById('shop-skins').innerHTML = cos('skin');
+    document.getElementById('shop-colors').innerHTML = cos('color');
+    document.querySelectorAll('#own-shop [data-save]').forEach(b => b.onclick = async () => {
+        const inp = b.parentElement.querySelector('input');
+        const r = await ownApi('/api/owner/shop/price', {source: inp.dataset.src, key: inp.dataset.key, price: inp.value});
+        ownMsg(r.success ? 'Price saved.' : (r.error || 'Failed.'), !!r.success);
+        if (r.success) shopLoad();
+    });
+    document.querySelectorAll('#own-shop [data-reset]').forEach(b => b.onclick = async () => {
+        const inp = b.parentElement.querySelector('input');
+        const r = await ownApi('/api/owner/shop/price', {source: inp.dataset.src, key: inp.dataset.key, price: null});
+        ownMsg(r.success ? 'Price reset.' : (r.error || 'Failed.'), !!r.success);
+        if (r.success) shopLoad();
+    });
+}
+
 let SEC = {data: null, timer: null};
 function secAgo(t) { const d = Math.max(0, Math.floor(Date.now() / 1000 - t)); return d < 60 ? d + 's ago' : d < 3600 ? Math.floor(d / 60) + ' min ago' : Math.floor(d / 3600) + ' h ago'; }
 async function secLoad(keepForm) {
@@ -2935,6 +2967,7 @@ function ownTab(name) {
     if (name === 'users') ownLoadPremium();
     if (name === 'servers') ownRenderServers();
     if (name === 'blocked') ownLoadBlocked();
+    if (name === 'shop') shopLoad();
     clearInterval(SEC.timer);
     if (name === 'security') { secLoad(false); SEC.timer = setInterval(() => secLoad(true), 10000); }
 }
