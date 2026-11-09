@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any, Tuple
 import discord
 from discord.ext import commands, tasks
 from pymongo import MongoClient, ReturnDocument
+import brand
 
 # -------------------------------------------------------------
 # GLOBAL CONSTANTS & LOGGING CHANNELS
@@ -68,6 +69,7 @@ if MONGO_URI:
         db_reminders = db["reminders"]
         db_giveaways = db["giveaways"]
         db_settings = db["settings"]
+        brand.configure(db_settings, auto=False)      # the bot refreshes the brand in its own loop
         db_promos = db["promo_codes"]
         db_broadcasts = db["broadcasts"]
         db_backups = db["backups"]
@@ -1708,7 +1710,7 @@ def remove_inbox_from(user_id, sender_ids) -> None:
 # /premium set, the Roblox subscription and anything else that saves premium.
 # =====================================================================
 PREMIUM_ROLE_GUILD_ID = int(os.getenv("PREMIUM_ROLE_GUILD_ID", "1284513257574629458"))
-PREMIUM_ROLE_NAME = os.getenv("PREMIUM_ROLE_NAME", "TE Premium")
+PREMIUM_ROLE_NAME = os.getenv("PREMIUM_ROLE_NAME", "")   # empty = "<short brand> Premium"
 PREMIUM_ROLE_DEFAULT_ID = "1563842016985489420"  # the TE Premium role (PREMIUM_ROLE_ID overrides it)
 PREMIUM_ROLE_SYNC = {"last": 0.0, "warned": False}
 
@@ -1716,12 +1718,13 @@ PREMIUM_ROLE_SYNC = {"last": 0.0, "warned": False}
 async def get_premium_role(guild: discord.Guild) -> Optional[discord.Role]:
     """Finds the TE Premium role (PREMIUM_ROLE_ID, or by name). Creates it if it does not exist."""
     role_id = os.getenv("PREMIUM_ROLE_ID", "1563842016985489420").strip()
+    role_name = PREMIUM_ROLE_NAME or f"{brand.get()['short']} Premium"
     role = guild.get_role(int(role_id)) if role_id.isdigit() else None
     if role is None:
-        role = discord.utils.find(lambda r: r.name.strip().lower() == PREMIUM_ROLE_NAME.lower(), guild.roles)
+        role = discord.utils.find(lambda r: r.name.strip().lower() == role_name.lower(), guild.roles)
     if role is None:
         try:
-            role = await guild.create_role(name=PREMIUM_ROLE_NAME, colour=discord.Colour(0xC9962B), hoist=True,
+            role = await guild.create_role(name=role_name, colour=discord.Colour(0xC9962B), hoist=True,
                                            reason="TE Premium role for premium members")
         except Exception as e:
             print(f"[Premium Role] Could not create the role: {e!r}")
@@ -4295,6 +4298,7 @@ class FeaturesCog(commands.Cog):
     # even while the slower scheduler is busy with giveaways.
     @tasks.loop(seconds=1)
     async def owner_jobs_loop(self):
+        await process_brand_change(self.bot)
         await process_owner_jobs(self.bot)
         await process_import_requests(self.bot)
         await process_security_alerts(self.bot)
@@ -5335,7 +5339,30 @@ class FeaturesCog(commands.Cog):
             set_build_status(build_id, user_id, "failed", "The build stopped because of an error. Check the bot's permissions.", progress["done"], total_steps)
 
 
+BRAND_SEEN = {"ver": None}
+
+
+async def process_brand_change(bot):
+    """The owner can change the brand on the website. The bot picks it up here: the next embeds use the new
+    name at once, and the slash command descriptions are saved again at Discord."""
+    try:
+        if not await asyncio.to_thread(brand.refresh):
+            return
+        if BRAND_SEEN["ver"] is None:       # the first read at start (main.py already used it for the first sync)
+            BRAND_SEEN["ver"] = brand.version()
+            return
+        BRAND_SEEN["ver"] = brand.version()
+        brand.rebrand_tree(bot.tree)
+        await bot.tree.sync()
+        print(f"[Brand] Changed to {brand.get()['name']}. Slash commands synced.")
+    except Exception as e:
+        print(f"[Brand Change Error] {e}")
+
+
 async def setup(bot: commands.Bot):
+    brand.install_discord_hooks()
+    brand.refresh(force=True)
+    BRAND_SEEN["ver"] = brand.version()
     # Register persistent views for static panels
     bot.add_view(RobloxVerificationView())
     bot.add_view(RobloxUnsyncView())

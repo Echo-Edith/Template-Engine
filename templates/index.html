@@ -1124,6 +1124,7 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <style>
 .own-tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
 .own-tabs button { flex:1 1 auto; padding:8px 10px; font-size:0.78rem; }
+.rb-preview { margin: 10px 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border, #1f3550); background: rgba(255,255,255,0.03); font-size: 0.82rem; line-height: 1.6; }
 .own-tabs button.on { background: var(--accent-purple) !important; color:#fff !important; border-color: var(--accent-purple) !important; }
 .sec-levels { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin-top:10px; }
 .sec-levels button { padding:10px 0; font-size:0.8rem; }
@@ -1165,6 +1166,7 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <button class="btn-glass btn-secondary-link" data-tab="blocked">Blocked</button>
 <button class="btn-glass btn-secondary-link" data-tab="users">Users</button>
 <button class="btn-glass btn-secondary-link" data-tab="shop">Shop</button>
+<button class="btn-glass btn-secondary-link" data-tab="rebrand">Rebrand</button>
 <button class="btn-glass btn-secondary-link" data-tab="security">Security</button>
 </div>
 
@@ -1254,6 +1256,23 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <p class="own-note">Items from <code>/shop</code>. A new price works at once in Discord and on the website.</p><div id="shop-discord"></div></div>
 <div class="editor-card"><div class="label-heading">WEBSITE THEMES</div><div id="shop-skins"></div></div>
 <div class="editor-card"><div class="label-heading">NAME COLORS</div><div id="shop-colors"></div></div>
+</div>
+
+<div class="own-sec" id="own-rebrand">
+<div class="editor-card"><div class="label-heading">BRAND</div>
+<p class="own-note">Change the name once and it changes everywhere: all website pages and texts, and the bot's embeds, buttons, messages and slash command descriptions. Nothing in the code needs editing.</p>
+<label class="label-heading" for="rb-name">NAME</label>
+<input class="form-control" id="rb-name" maxlength="32" autocomplete="off">
+<label class="label-heading" for="rb-short" style="margin-top:8px;">SHORT NAME (used in "Premium" and "Points")</label>
+<input class="form-control" id="rb-short" maxlength="10" autocomplete="off">
+<label class="label-heading" for="rb-tag" style="margin-top:8px;">TAGLINE (website title)</label>
+<input class="form-control" id="rb-tag" maxlength="48" autocomplete="off">
+<p class="own-note">Letters, numbers, spaces and . &amp; ! + : # @ / - only.</p>
+<div class="rb-preview" id="rb-preview"></div>
+<div class="own-row"><button class="btn-glass" id="rb-save" onclick="rbSave()">Save brand</button><button class="btn-glass btn-secondary-link" id="rb-reset" onclick="rbReset()">Back to the first brand</button></div>
+<p class="own-note" id="rb-note"></p></div>
+<div class="editor-card"><div class="label-heading">WHAT CHANGES</div>
+<p class="own-note">Website: every page, the page title and all messages. Bot: embeds, buttons, messages and slash command descriptions (saved at Discord again within about 10 seconds after you save). The bot name, the bot picture and the premium role in your server are set in Discord itself. Backup IDs and link codes keep their short code on purpose, so old ones keep working.</p></div>
 </div>
 
 <div class="own-sec" id="own-security">
@@ -2930,6 +2949,38 @@ async function shopLoad() {
     });
 }
 
+let RB = {def: null, limits: null};
+function rbPreview() {
+    const n = document.getElementById('rb-name').value.trim() || '...', sh = document.getElementById('rb-short').value.trim() || '...', t = document.getElementById('rb-tag').value.trim() || '...';
+    document.getElementById('rb-preview').innerHTML = '<b>' + escapeHtml(n) + '</b> | ' + escapeHtml(t) + '<br>Get ' + escapeHtml(sh) + ' Premium &bull; ' + escapeHtml(sh) + ' Points<br><small>Embed footer: ' + escapeHtml(n) + ' Account Management</small>';
+}
+async function rbLoad() {
+    const j = await ownApi('/api/owner/brand');
+    if (j.error) { ownMsg(j.error, false); return; }
+    RB.def = j.default; RB.limits = j.limits;
+    document.getElementById('rb-name').value = j.brand.name;
+    document.getElementById('rb-short').value = j.brand.short;
+    document.getElementById('rb-tag').value = j.brand.tagline;
+    document.getElementById('rb-note').textContent = j.brand.name === j.default.name ? 'The first brand is in use.' : 'The first brand was: ' + j.default.name;
+    rbPreview();
+}
+['rb-name', 'rb-short', 'rb-tag'].forEach(id => document.getElementById(id).addEventListener('input', rbPreview));
+async function rbSave() {
+    const btn = document.getElementById('rb-save'); if (btn.disabled) return;
+    btn.disabled = true; btn.classList.add('is-loading');
+    try {
+        const r = await ownApi('/api/owner/brand', {name: document.getElementById('rb-name').value, short: document.getElementById('rb-short').value, tagline: document.getElementById('rb-tag').value});
+        ownMsg(r.success ? 'Brand saved. Reloading the page...' : (r.error || 'Failed.'), !!r.success);
+        if (r.success) setTimeout(() => location.reload(), 900);
+    } finally { btn.disabled = false; btn.classList.remove('is-loading'); }
+}
+async function rbReset() {
+    if (!confirm('Go back to the first brand?')) return;
+    const r = await ownApi('/api/owner/brand', {reset: true});
+    ownMsg(r.success ? 'Brand reset. Reloading the page...' : (r.error || 'Failed.'), !!r.success);
+    if (r.success) setTimeout(() => location.reload(), 900);
+}
+
 let SEC = {data: null, timer: null};
 function secAgo(t) { const d = Math.max(0, Math.floor(Date.now() / 1000 - t)); return d < 60 ? d + 's ago' : d < 3600 ? Math.floor(d / 60) + ' min ago' : Math.floor(d / 3600) + ' h ago'; }
 async function secLoad(keepForm) {
@@ -2978,6 +3029,7 @@ function ownTab(name) {
     if (name === 'servers') ownRenderServers();
     if (name === 'blocked') ownLoadBlocked();
     if (name === 'shop') shopLoad();
+    if (name === 'rebrand') rbLoad();
     clearInterval(SEC.timer);
     if (name === 'security') { secLoad(false); SEC.timer = setInterval(() => secLoad(true), 10000); }
 }

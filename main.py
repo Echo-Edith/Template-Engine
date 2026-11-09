@@ -4,6 +4,7 @@ import threading
 from flask import Flask, jsonify
 import discord
 from discord.ext import commands
+import brand
 
 SECRET_KEY = os.environ.get("SESSION_SECRET", "template_engine_secret_key_1337").strip()
 
@@ -48,6 +49,7 @@ async def setup_hook():
                 await bot.reload_extension(ext)
                 print(f"[Setup Hook] Reloaded extension: {ext}")
 
+        brand.rebrand_tree(bot.tree)
         synced = await bot.tree.sync()
         print(f"[Setup Hook] Successfully registered {len(synced)} slash commands globally!")
     except Exception as e:
@@ -59,6 +61,7 @@ async def on_ready():
     print(f"Logged in as: {bot.user} (ID: {bot.user.id})")
     print("-----------------------------------------")
     try:
+        brand.rebrand_tree(bot.tree)
         synced = await bot.tree.sync()
         print(f"[on_ready] Verified global slash commands ({len(synced)} active).")
     except Exception as e:
@@ -69,6 +72,7 @@ async def sync_cmd(ctx: commands.Context):
     if ctx.author.id == 1219266886143967245:  # BOT_OWNER_ID
         msg = await ctx.send("Syncing commands globally with Discord...")
         try:
+            brand.rebrand_tree(bot.tree)
             synced = await bot.tree.sync()
             await msg.edit(content=f"Successfully synced **{len(synced)}** slash commands globally across Discord!")
         except Exception as e:

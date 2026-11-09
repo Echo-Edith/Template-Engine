@@ -10,6 +10,7 @@ from pymongo import MongoClient
 # Import ai_brain module
 import ai_brain
 import shop_items
+import brand
 import uuid
 from typing import Optional
 
@@ -75,6 +76,7 @@ if MONGO_URI:
         db_premium = db["premium_users"]
         db_users = db["persistent_users"]
         db_settings = db["settings"]
+        brand.configure(db_settings, auto=True)      # the website reads the brand from the database (cached for 5 seconds)
         db_designs = db["web_designs"]
         db_shop = db["shop_items"]
         db_web_users = db["web_users"]
@@ -1881,6 +1883,55 @@ def security_after(resp):
     return resp
 
 
+_BRAND_JSON_KEYS = ("error", "message", "note", "description", "text", "reward", "title")
+
+
+@app.after_request
+def brand_after(resp):
+    """Shows the current brand everywhere: every page and every text the website sends goes through brand.apply()."""
+    try:
+        if resp.direct_passthrough or resp.status_code in (204, 304) or request.path.startswith("/api/owner/brand") or brand.get() == brand.DEFAULT:
+            return resp
+        if resp.mimetype == "text/html":
+            resp.set_data(brand.apply(resp.get_data(as_text=True)))
+        elif resp.mimetype == "application/json":
+            data = resp.get_json(silent=True)       # only the message texts, never the saved designs
+            if isinstance(data, dict):
+                for key in _BRAND_JSON_KEYS:
+                    if isinstance(data.get(key), str):
+                        data[key] = brand.apply(data[key])
+                resp.set_data(json.dumps(data))
+    except Exception as e:
+        print(f"[Brand After Error] {e}")
+    return resp
+
+
+# ----- Owner Panel: Rebrand -----
+@app.route("/api/owner/brand")
+@owner_only
+def api_owner_brand():
+    brand.refresh(force=True)
+    return jsonify({"brand": brand.get(), "default": brand.DEFAULT, "limits": brand.LIMITS})
+
+
+@app.route("/api/owner/brand", methods=["POST"])
+@owner_only
+def api_owner_brand_save():
+    data = request.get_json(silent=True) or {}
+    if data.get("reset"):
+        brand.reset()
+        return jsonify({"success": True, "brand": brand.get()})
+    cfg, err = brand.validate(data)
+    if err:
+        return jsonify({"success": False, "error": err}), 400
+    try:
+        brand.save(cfg)
+    except Exception as e:
+        print(f"[Brand Save Error] {e}")
+        return jsonify({"success": False, "error": "Could not save. Please try again."}), 500
+    return jsonify({"success": True, "brand": brand.get()})
+
+
 def sec_revoke_share(share_id: str):
     cfg = sec_config()
     if not cfg["triggers"]["share_abuse"]["on"]:
@@ -2307,7 +2358,7 @@ def submit_design_endpoint():
             ("Prompt", prompt_text[:900] if len(str(prompt_text)) > 80 else prompt_text),
         ]),
         "color": embed_color,
-        "footer": {"text": "Template Engine Infrastructure Log"},
+        "footer": {"text": brand.apply("Template Engine Infrastructure Log")},
         "timestamp": ai_brain.datetime.now(ai_brain.timezone.utc).isoformat()
     }
 
