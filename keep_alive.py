@@ -1906,6 +1906,58 @@ def brand_after(resp):
     return resp
 
 
+# ----- Owner Panel: heist times (the bot reads them from the database) -----
+HEIST_DEFAULTS = {"wait": 90, "run": 60, "cooldown": 1800}
+HEIST_RANGE = {"wait": (15, 600), "run": (10, 600), "cooldown": (0, 86400)}
+
+
+def heist_config() -> dict:
+    saved = {}
+    if db_settings is not None:
+        try:
+            saved = db_settings.find_one({"_id": "heist_config"}) or {}
+        except Exception as e:
+            print(f"[Heist Config Error] {e}")
+    out = {}
+    for key, default in HEIST_DEFAULTS.items():
+        lo, hi = HEIST_RANGE[key]
+        try:
+            out[key] = min(hi, max(lo, int(saved.get(key, default))))
+        except (TypeError, ValueError):
+            out[key] = default
+    return out
+
+
+@app.route("/api/owner/heist")
+@owner_only
+def api_owner_heist():
+    return jsonify({"heist": heist_config(), "default": HEIST_DEFAULTS, "range": HEIST_RANGE})
+
+
+@app.route("/api/owner/heist", methods=["POST"])
+@owner_only
+def api_owner_heist_save():
+    data = request.get_json(silent=True) or {}
+    if data.get("reset"):
+        new = dict(HEIST_DEFAULTS)
+    else:
+        new = {}
+        for key, label in (("wait", "Join time"), ("run", "Start wait"), ("cooldown", "Cooldown")):
+            lo, hi = HEIST_RANGE[key]
+            v = data.get(key)
+            if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+                return jsonify({"success": False, "error": f"{label} must be a whole number from {lo} to {hi} seconds."}), 400
+            new[key] = v
+    if db_settings is None:
+        return jsonify({"success": False, "error": "The database is not connected."}), 503
+    try:
+        db_settings.update_one({"_id": "heist_config"}, {"$set": new}, upsert=True)
+    except Exception as e:
+        print(f"[Heist Config Save Error] {e}")
+        return jsonify({"success": False, "error": "Could not save. Please try again."}), 500
+    return jsonify({"success": True, "heist": new})
+
+
 # ----- Owner Panel: Rebrand -----
 @app.route("/api/owner/brand")
 @owner_only

@@ -1190,6 +1190,16 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <div class="own-row"><button class="btn-glass" onclick="ownTrivia(true)">Ask a question now</button></div>
 <p class="own-note" id="own-tr-note"></p>
 <p class="own-note">People cannot start trivia with /trivia. The bot asks a question in this channel on its own. Prizes: 2, 4 or 6 points.</p></div>
+<div class="editor-card"><div class="label-heading">HEIST TIMES</div>
+<label class="label-heading" for="own-h-wait">TIME TO JOIN (SECONDS, 15-600)</label>
+<input class="form-control" id="own-h-wait" type="number" min="15" max="600" inputmode="numeric">
+<label class="label-heading" for="own-h-run" style="margin-top:8px;">WAIT BEFORE THE HEIST STARTS (SECONDS, 10-600) - SNITCH TIME</label>
+<input class="form-control" id="own-h-run" type="number" min="10" max="600" inputmode="numeric">
+<label class="label-heading" for="own-h-cd" style="margin-top:8px;">REST TIME BETWEEN HEISTS (MINUTES, 0-1440)</label>
+<input class="form-control" id="own-h-cd" type="number" min="0" max="1440" inputmode="numeric">
+<div class="own-row"><button class="btn-glass" id="own-h-save" onclick="ownHeistSave()">Save heist times</button><button class="btn-glass btn-secondary-link" onclick="ownHeistSave(true)">Back to normal</button></div>
+<p class="own-note" id="own-h-note"></p>
+<p class="own-note">Join time: how long invited people have to press Join. Start wait: the time between everyone joining and the result, when anyone can use /snitch. Rest time: how long a person must wait before the next heist. New heists use the new times within about 10 seconds.</p></div>
 <div class="editor-card"><div class="label-heading">WEBSITE THEME</div>
 <div class="own-row"><select class="form-control" id="own-theme"></select><button class="btn-glass own-small" onclick="ownTheme()">Save</button></div></div>
 <div class="editor-card"><div class="label-heading">TE PREMIUM ROLES</div>
@@ -3030,6 +3040,7 @@ function ownTab(name) {
     if (name === 'blocked') ownLoadBlocked();
     if (name === 'shop') shopLoad();
     if (name === 'rebrand') rbLoad();
+    if (name === 'overview') ownHeistLoad();
     clearInterval(SEC.timer);
     if (name === 'security') { secLoad(false); SEC.timer = setInterval(() => secLoad(true), 10000); }
 }
@@ -3120,6 +3131,26 @@ function ownTrivia(now) {
     const ch = document.getElementById('own-tr-ch').value.trim();
     if (!ch) { ownMsg('Type the channel ID first.', false); return; }
     ownJob('trivia', {enabled: document.getElementById('own-tr-on').checked, channel_id: ch, interval: parseInt(document.getElementById('own-tr-int').value, 10) || 30, ask_now: now});
+}
+async function ownHeistLoad() {
+    const j = await ownApi('/api/owner/heist');
+    if (j.error) return;
+    const active = document.activeElement && document.activeElement.id;
+    if (active !== 'own-h-wait') document.getElementById('own-h-wait').value = j.heist.wait;
+    if (active !== 'own-h-run') document.getElementById('own-h-run').value = j.heist.run;
+    if (active !== 'own-h-cd') document.getElementById('own-h-cd').value = Math.round(j.heist.cooldown / 60 * 100) / 100;
+}
+async function ownHeistSave(reset) {
+    const btn = document.getElementById('own-h-save'); if (btn.disabled) return;
+    btn.disabled = true; btn.classList.add('is-loading');
+    try {
+        const body = reset ? {reset: true} : {wait: parseInt(document.getElementById('own-h-wait').value, 10), run: parseInt(document.getElementById('own-h-run').value, 10),
+            cooldown: Math.round(parseFloat(document.getElementById('own-h-cd').value) * 60)};
+        const r = await ownApi('/api/owner/heist', body);
+        ownMsg(r.success ? 'Heist times saved.' : (r.error || 'Failed.'), !!r.success);
+        document.getElementById('own-h-note').textContent = r.success ? 'Saved. New heists use these times.' : '';
+        if (r.success) { document.getElementById('own-h-wait').blur(); document.getElementById('own-h-run').blur(); document.getElementById('own-h-cd').blur(); ownHeistLoad(); }
+    } finally { btn.disabled = false; btn.classList.remove('is-loading'); }
 }
 function ownFree(on) { ownJob('free', {on}); }
 function ownLimit(key, id) { ownJob('limit', {key, value: parseInt(document.getElementById(id).value, 10)}); }

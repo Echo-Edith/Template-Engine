@@ -4856,10 +4856,36 @@ GAME_KINDS["crash"] = CrashView
 # ---------------- heist ----------------
 HEIST_MAX = 1000          # the vault never gives more than this in one heist
 HEIST_MAX_INVITES = 5     # people you can invite (the crew is at most 6)
-HEIST_WAIT = 90           # seconds the crew has to answer
-HEIST_COOLDOWN = 1800     # seconds before the same person can join another heist
+HEIST_DEFAULTS = {"wait": 90,         # seconds the crew has to answer
+                  "run": 60,          # seconds the crew waits before the heist starts (this is when someone can snitch)
+                  "cooldown": 1800}   # seconds before the same person can join another heist
+HEIST_RANGE = {"wait": (15, 600), "run": (10, 600), "cooldown": (0, 86400)}
+_HEIST_CFG = {"at": 0.0, "data": dict(HEIST_DEFAULTS)}
+
+
+def heist_times() -> dict:
+    """The times the owner set in the Owner Panel (Overview > Heist). Checked every 10 seconds."""
+    now = _time.time()
+    if now - _HEIST_CFG["at"] < 10:
+        return _HEIST_CFG["data"]
+    _HEIST_CFG["at"] = now
+    saved = {}
+    col = _features.db_settings
+    if col is not None:
+        try:
+            saved = col.find_one({"_id": "heist_config"}) or {}
+        except Exception as e:
+            print(f"[Heist Config Error] {e}")
+    data = {}
+    for key, default in HEIST_DEFAULTS.items():
+        lo, hi = HEIST_RANGE[key]
+        try:
+            data[key] = min(hi, max(lo, int(saved.get(key, default))))
+        except (TypeError, ValueError):
+            data[key] = default
+    _HEIST_CFG["data"] = data
+    return data
 HEIST_LAST = {}           # user id -> time of the last heist
-HEIST_RUN = 60            # seconds the crew waits before the heist starts (this is when someone can snitch)
 HEIST_CHANCE = (0.40, 0.90)   # every heist rolls its own success chance in this range
 SNITCH_OUT = (0.10, 0.40)     # a snitch from outside the crew rolls a win chance in this range
 SNITCH_IN = (0.40, 0.70)      # a crew member who snitches has a better chance (it is a risky move)
@@ -4883,7 +4909,7 @@ def heist_split(total: int, ids: list) -> dict:
 
 
 def heist_wait_left(uid) -> int:
-    return int(HEIST_COOLDOWN - (_time.time() - HEIST_LAST.get(str(uid), 0)))
+    return int(heist_times()["cooldown"] - (_time.time() - HEIST_LAST.get(str(uid), 0)))
 
 
 class HeistView(PersistentGame):
@@ -4926,7 +4952,7 @@ class HeistView(PersistentGame):
                           description=note or f"{self.leader.mention} wants to rob the **Template Engine Vault**!\nPress **Join** to be part of the crew.")
         e.add_field(name="Crew", value="\n".join(lines), inline=False)
         e.add_field(name="Loot", value=f"`1` - `{HEIST_MAX:,}` points, shared equally. More people means more loot!", inline=False)
-        e.set_footer(text=f"The crew has {HEIST_WAIT} seconds to answer. Anyone who says no is left out, the others can still go.")
+        e.set_footer(text=f"The crew has {heist_times()['wait']} seconds to answer. Anyone who says no is left out, the others can still go.")
         return e
 
     def answered(self) -> bool:
@@ -4948,7 +4974,7 @@ class HeistView(PersistentGame):
         for item in self.children:
             item.disabled = True
         self.phase = "running"
-        self.touch(HEIST_RUN)
+        self.touch(heist_times()["run"])
         now = _time.time()
         crew = self.crew_people()
         for p in crew:
@@ -5570,7 +5596,7 @@ class GamblingCog(commands.Cog):
             return await ctx.send(embed=gamble_error(f"You are resting after the last heist. Try again <t:{int(_time.time()) + wait}:R>."), ephemeral=True)
         view = HeistView(_Person.of(ctx.author), [_Person.of(m) for m in members], [ctx.author.id], [])
         view.update_buttons()
-        view.touch(HEIST_WAIT)
+        view.touch(heist_times()["wait"])
         msg = await ctx.send(content=" ".join(m.mention for m in members), embed=view.make_embed(), view=view,
                              allowed_mentions=discord.AllowedMentions(users=members))
         view.attach(msg, ctx.channel.id)
