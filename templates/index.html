@@ -553,6 +553,10 @@ box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.5);
 box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.5);
 }
 
+.btn-glass.is-loading { position: relative; cursor: wait; }
+.btn-glass.is-loading::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -2px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: btn-spin 0.7s linear infinite; }
+@keyframes btn-spin { to { transform: rotate(360deg); } }
 .btn-glass:disabled {
 opacity: 0.5;
 cursor: not-allowed;
@@ -1693,7 +1697,8 @@ async function openPoints() {
 }
 
 // ---------- cosmetics shop (themes and name colors) ----------
-let COS = {data: null, busy: false, previewTimer: null};
+let COS = {data: null, busy: false, busyId: '', previewTimer: null};
+function cosBusy(on, id) { COS.busy = on; COS.busyId = on ? (id || '') : ''; cosRender(); }
 function cosMsg(text, kind) { const el = document.getElementById('cos-msg'); if (el) { el.textContent = text || ''; el.className = 'cos-msg ' + (kind || ''); } }
 function cosClear() { clearTimeout(COS.previewTimer); COS.previewTimer = null; }
 function cosApplySkin(key) { document.documentElement.dataset.skin = key || ''; }
@@ -1709,16 +1714,19 @@ async function loadCosmetics() {
     } catch (e) { cosMsg('Could not reach the server.', 'err'); }
 }
 function cosButtons(it, d) {
+    const off = COS.busy ? ' disabled' : '';                      // every shop button is locked while one action is loading
+    const mine = COS.busy && COS.busyId === it.id;                // the button that was pressed shows the loading spinner
+    const load = mine ? ' is-loading' : '';
     if (it.owned) {
         return it.equipped
-            ? `<button class="btn-glass btn-secondary-link" onclick="cosEquip('${it.kind}','')">Unequip</button>`
-            : `<button class="btn-glass" onclick="cosEquip('${it.kind}','${it.key}')">Equip</button>`;
+            ? `<button class="btn-glass btn-secondary-link${load}"${off} onclick="cosEquip('${it.kind}','','${it.id}')">${mine ? 'Working...' : 'Unequip'}</button>`
+            : `<button class="btn-glass${load}"${off} onclick="cosEquip('${it.kind}','${it.key}','${it.id}')">${mine ? 'Working...' : 'Equip'}</button>`;
     }
     const missing = it.price - d.points;
     const buy = missing > 0
         ? `<button class="btn-glass btn-secondary-link" disabled title="Need ${missing} more">Need ${missing.toLocaleString()}</button>`
-        : `<button class="btn-glass" onclick="cosBuy('${it.id}')">Buy</button>`;
-    return (it.kind === 'skin' ? `<button class="btn-glass btn-secondary-link" onclick="cosPreview('${it.key}')">Preview</button>` : '') + buy;
+        : `<button class="btn-glass${load}"${off} onclick="cosBuy('${it.id}')">${mine ? 'Buying...' : 'Buy'}</button>`;
+    return (it.kind === 'skin' ? `<button class="btn-glass btn-secondary-link"${off} onclick="cosPreview('${it.key}')">Preview</button>` : '') + buy;
 }
 function cosRender() {
     const d = COS.data; if (!d) return;
@@ -1740,7 +1748,7 @@ function cosPreview(key) {
 }
 async function cosBuy(id) {
     if (COS.busy) return;
-    COS.busy = true; cosClear();
+    cosBusy(true, id); cosClear();
     cosMsg('Buying...', '');
     try {
         const r = await fetch('/api/shop/buy', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})});
@@ -1754,10 +1762,11 @@ async function cosBuy(id) {
         }
         cosMsg('The bot is slow right now. Check again in a minute.', 'err');
     } catch (e) { cosMsg('Could not reach the server.', 'err'); }
-    finally { COS.busy = false; }
+    finally { cosBusy(false); }
 }
-async function cosEquip(kind, key) {
-    cosClear();
+async function cosEquip(kind, key, id) {
+    if (COS.busy) return;
+    cosBusy(true, id); cosClear();
     try {
         const r = await fetch('/api/shop/equip', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, key})});
         const j = await r.json();
@@ -1765,6 +1774,7 @@ async function cosEquip(kind, key) {
         cosMsg(key ? 'Equipped!' : 'Removed.', 'ok');
         await loadCosmetics();
     } catch (e) { cosMsg('Could not reach the server.', 'err'); }
+    finally { cosBusy(false); }
 }
 
 // ---------- share link ----------
