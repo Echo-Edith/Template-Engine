@@ -4432,7 +4432,7 @@ class HigherLowerView(discord.ui.View):
 # ---------------- coin flip duel ----------------
 class CoinFlipView(discord.ui.View):
     def __init__(self, challenger, target, bet: int):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.challenger, self.target, self.bet = challenger, target, bet
         self.message = None
         self.done = False
@@ -4913,7 +4913,7 @@ class GamblingCog(commands.Cog):
         if error:
             return await ctx.send(embed=gamble_error(error), ephemeral=True)
         view = CoinFlipView(ctx.author, user, bet)
-        embed = gamble_embed("Coin Flip Duel", f"{ctx.author.mention} challenges {user.mention}!\nEach person bets `{bet}` points. The winner takes `{bet * 2}`.\n{user.mention}, press **Accept** within 60 seconds.", C_GAME)
+        embed = gamble_embed("Coin Flip Duel", f"{ctx.author.mention} challenges {user.mention}!\nEach person bets `{bet}` points. The winner takes `{bet * 2}`.\n{user.mention}, press **Accept** or **Decline**.\n{ctx.author.mention} can press **Decline** to cancel.", C_GAME)
         try:
             view.message = await ctx.send(content=user.mention, embed=embed, view=view, allowed_mentions=discord.AllowedMentions(users=[user]))
         except Exception:
