@@ -44,6 +44,8 @@ db_shop = None
 db_tickets = None
 db_owner_jobs = None
 db_import_requests = None
+db_shop_requests = None
+db_web_users = None
 db_gamble = None
 db_sec_alerts = None
 db_sec_log = None
@@ -73,6 +75,8 @@ if MONGO_URI:
         db_tickets = db["tickets"]
         db_owner_jobs = db["owner_jobs"]
         db_import_requests = db["import_requests"]
+        db_shop_requests = db["shop_requests"]
+        db_web_users = db["web_users"]
         db_gamble = db["gamble_games"]
         db_sec_alerts = db["security_alerts"]
         db_sec_log = db["security_log"]
@@ -4151,6 +4155,46 @@ async def process_security_alerts(bot):
             print(f"[Security DM Error] {oid}: {e}")
 
 
+# -------------------------------------------------------------
+# COSMETICS SHOP: the website asks the bot to buy a theme or name color. Only the bot changes points
+# (the bot keeps points in memory, so the website must never write them itself).
+# -------------------------------------------------------------
+async def process_shop_requests(bot):
+    if db_shop_requests is None or db_web_users is None:
+        return
+    import shop_items
+    try:
+        for _ in range(10):
+            req = db_shop_requests.find_one_and_update({"status": "pending"}, {"$set": {"status": "running"}},
+                                                       sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+            if not req:
+                break
+            result = {"status": "error", "error": "Something went wrong."}
+            try:
+                uid, item = str(req["user_id"]), str(req["item"])
+                price = shop_items.price_of(item)
+                if price is None:
+                    raise ValueError("This item does not exist.")
+                if is_user_blacklisted(uid):
+                    raise ValueError("You cannot buy things right now.")
+                doc = db_web_users.find_one({"_id": uid}) or {}
+                if item in (doc.get("owned") or []):
+                    raise ValueError("You already own this item.")
+                balance = get_user_points(uid)
+                if balance < price:
+                    raise ValueError(f"You need {price - balance:,} more points.")
+                add_user_points(uid, -price)
+                db_web_users.update_one({"_id": uid}, {"$addToSet": {"owned": item}}, upsert=True)
+                result = {"status": "done", "points": get_user_points(uid), "item": item, "name": shop_items.name_of(item)}
+            except ValueError as e:
+                result = {"status": "error", "error": str(e)}
+            except Exception as e:
+                print(f"[Shop Request Error] {e!r}")
+            db_shop_requests.update_one({"_id": req["_id"]}, {"$set": {"status": result["status"], "result": result}})
+    except Exception as e:
+        print(f"[Shop Requests Error] {e}")
+
+
 async def process_owner_jobs(bot):
     """Runs waiting owner jobs. Called every scheduler tick."""
     if db_owner_jobs is None:
@@ -4236,6 +4280,7 @@ class FeaturesCog(commands.Cog):
         await process_owner_jobs(self.bot)
         await process_import_requests(self.bot)
         await process_security_alerts(self.bot)
+        await process_shop_requests(self.bot)
 
     @owner_jobs_loop.before_loop
     async def before_owner_jobs_loop(self):
@@ -4244,6 +4289,7 @@ class FeaturesCog(commands.Cog):
             try:
                 db_owner_jobs.create_index([("status", 1), ("created_at", 1)])
                 db_import_requests.create_index([("status", 1), ("created_at", 1)])
+                db_shop_requests.create_index([("status", 1), ("created_at", 1)])
             except Exception as e:
                 print(f"[Owner Jobs Index Error] {e}")
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ site_theme or 'blueprint' }}" data-free="{{ 1 if free_mode else 0 }}">
+<html lang="en" data-theme="{{ site_theme or 'blueprint' }}" data-skin="{{ skin or '' }}" data-free="{{ 1 if free_mode else 0 }}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -984,6 +984,17 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 #live-banner { position:fixed; left:50%; top:12px; transform:translateX(-50%); width:min(calc(100vw - 24px), 520px); z-index:9998; display:none; align-items:center; gap:10px; justify-content:space-between; padding:10px 12px; background:var(--panel-bg); color:var(--text-title); border:2px solid var(--accent-gold); box-shadow:4px 4px 0 rgba(0,0,0,.4); font-size:.85rem; }
 #live-banner.show { display:flex; }
 </style>
+<style>
+{{ skin_css|safe }}
+.cos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px;margin-top:8px}
+.cos-card{border:2px solid var(--card-border);background:var(--card-bg);padding:10px;display:flex;flex-direction:column;gap:6px}
+.cos-card.eq{border-color:var(--accent-purple)}
+.cos-sw{display:flex;height:34px;border:1px solid var(--card-border)}.cos-sw span{flex:1}
+.cos-name{font-weight:700;font-size:1rem;min-height:34px;display:flex;align-items:center}
+.cos-price{font-size:.78rem;color:var(--text-sub)}
+.cos-btns{display:flex;gap:6px;flex-wrap:wrap}.cos-btns button{flex:1;padding:8px 6px;font-size:.74rem}
+.cos-msg{min-height:20px;font-size:.82rem;margin:6px 0;color:var(--text-sub)}.cos-msg.err{color:var(--accent-red)}.cos-msg.ok{color:var(--accent-green)}
+</style>
 </head>
 <body>
 <!-- Season decorations: shown only for the theme chosen with /theme set -->
@@ -1075,6 +1086,11 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <div class="label-heading">YOUR BALANCE</div>
 <div class="points-big" id="points-balance">-</div>
 </div>
+<div class="editor-card"><div class="label-heading">COSMETICS SHOP</div>
+<p style="font-size:0.78rem;color:var(--text-sub);">Spend points on website themes and name colors. Your name color shows in the Top 10 and on your public profile.</p>
+<div id="cos-msg" class="cos-msg"></div>
+<div class="label-heading" style="margin-top:8px;">WEBSITE THEMES</div><div id="cos-skins" class="cos-grid"></div>
+<div class="label-heading" style="margin-top:14px;">NAME COLORS</div><div id="cos-colors" class="cos-grid"></div></div>
 <div class="editor-card"><div class="label-heading">TOP 10</div><div id="points-board"></div></div>
 <div class="editor-card"><div class="label-heading">SHOP</div><div id="points-shop"></div>
 <p style="font-size:0.75rem; color:var(--text-sub); margin-top:10px;">To buy something, use <code>/shop</code> in the Discord server.</p></div>
@@ -1651,13 +1667,14 @@ async function refreshUsage() {
 async function openPoints() {
     navigateTo('page-points');
     document.getElementById('points-balance').textContent = '...';
+    loadCosmetics();
     try {
         const res = await fetch('/api/points');
         const d = await res.json();
         if (!res.ok || !d.success) { document.getElementById('points-balance').textContent = '-'; alert(d.error || 'Could not load points.'); return; }
         document.getElementById('points-balance').textContent = d.points.toLocaleString() + ' pts';
         document.getElementById('points-board').innerHTML = d.leaderboard.length
-            ? d.leaderboard.map((r, i) => `<div class="lb-row ${r.you ? 'you' : ''}"><span>${i + 1}. ${escapeHtml(r.name)}</span><span>${r.points.toLocaleString()} pts</span></div>`).join('')
+            ? d.leaderboard.map((r, i) => `<div class="lb-row ${r.you ? 'you' : ''}"><span>${i + 1}. <span class="${r.color ? 'nc-' + escapeHtml(r.color) : ''}">${escapeHtml(r.name)}</span></span><span>${r.points.toLocaleString()} pts</span></div>`).join('')
             : '<p style="color:var(--text-sub);">No one has points yet.</p>';
         document.getElementById('points-shop').innerHTML = d.shop.length
             ? d.shop.map(i => `<div class="lb-row"><span>${escapeHtml(i.name)}<br><small style="color:var(--text-sub);">${escapeHtml(i.reward)} \u2022 ${escapeHtml(i.stock)}</small></span><span>${i.discount > 0 && i.your_price !== i.price ? `<s>${i.price.toLocaleString()}</s> ${i.your_price.toLocaleString()}` : i.price.toLocaleString()} pts</span></div>`).join('')
@@ -1665,6 +1682,81 @@ async function openPoints() {
     } catch (e) {
         alert('Could not reach the server. Please try again.');
     }
+}
+
+// ---------- cosmetics shop (themes and name colors) ----------
+let COS = {data: null, busy: false, previewTimer: null};
+function cosMsg(text, kind) { const el = document.getElementById('cos-msg'); if (el) { el.textContent = text || ''; el.className = 'cos-msg ' + (kind || ''); } }
+function cosClear() { clearTimeout(COS.previewTimer); COS.previewTimer = null; }
+function cosApplySkin(key) { document.documentElement.dataset.skin = key || ''; }
+async function loadCosmetics() {
+    try {
+        const res = await fetch('/api/shop/cosmetics', {cache: 'no-store'});
+        const d = await res.json();
+        if (!res.ok || !d.success) { cosMsg(d.error || 'Could not load the shop.', 'err'); return; }
+        COS.data = d;
+        document.getElementById('points-balance').textContent = d.points.toLocaleString() + ' pts';
+        cosApplySkin(d.equipped.skin);
+        cosRender();
+    } catch (e) { cosMsg('Could not reach the server.', 'err'); }
+}
+function cosButtons(it, d) {
+    if (it.owned) {
+        return it.equipped
+            ? `<button class="btn-glass btn-secondary-link" onclick="cosEquip('${it.kind}','')">Unequip</button>`
+            : `<button class="btn-glass" onclick="cosEquip('${it.kind}','${it.key}')">Equip</button>`;
+    }
+    const missing = it.price - d.points;
+    const buy = missing > 0
+        ? `<button class="btn-glass btn-secondary-link" disabled title="Need ${missing} more">Need ${missing.toLocaleString()}</button>`
+        : `<button class="btn-glass" onclick="cosBuy('${it.id}')">Buy</button>`;
+    return (it.kind === 'skin' ? `<button class="btn-glass btn-secondary-link" onclick="cosPreview('${it.key}')">Preview</button>` : '') + buy;
+}
+function cosRender() {
+    const d = COS.data; if (!d) return;
+    const card = it => {
+        const top = it.kind === 'skin'
+            ? `<div class="cos-sw">${it.swatch.map(c => `<span style="background:${c}"></span>`).join('')}</div><div class="cos-name">${escapeHtml(it.name)}</div>`
+            : `<div class="cos-name"><span class="nc-${escapeHtml(it.key)}">${escapeHtml(d.name)}</span></div>`;
+        const status = it.equipped ? 'Equipped' : (it.owned ? 'Owned' : it.price.toLocaleString() + ' pts');
+        return `<div class="cos-card ${it.equipped ? 'eq' : ''}">${top}<div class="cos-price">${escapeHtml(it.name)} - ${status}</div><div class="cos-btns">${cosButtons(it, d)}</div></div>`;
+    };
+    document.getElementById('cos-skins').innerHTML = d.items.filter(i => i.kind === 'skin').map(card).join('');
+    document.getElementById('cos-colors').innerHTML = d.items.filter(i => i.kind === 'color').map(card).join('');
+}
+function cosPreview(key) {
+    cosApplySkin(key);
+    cosMsg('Preview: this is how the "' + key + '" theme looks. It goes back in 8 seconds.', '');
+    cosClear();
+    COS.previewTimer = setTimeout(() => { COS.previewTimer = null; cosApplySkin(COS.data ? COS.data.equipped.skin : ''); cosMsg('', ''); }, 8000);
+}
+async function cosBuy(id) {
+    if (COS.busy) return;
+    COS.busy = true; cosClear();
+    cosMsg('Buying...', '');
+    try {
+        const r = await fetch('/api/shop/buy', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})});
+        const j = await r.json();
+        if (!r.ok || !j.success) { cosMsg(j.error || 'Could not buy this.', 'err'); return; }
+        for (let i = 0; i < 40; i++) {
+            await new Promise(res => setTimeout(res, i < 6 ? 400 : 900));
+            const s = await (await fetch('/api/shop/buy/' + j.id, {cache: 'no-store'})).json();
+            if (s.status === 'done') { cosMsg('You bought ' + (s.result.name || 'the item') + '! Press Equip to use it.', 'ok'); await loadCosmetics(); return; }
+            if (s.status === 'error') { cosMsg((s.result && s.result.error) || 'Could not buy this.', 'err'); return; }
+        }
+        cosMsg('The bot is slow right now. Check again in a minute.', 'err');
+    } catch (e) { cosMsg('Could not reach the server.', 'err'); }
+    finally { COS.busy = false; }
+}
+async function cosEquip(kind, key) {
+    cosClear();
+    try {
+        const r = await fetch('/api/shop/equip', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, key})});
+        const j = await r.json();
+        if (!r.ok || !j.success) { cosMsg(j.error || 'Could not equip this.', 'err'); return; }
+        cosMsg(key ? 'Equipped!' : 'Removed.', 'ok');
+        await loadCosmetics();
+    } catch (e) { cosMsg('Could not reach the server.', 'err'); }
 }
 
 // ---------- share link ----------
@@ -2739,6 +2831,7 @@ async function livePoll() {
         if (!r.ok) return;
         const j = await r.json();
         if (j.theme && document.documentElement.dataset.theme !== j.theme) document.documentElement.dataset.theme = j.theme;
+        if (typeof j.skin === 'string' && !COS.previewTimer && document.documentElement.dataset.skin !== j.skin) document.documentElement.dataset.skin = j.skin;
         const free = !!j.free_mode;
         if (free !== FREE_MODE) {
             FREE_MODE = free;

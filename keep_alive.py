@@ -9,6 +9,7 @@ from pymongo import MongoClient
 
 # Import ai_brain module
 import ai_brain
+import shop_items
 import uuid
 from typing import Optional
 
@@ -53,6 +54,7 @@ db_web_users = None
 db_inbox = None
 db_promos = None
 db_import_requests = None
+db_shop_requests = None
 LOCAL_IMPORTS = {}
 db_sec_counters = None
 db_sec_log = None
@@ -79,6 +81,7 @@ if MONGO_URI:
         db_inbox = db["web_inbox"]
         db_promos = db["promo_codes"]
         db_import_requests = db["import_requests"]
+        db_shop_requests = db["shop_requests"]
         db_sec_counters = db["security_counters"]
         db_sec_log = db["security_log"]
         db_sec_blocks = db["security_blocks"]
@@ -556,6 +559,105 @@ def _discord_name(user_id: str) -> str:
     return name
 
 
+# =====================================================================
+# COSMETICS SHOP: website themes and name colors (bought with TE points)
+# Buying goes through the bot (it owns the points). Equipping only changes a setting, so the website does it.
+# =====================================================================
+_SHOP_LOG = {}
+
+
+def _owned_items(uid: str) -> list:
+    return list((_web_user(uid) or {}).get("owned") or [])
+
+
+def _equipped(uid: str) -> dict:
+    doc = _web_user(uid) or {}
+    owned = set(doc.get("owned") or [])
+    skin = doc.get("skin") if f"skin:{doc.get('skin')}" in owned else ""
+    color = doc.get("name_color") if f"color:{doc.get('name_color')}" in owned else ""
+    return {"skin": skin or "", "name_color": color or ""}
+
+
+def _name_color_of(uid: str) -> str:
+    try:
+        return _equipped(str(uid))["name_color"]
+    except Exception:
+        return ""
+
+
+@app.route("/api/shop/cosmetics")
+def api_shop_cosmetics():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    uid = str(user["id"])
+    points = 0
+    if db_users is not None:
+        try:
+            points = int((db_users.find_one({"discord_id": uid}) or {}).get("points", 0))
+        except Exception as e:
+            print(f"[Shop Points Error] {e}")
+    owned = set(_owned_items(uid))
+    eq = _equipped(uid)
+    items = []
+    for it in shop_items.catalog():
+        it = dict(it)
+        it["owned"] = it["id"] in owned
+        it["equipped"] = (it["kind"] == "skin" and eq["skin"] == it["key"]) or (it["kind"] == "color" and eq["name_color"] == it["key"])
+        items.append(it)
+    return jsonify({"success": True, "points": points, "items": items, "equipped": eq,
+                    "name": (_web_user(uid) or {}).get("name") or user.get("username") or "You"})
+
+
+@app.route("/api/shop/buy", methods=["POST"])
+def api_shop_buy():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    uid = str(user["id"])
+    item = str((request.get_json(silent=True) or {}).get("id", ""))
+    if shop_items.price_of(item) is None:
+        return jsonify({"success": False, "error": "This item does not exist."}), 400
+    if item in _owned_items(uid):
+        return jsonify({"success": False, "error": "You already own this item."}), 400
+    if db_shop_requests is None:
+        return jsonify({"success": False, "error": "The shop is not available right now."}), 503
+    if not _rate_ok(_SHOP_LOG, uid, 12, 60):
+        return jsonify({"success": False, "error": "Too many tries. Please wait a minute."}), 429
+    rid = uuid.uuid4().hex[:12]
+    db_shop_requests.insert_one({"rid": rid, "user_id": uid, "item": item, "status": "pending",
+                                 "created_at": datetime.now(timezone.utc).timestamp()})
+    return jsonify({"success": True, "id": rid})
+
+
+@app.route("/api/shop/buy/<rid>")
+def api_shop_buy_status(rid):
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    req = db_shop_requests.find_one({"rid": str(rid), "user_id": str(user["id"])}) if db_shop_requests is not None else None
+    if not req:
+        return jsonify({"success": False, "status": "missing"}), 404
+    return jsonify({"success": True, "status": req["status"], "result": req.get("result") or {}})
+
+
+@app.route("/api/shop/equip", methods=["POST"])
+def api_shop_equip():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    uid = str(user["id"])
+    data = request.get_json(silent=True) or {}
+    kind, key = str(data.get("kind", "")), str(data.get("key", ""))
+    field = {"skin": "skin", "color": "name_color"}.get(kind)
+    if field is None:
+        return jsonify({"success": False, "error": "Bad request."}), 400
+    if key and f"{kind}:{key}" not in _owned_items(uid):
+        return jsonify({"success": False, "error": "You do not own this item."}), 403
+    _web_user_update(uid, {field: key})
+    return jsonify({"success": True})
+
+
 @app.route("/api/points")
 def api_points():
     user = session.get("user")
@@ -570,7 +672,7 @@ def api_points():
             points = int(doc.get("points", 0))
             for row in db_users.find({"points": {"$gt": 0}}).sort("points", -1).limit(10):
                 rid = str(row.get("discord_id"))
-                board.append({"name": _discord_name(rid), "points": int(row.get("points", 0)), "you": rid == uid})
+                board.append({"name": _discord_name(rid), "points": int(row.get("points", 0)), "you": rid == uid, "color": _name_color_of(rid)})
         if db_shop is not None:
             for item in db_shop.find({}, {"_id": 0}):
                 price = int(item.get("price", 0))
@@ -1153,8 +1255,9 @@ h1{margin:0;font-size:1.3rem;word-break:break-word}.badge{display:inline-block;m
 .meta{color:var(--sub);font-size:.76rem}.cats{margin:8px 0;font-size:.78rem;color:var(--sub);word-break:break-word}
 a.btn{display:inline-block;margin-top:6px;padding:9px 14px;background:var(--acc);color:#fff;text-decoration:none;border:2px solid rgba(0,0,0,.35);font-weight:700;font-size:.78rem;text-transform:uppercase}
 .foot{margin-top:18px;text-align:center}.foot a{color:var(--sub);font-size:.78rem}
+{{ nc_css|safe }}
 </style></head><body><div class="wrap">
-<div class="head"><div class="ava">{{ name[:1] }}</div><div><h1>{{ name }}</h1>
+<div class="head"><div class="ava">{{ name[:1] }}</div><div><h1 class="{{ 'nc-' + name_color if name_color else '' }}">{{ name }}</h1>
 {% if premium %}<span class="badge">TE Premium</span>{% endif %}
 <div class="sub">{{ designs|length }} public design{{ '' if designs|length == 1 else 's' }}</div></div></div>
 <div class="grid">
@@ -1240,7 +1343,8 @@ def public_profile(username):
     viewer = session.get("user") or {}
     theme = ((_web_user(viewer["id"]) or {}).get("theme_mode") if viewer.get("id") else "") or ""
     return render_template_string(PROFILE_PAGE, name=u.get("name") or u.get("username") or "User",
-                                  premium=is_user_premium(uid), designs=designs, theme="light" if theme == "light" else "dark")
+                                  premium=is_user_premium(uid), designs=designs, theme="light" if theme == "light" else "dark",
+                                  name_color=_name_color_of(uid), nc_css=shop_items.name_color_css())
 
 
 # =====================================================================
@@ -1872,6 +1976,7 @@ def api_live():
     resp = jsonify({
         "theme": personal if personal in ("dark", "light") else get_site_theme(),
         "free_mode": get_free_mode(),
+        "skin": _equipped(uid)["skin"] if uid else "",
         "premium": bool(uid) and is_user_premium(uid),
         "maintenance": {"on": bool(m["on"]) and not is_owner(), "message": m["message"] or DEFAULT_MAINTENANCE_TEXT},
     })
@@ -1912,6 +2017,8 @@ def index():
         discord_client_id=DISCORD_CLIENT_ID,
         subscription_price=get_subscription_price(),
         site_theme=(personal_theme if personal_theme in ("dark", "light") else get_site_theme()),
+        skin=(_equipped(str(user["id"]))["skin"] if user and user.get("id") else ""),
+        skin_css=shop_items.skin_css() + "\n" + shop_items.name_color_css(),
         free_mode=get_free_mode(),
         pending_share=pending_share,
         is_owner=bool(user and str(user.get('id', '')) in OWNER_IDS),
