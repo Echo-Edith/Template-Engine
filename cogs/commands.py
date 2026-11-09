@@ -4858,41 +4858,47 @@ def trivia_wins_today(uid: str) -> int:
 
 
 class TriviaView(PersistentGame):
+    """A trivia question stays open (no timer) until the next trivia is posted in the same channel.
+    Everyone has one try. The first correct answer wins the prize, later correct answers only get a message."""
     kind = "trivia"
     LETTERS = "ABCD"
 
-    def __init__(self, data: dict, channel_id: int, seconds: int = 20, options: Optional[list] = None):
+    def __init__(self, data: dict, channel_id: int, seconds: int = 0, options: Optional[list] = None):
         super().__init__()
-        self.seconds = seconds
         self.data, self.channel_id = data, channel_id
-        self.touch(seconds)
         if options is None:
             options = [data["correct"]] + data["wrong"][:3]
             _RNG.shuffle(options)
         self.options = options
         self.correct_index = options.index(data["correct"])
         self.reward = TRIVIA_REWARD.get(data["difficulty"], 4)
-        self.locked_out = set()
+        self.tried = set()            # everyone who already answered (right or wrong)
+        self.winner = None            # {"id": ..., "name": ..., "prize": ...} of the first correct answer
         for i in range(len(options)):
             button = discord.ui.Button(label=self.LETTERS[i], style=discord.ButtonStyle.primary, custom_id=f"te_tv_{i}")
             button.callback = self.make_callback(i)
             self.add_item(button)
 
     def get_state(self) -> dict:
-        return {"data": self.data, "channel_id": self.channel_id, "seconds": self.seconds, "options": self.options, "locked_out": list(self.locked_out)}
+        return {"data": self.data, "channel_id": self.channel_id, "options": self.options, "tried": list(self.tried), "winner": self.winner}
 
     @classmethod
     def from_state(cls, st: dict):
-        view = cls(st["data"], st["channel_id"], st["seconds"], st["options"])
-        view.locked_out = set(st["locked_out"])
+        view = cls(st["data"], st["channel_id"], 0, st["options"])
+        view.tried = set(st.get("tried") or st.get("locked_out") or [])
+        view.winner = st.get("winner")
         return view
-
-    def on_restore(self, bot):
-        TRIVIA_ACTIVE.add(self.channel_id)
 
     def make_embed(self, note: str = "", color: int = C_GAME) -> discord.Embed:
         lines = "\n".join(f"**{self.LETTERS[i]}.** {o}" for i, o in enumerate(self.options))
-        e = gamble_embed("Trivia", f"**{self.data['question']}**\n\n{lines}\n\n{note or f'First correct answer wins! You have {self.seconds} seconds. One try each.'}", color)
+        if not note:
+            if self.winner:
+                prize = f"They won `{self.winner['prize']}` points." if self.winner["prize"] else "No points (daily limit reached)."
+                note = f"\u2705 <@{self.winner['id']}> answered correctly first! {prize}\nYou can still answer until the next trivia, but only one try each."
+                color = C_WIN
+            else:
+                note = "First correct answer wins the prize. One try each. The question stays open until the next trivia."
+        e = gamble_embed("Trivia", f"**{self.data['question']}**\n\n{lines}\n\n{note}", color)
         e.add_field(name="Difficulty", value=f"`{self.data['difficulty']}`", inline=True)
         e.add_field(name="Prize", value=f"`{self.reward}` points", inline=True)
         return e
@@ -4903,32 +4909,29 @@ class TriviaView(PersistentGame):
                 if self.done:
                     return await interaction.response.defer()
                 uid = interaction.user.id
-                if uid in self.locked_out:
-                    return await interaction.response.send_message("You already tried this question.", ephemeral=True)
+                if uid in self.tried:
+                    return await interaction.response.send_message("You already answered this question.", ephemeral=True)
+                self.tried.add(uid)
                 if index != self.correct_index:
-                    self.locked_out.add(uid)
                     await self.save()
-                    return await interaction.response.send_message("Wrong answer! You are out for this question.", ephemeral=True)
-                self.done = True
-                if not await self.claim():      # someone else was faster (or a restart already finished it)
-                    return await interaction.response.defer()
-                for item in self.children:
-                    item.disabled = True
+                    return await interaction.response.send_message("Wrong answer! You cannot answer this question again.", ephemeral=True)
+                if self.winner is not None:      # correct, but someone was first
+                    await self.save()
+                    return await interaction.response.send_message(f"\u2705 Correct! But <@{self.winner['id']}> answered first, so there is no prize.", ephemeral=True)
                 key = str(uid)
-                today = datetime.now(timezone(timedelta(hours=9))).date().isoformat()
                 count = trivia_wins_today(key)
+                prize = 0
                 if count < TRIVIA_DAILY_LIMIT:
-                    TRIVIA_WINS[key] = (today, count + 1)
-                    balance = add_user_points(key, self.reward)
-                    note = f"✅ {interaction.user.mention} got it right: **{self.options[index]}**\nThey win `{self.reward}` points! Balance: `{balance:,}`"
-                else:
-                    note = f"✅ {interaction.user.mention} got it right: **{self.options[index]}**\nNo points: the daily limit of `{TRIVIA_DAILY_LIMIT}` rewards is used up."
-                TRIVIA_ACTIVE.discard(self.channel_id)
-                await interaction.response.edit_message(embed=self.make_embed(note, C_WIN), view=self)
-                self.stop()
+                    TRIVIA_WINS[key] = (datetime.now(timezone(timedelta(hours=9))).date().isoformat(), count + 1)
+                    add_user_points(key, self.reward)
+                    prize = self.reward
+                self.winner = {"id": uid, "name": interaction.user.display_name, "prize": prize}
+                await self.save()
+                await interaction.response.edit_message(embed=self.make_embed(), view=self)
         return callback
 
     async def expire(self):
+        """Called when the next trivia is posted in this channel: the question closes and shows the answer."""
         async with self.lock:
             if self.done:
                 return
@@ -4936,11 +4939,25 @@ class TriviaView(PersistentGame):
             await self.claim()
             for item in self.children:
                 item.disabled = True
-            TRIVIA_ACTIVE.discard(self.channel_id)
+            answer = self.options[self.correct_index]
+            if self.winner:
+                note, color = f"\u2705 Solved by <@{self.winner['id']}>. The answer was **{answer}**.", C_WIN
+            else:
+                note, color = f"\u23F0 Nobody got it. The answer was **{answer}**.", C_LOSE
             try:
-                await self.edit(embed=self.make_embed(f"⏰ Time is up! The answer was **{self.options[self.correct_index]}**.", C_LOSE), view=self)
+                await self.edit(embed=self.make_embed(note, color), view=self)
             except Exception as e:
                 print(f"[Trivia Expire Error] {e}")
+
+
+async def close_old_trivia(channel_id: int):
+    """A new trivia is coming: close the earlier question(s) of this channel."""
+    for view in list(GAME_VIEWS.values()):
+        if getattr(view, "kind", "") == "trivia" and view.channel_id == channel_id and not view.done:
+            try:
+                await view.expire()
+            except Exception as e:
+                print(f"[Trivia Close Error] {e}")
 
 
 GAME_KINDS["trivia"] = TriviaView
@@ -4995,18 +5012,12 @@ class GamblingCog(commands.Cog):
                 return
             cid = int(cfg["channel_id"])
             set_trivia_event(next_at=now + cfg["interval"] * 60)    # set first, so a slow question can never be asked twice
-            if cid in TRIVIA_ACTIVE:
-                return
             channel = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
-            TRIVIA_ACTIVE.add(cid)
-            try:
-                view = TriviaView(await fetch_trivia(), cid, seconds=45)
-                msg = await channel.send(embed=view.make_embed(), view=view)
-                view.attach(msg, cid)
-                await view.save()
-            except Exception:
-                TRIVIA_ACTIVE.discard(cid)
-                raise
+            view = TriviaView(await fetch_trivia(), cid)
+            await close_old_trivia(cid)           # the earlier question closes when the new one comes
+            msg = await channel.send(embed=view.make_embed(), view=view)
+            view.attach(msg, cid)
+            await view.save()
         except Exception as e:
             print(f"[Trivia Event Error] {e}")
 
@@ -5048,7 +5059,7 @@ class GamblingCog(commands.Cog):
         e.add_field(name="Higher or Lower", value=f"`{p}highlow <bet>`\nGuess if the next card is higher or lower. The payout follows the real chance. Cash out any time after one correct guess.", inline=False)
         e.add_field(name="Coin Flip Duel", value=f"`{p}coinflip @user <bet>`\nChallenge a friend. Both bet the same, the winner takes it all. No house edge.", inline=False)
         e.add_field(name="Crash", value=f"`{p}crash <bet>`\nA rocket climbs higher every step. Cash out before it crashes!", inline=False)
-        e.add_field(name="Trivia", value=f"Timed event: the bot asks a question by itself. Use `{p}trivia` to see when the next one comes. First correct answer wins `2`-`6` points (up to `{TRIVIA_DAILY_LIMIT}` rewards a day).", inline=False)
+        e.add_field(name="Trivia", value=f"Timed event: the bot asks a question by itself. Use `{p}trivia` to see when the next one comes. First correct answer wins `2`-`6` points (up to `{TRIVIA_DAILY_LIMIT}` rewards a day). One try each.", inline=False)
         await ctx.send(embed=e)
 
     # ----- blackjack -----
@@ -5210,17 +5221,11 @@ class GamblingCog(commands.Cog):
         cfg = get_trivia_event()
         if str(ctx.author.id) in OWNER_IDS:       # the owner can test a question anywhere
             cid = ctx.channel.id
-            if cid in TRIVIA_ACTIVE:
-                return await ctx.send(embed=gamble_error("A question is already running in this channel."), ephemeral=True)
-            TRIVIA_ACTIVE.add(cid)
-            try:
-                view = TriviaView(await fetch_trivia(), cid)
-                msg = await ctx.send(embed=view.make_embed(), view=view)
-                view.attach(msg, cid)
-                await view.save()
-            except Exception:
-                TRIVIA_ACTIVE.discard(cid)
-                raise
+            view = TriviaView(await fetch_trivia(), cid)
+            await close_old_trivia(cid)
+            msg = await ctx.send(embed=view.make_embed(), view=view)
+            view.attach(msg, cid)
+            await view.save()
             return
         if not cfg["enabled"]:
             return await ctx.send(embed=discord.Embed(title="Trivia is locked", description="The trivia event is off right now.", color=C_PUSH), ephemeral=True)
