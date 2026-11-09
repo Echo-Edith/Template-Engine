@@ -4820,8 +4820,10 @@ HEIST_MAX_INVITES = 5     # people you can invite (the crew is at most 6)
 HEIST_WAIT = 90           # seconds the crew has to answer
 HEIST_COOLDOWN = 1800     # seconds before the same person can join another heist
 HEIST_LAST = {}           # user id -> time of the last heist
-HEIST_RUN = 60            # seconds the heist is running (this is when someone can snitch)
-SNITCH_CHANCE = 0.30      # chance that a snitch wins and the heist fails
+HEIST_RUN = 60            # seconds the crew waits before the heist starts (this is when someone can snitch)
+HEIST_CHANCE = (0.40, 0.90)   # every heist rolls its own success chance in this range
+SNITCH_OUT = (0.10, 0.40)     # a snitch from outside the crew rolls a win chance in this range
+SNITCH_IN = (0.40, 0.70)      # a crew member who snitches has a better chance (it is a risky move)
 SNITCH_REWARD = 1000
 SNITCH_COOLDOWN = 1800
 SNITCH_LAST = {}          # user id -> time of the last snitch try
@@ -4913,10 +4915,10 @@ class HeistView(PersistentGame):
         for p in crew:
             HEIST_LAST[str(p.id)] = now
         e = discord.Embed(title="\U0001F4B0 Vault Heist", color=C_GAME,
-                          description=f"\U0001F510 The crew is breaking into the vault...\n{', '.join(p.mention for p in crew)}")
+                          description=f"\U0001F9E4 The crew is getting ready...\n{', '.join(p.mention for p in crew)}")
         e.add_field(name="Heist ID", value=f"`{self.code}`", inline=True)
-        e.add_field(name="Result", value=f"<t:{int(self.expires_at)}:R>", inline=True)
-        e.set_footer(text=f"Guards are listening. Anyone can use /snitch {self.code} before the heist ends.")
+        e.add_field(name="Starts", value=f"<t:{int(self.expires_at)}:R>", inline=True)
+        e.set_footer(text=f"Anyone can use /snitch {self.code} before the heist starts.")
         await self.save()
         if interaction is not None and not interaction.response.is_done():
             await interaction.response.edit_message(embed=e, view=self)
@@ -4931,6 +4933,18 @@ class HeistView(PersistentGame):
         self.phase = "finished"
         crew = self.crew_people()
         ids = [p.id for p in crew]
+        chance = _RNG.uniform(*HEIST_CHANCE)           # every heist has its own random chance to work
+        if _RNG.random() >= chance:
+            e = discord.Embed(title="\U0001F6A8 Vault Heist: Failed!", color=C_LOSE,
+                              description="The alarm went off! The crew ran away with nothing.")
+            e.add_field(name="Crew", value=", ".join(p.mention for p in crew), inline=False)
+            e.set_footer(text=f"Success chance was {chance * 100:.0f}%.")
+            try:
+                await self.edit(embed=e, view=self)
+            except Exception as err:
+                print(f"[Heist Edit Error] {err}")
+            self.stop()
+            return
         total = heist_loot(len(ids))
         shares = heist_split(total, ids)
         lines = []
@@ -4942,7 +4956,7 @@ class HeistView(PersistentGame):
         e.add_field(name="Crew", value=f"`{len(ids)}` people", inline=True)
         e.add_field(name="Each share", value=f"`{total // len(ids):,}`", inline=True)
         e.add_field(name="Payout", value="\n".join(lines), inline=False)
-        e.set_footer(text=f"Crew of {len(ids)}: the loot is the best of {len(ids)} rolls from 1 to {HEIST_MAX:,}.")
+        e.set_footer(text=f"Success chance was {chance * 100:.0f}%. Crew of {len(ids)}: the loot is the best of {len(ids)} rolls from 1 to {HEIST_MAX:,}.")
         try:
             await self.edit(embed=e, view=self)
         except Exception as err:
@@ -4958,7 +4972,9 @@ class HeistView(PersistentGame):
                 return "tried", []
             self.snitch_tried = True
             crew = self.crew_people()
-            if _RNG.random() >= SNITCH_CHANCE:         # the snitch is caught: the crew learns who it was
+            inside = user_id in [p.id for p in crew]
+            chance = _RNG.uniform(*(SNITCH_IN if inside else SNITCH_OUT))    # random chance, better for someone inside the crew
+            if _RNG.random() >= chance:                # the snitch is caught: the crew learns who it was
                 await self.save()
                 return "lost", crew
             self.done = True
@@ -4967,7 +4983,7 @@ class HeistView(PersistentGame):
             self.phase = "finished"
             add_user_points(str(user_id), SNITCH_REWARD)
             e = discord.Embed(title="\U0001F6A8 Vault Heist: Failed!", color=C_LOSE,
-                              description="The guards were told about the heist. The crew was caught and got nothing!")
+                              description="The guards got a tip about the heist. The crew was caught and got nothing!")
             e.add_field(name="Crew", value=", ".join(p.mention for p in crew), inline=False)
             e.set_footer(text="Nobody knows who the snitch was.")
             try:
@@ -5315,8 +5331,8 @@ class GamblingCog(commands.Cog):
         e.add_field(name="Roulette", value=f"`{p}roulette <bet> <choice>`\nChoices: `red` `black` `even` `odd` `low` `high` (pay `2x`), `1st` `2nd` `3rd` dozen (pay `3x`), or a number `0`-`36` (pays `36x`). There is one green `0`.", inline=False)
         e.add_field(name="Slots", value=f"`{p}slots <bet>`\nThree matching symbols win up to `250x`. Exactly two cherries pay `2x`. Return to player: `{slot_rtp() * 100:.1f}%`.", inline=False)
         e.add_field(name="Higher or Lower", value=f"`{p}highlow <bet>`\nGuess if the next card is higher or lower. The payout follows the real chance. Cash out any time after one correct guess.", inline=False)
-        e.add_field(name="Vault Heist", value=f"`{p}heist @Ann, @Bob`\nRob the vault with friends. Loot is `1`-`1000` points, shared equally. A bigger crew gets more loot. No bet needed. Watch out for snitches!", inline=False)
-        e.add_field(name="Snitch", value=f"`{p}snitch <heist id>`\nTell the guards about a running heist. `30%` to make it fail and win `1000` points. If it fails, the crew sees your name!", inline=False)
+        e.add_field(name="Vault Heist", value=f"`{p}heist @Ann, @Bob`\nRob the vault with friends. Loot is `1`-`1000` points, shared equally. A bigger crew gets more loot. No bet needed, but a heist can fail. The heist starts `60` seconds after the crew joins. Watch out for snitches!", inline=False)
+        e.add_field(name="Snitch", value=f"`{p}snitch <heist id>`\nTell the guards before a heist starts. You get a random chance to make it fail and win `1000` points. Crew members have a better chance. If it fails, the crew sees your name!", inline=False)
         e.add_field(name="Coin Flip Duel", value=f"`{p}coinflip @user <bet>`\nChallenge a friend. Both bet the same, the winner takes it all. No house edge.", inline=False)
         e.add_field(name="Crash", value=f"`{p}crash <bet>`\nA rocket climbs higher every step. Cash out before it crashes!", inline=False)
         e.add_field(name="Trivia", value=f"Timed event: the bot asks a question by itself. Use `{p}trivia` to see when the next one comes. First correct answer wins `2`-`6` points (up to `{TRIVIA_DAILY_LIMIT}` rewards a day). One try each.", inline=False)
@@ -5522,7 +5538,7 @@ class GamblingCog(commands.Cog):
         await view.save()
 
     # ----- snitch -----
-    @commands.hybrid_command(name="snitch", description="Tell the guards about a heist that is running. 30% to win 1000 points.")
+    @commands.hybrid_command(name="snitch", description="Tell the guards about a heist before it starts. Random chance to win 1000 points.")
     @app_commands.describe(heist_id="The Heist ID shown on the running heist.")
     async def snitch_cmd(self, ctx: commands.Context, heist_id: str):
         code = heist_id.strip().strip("`").lower()
@@ -5542,7 +5558,7 @@ class GamblingCog(commands.Cog):
 
         view = next((v for v in GAME_VIEWS.values() if isinstance(v, HeistView) and v.phase == "running" and v.code == code), None)
         if view is None:
-            return await private(gamble_error(f"There is no running heist with the ID `{code[:12]}`."))
+            return await private(gamble_error(f"There is no waiting heist with the ID `{code[:12]}`."))
         wait = int(SNITCH_COOLDOWN - (_time.time() - SNITCH_LAST.get(str(ctx.author.id), 0)))
         if wait > 0:
             return await private(gamble_error(f"The guards do not trust you now. Try again <t:{int(_time.time()) + wait}:R>."))
@@ -5550,17 +5566,17 @@ class GamblingCog(commands.Cog):
         status, crew = await view.snitch(ctx.author.id)
         if status == "late":
             SNITCH_LAST.pop(str(ctx.author.id), None)
-            return await private(gamble_error("Too late. That heist is already over."))
+            return await private(gamble_error("Too late. That heist has already started."))
         if status == "tried":
             SNITCH_LAST.pop(str(ctx.author.id), None)
             return await private(gamble_error("Someone already tried to snitch on this heist."))
         if status == "won":
             balance = get_user_points(str(ctx.author.id))
             return await private(discord.Embed(title="\U0001F6A8 The guards believed you!",
-                                               description=f"The heist failed and nobody knows it was you.\nYou got `+{SNITCH_REWARD:,}` points. Balance `{balance:,}`", color=C_WIN))
+                                               description=f"The heist failed and you got away. Nobody knows it was you.\nYou got `+{SNITCH_REWARD:,}` points. Balance `{balance:,}`", color=C_WIN))
         crew_mentions = " ".join(p.mention for p in crew)
         e = discord.Embed(title="\U0001F440 Snitch caught!", color=C_LOSE,
-                          description=f"{ctx.author.mention} tried to snitch on {crew_mentions}, but the guards did not believe it.\nThe heist goes on!")
+                          description=f"\U0001F575\uFE0F An intel said {ctx.author.mention} is a snitch!\nThey told the guards about {crew_mentions}, but nobody believed it. The heist goes on!")
         await ctx.send(content=crew_mentions, embed=e,
                        allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=p.id) for p in crew]))
 
