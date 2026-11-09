@@ -3881,13 +3881,13 @@ import secrets as _secrets
 
 _RNG = _secrets.SystemRandom()
 GAMBLE_MIN_BET = 1
-GAMBLE_MAX_BET = 10
+GAMBLE_MAX_BET = 100
 GAMBLE_COOLDOWN = 1          # seconds between two games of the same person
 GAMBLE_MAX_OPEN = 5          # games one person can have open at the same time
 GAMBLE_OPEN = {}             # user id -> number of open games
 GAMBLE_LAST = {}
 C_WIN, C_LOSE, C_PUSH, C_GAME = 0x22C55E, 0xEF4444, 0xF59E0B, 0x8B5CF6
-FAIR_FOOTER = "Fair play: every result uses the secure random generator. Max bet is 10 points."
+FAIR_FOOTER = "Fair play: every result uses the secure random generator. Max bet is 100 points."
 
 
 def gamble_begin(uid: str, bet) -> Optional[str]:
@@ -4363,7 +4363,7 @@ class BlackjackView(PersistentGame):
             if self.done or button.disabled:
                 return await interaction.response.defer()
             if get_user_points(str(self.owner_id)) < hand.bet or self.total_bet + hand.bet > GAMBLE_MAX_BET:
-                return await interaction.response.send_message("You cannot double now (max bet is 10 points in one round).", ephemeral=True)
+                return await interaction.response.send_message("You cannot double now (max bet is 100 points in one round).", ephemeral=True)
             add_user_points(str(self.owner_id), -hand.bet)
             hand.bet *= 2
             hand.doubled = True
@@ -4378,7 +4378,7 @@ class BlackjackView(PersistentGame):
             if self.done or button.disabled:
                 return await interaction.response.defer()
             if get_user_points(str(self.owner_id)) < hand.bet or self.total_bet + hand.bet > GAMBLE_MAX_BET:
-                return await interaction.response.send_message("You cannot split now (max bet is 10 points in one round).", ephemeral=True)
+                return await interaction.response.send_message("You cannot split now (max bet is 100 points in one round).", ephemeral=True)
             add_user_points(str(self.owner_id), -hand.bet)
             second = BJHand([hand.cards.pop()], hand.bet)
             hand.cards.append(self.deck.pop())
@@ -4477,7 +4477,7 @@ def slot_rtp() -> float:
 # ---------------- higher / lower ----------------
 HL_EDGE = 0.94          # fair odds times 0.94: the house keeps about 6 percent of each step
 HL_MAX_STEPS = 8
-HL_MAX_PAYOUT = 500
+HL_MAX_PAYOUT = 5000
 
 
 def card_rank(card) -> int:
@@ -5079,8 +5079,8 @@ class GamblingCog(commands.Cog):
         await ctx.send(embed=e)
 
     # ----- blackjack -----
-    @commands.hybrid_command(name="blackjack", aliases=["bj"], description="Play blackjack against the dealer with TE points (bet 1-10).")
-    @app_commands.describe(bet="How many points to bet (1-10).")
+    @commands.hybrid_command(name="blackjack", aliases=["bj"], description="Play blackjack against the dealer with TE points (bet 1-100).")
+    @app_commands.describe(bet="How many points to bet (1-100).")
     async def blackjack_cmd(self, ctx: commands.Context, bet: int):
         uid = str(ctx.author.id)
         error = gamble_begin(uid, bet)
@@ -5105,8 +5105,8 @@ class GamblingCog(commands.Cog):
         await view.save()
 
     # ----- roulette -----
-    @commands.hybrid_command(name="roulette", description="Bet on the roulette wheel with TE points (bet 1-10).")
-    @app_commands.describe(bet="How many points to bet (1-10).", choice="red, black, even, odd, low, high, 1st, 2nd, 3rd or a number 0-36.")
+    @commands.hybrid_command(name="roulette", description="Bet on the roulette wheel with TE points (bet 1-100).")
+    @app_commands.describe(bet="How many points to bet (1-100).", choice="red, black, even, odd, low, high, 1st, 2nd, 3rd or a number 0-36.")
     async def roulette_cmd(self, ctx: commands.Context, bet: int, choice: str):
         parsed = roulette_parse(choice)
         if parsed is None:
@@ -5156,8 +5156,8 @@ class GamblingCog(commands.Cog):
         return out[:25]
 
     # ----- slots -----
-    @commands.hybrid_command(name="slots", aliases=["slot"], description="Spin the slot machine with TE points (bet 1-10).")
-    @app_commands.describe(bet="How many points to bet (1-10).")
+    @commands.hybrid_command(name="slots", aliases=["slot"], description="Spin the slot machine with TE points (bet 1-100).")
+    @app_commands.describe(bet="How many points to bet (1-100).")
     async def slots_cmd(self, ctx: commands.Context, bet: int):
         uid = str(ctx.author.id)
         error = gamble_begin(uid, bet)
@@ -5189,8 +5189,8 @@ class GamblingCog(commands.Cog):
 
 
     # ----- coin flip duel -----
-    @commands.hybrid_command(name="coinflip", aliases=["cf", "duel"], description="Challenge someone to a coin flip for TE points (bet 1-10 each).")
-    @app_commands.describe(user="Who you want to play against.", bet="How many points each of you bets (1-10).")
+    @commands.hybrid_command(name="coinflip", aliases=["cf", "duel"], description="Challenge someone to a coin flip for TE points (bet 1-100 each).")
+    @app_commands.describe(user="Who you want to play against.", bet="How many points each of you bets (1-100).")
     async def coinflip_cmd(self, ctx: commands.Context, user: discord.Member, bet: int):
         if user.bot or user.id == ctx.author.id:
             return await ctx.send(embed=gamble_error("Choose another real person to play against."), ephemeral=True)
@@ -5210,8 +5210,8 @@ class GamblingCog(commands.Cog):
             raise
 
     # ----- crash -----
-    @commands.hybrid_command(name="crash", description="Cash out before the rocket crashes (bet 1-10).")
-    @app_commands.describe(bet="How many points to bet (1-10).")
+    @commands.hybrid_command(name="crash", description="Cash out before the rocket crashes (bet 1-100).")
+    @app_commands.describe(bet="How many points to bet (1-100).")
     async def crash_cmd(self, ctx: commands.Context, bet: int):
         uid = str(ctx.author.id)
         error = gamble_begin(uid, bet)
@@ -5251,8 +5251,8 @@ class GamblingCog(commands.Cog):
         await ctx.send(embed=e, ephemeral=True)
 
     # ----- higher / lower -----
-    @commands.hybrid_command(name="highlow", aliases=["hl", "higherlower"], description="Guess if the next card is higher or lower (bet 1-10).")
-    @app_commands.describe(bet="How many points to bet (1-10).")
+    @commands.hybrid_command(name="highlow", aliases=["hl", "higherlower"], description="Guess if the next card is higher or lower (bet 1-100).")
+    @app_commands.describe(bet="How many points to bet (1-100).")
     async def highlow_cmd(self, ctx: commands.Context, bet: int):
         error = gamble_begin(str(ctx.author.id), bet)
         if error:
