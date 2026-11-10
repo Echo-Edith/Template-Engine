@@ -977,6 +977,210 @@ class SettingsView(discord.ui.View):
         await self.change(interaction, lambda: self._save(blocked=[]))
 
 
+# =============================================================
+# PERMISSION CHECKER VIEW (/permcheck)
+# =============================================================
+def permcheck_embed(guild, findings) -> discord.Embed:
+    import permcheck
+    s = permcheck.score(findings)
+    color = 0x2ECC71 if s >= 80 else (0xF1C40F if s >= 55 else 0xF43F5E)
+    bar = "█" * (s // 10) + "░" * (10 - s // 10)
+    embed = discord.Embed(title=f"Permission Check | {guild.name}", color=color)
+    if not findings:
+        embed.description = "No problems found. Your permissions look safe."
+    else:
+        embed.description = "Here are the problems I found. Press **Fix problems** to see what I will change."
+    embed.add_field(name="Safety Score", value=f"`{s}/100`\n`{bar}`", inline=False)
+    ordered = permcheck.order(findings)
+    lines = []
+    for f in ordered[:8]:
+        mark = "✅" if f.get("fix") else "✋"
+        lines.append(f"{permcheck.SEV_ICON[f['severity']]} **{f['title'][:90]}**\n{f['detail'][:200]}\n{mark} " + ("Can fix with one click" if f.get("fix") else "Fix this by hand"))
+    if lines:
+        text = "\n\n".join(lines)
+        if len(ordered) > 8:
+            text += f"\n\n...and `{len(ordered) - 8}` more."
+        embed.add_field(name="Problems", value=text[:1020], inline=False)
+    embed.set_footer(text="\U0001F534 high  \U0001F7E0 medium  \U0001F7E1 low | Every fix can be undone.")
+    return embed
+
+
+async def permcheck_apply(guild, fix):
+    """Apply one fix. Returns an undo record (dict) or raises."""
+    t = fix["type"]
+    reason = "Template Engine permission check"
+    if t == "role_perm":
+        role = guild.get_role(fix["role_id"])
+        if role is None:
+            raise ValueError("role is gone")
+        perms = role.permissions
+        had = [n for n in fix["remove"] if getattr(perms, n, False)]
+        if not had:
+            return None
+        new = discord.Permissions(perms.value)
+        for n in had:
+            setattr(new, n, False)
+        await role.edit(permissions=new, reason=reason)
+        return {"type": "role_perm", "role_id": role.id, "role_name": fix["role_name"], "restore": had}
+    if t == "chan_perm":
+        ch = guild.get_channel(fix["channel_id"])
+        if ch is None:
+            raise ValueError("channel is gone")
+        everyone = guild.default_role
+        ow = ch.overwrites_for(everyone)
+        prev = {k: getattr(ow, k) for k in fix["set"]}
+        for k, v in fix["set"].items():
+            setattr(ow, k, v)
+        await ch.set_permissions(everyone, overwrite=None if ow.is_empty() else ow, reason=reason)
+        return {"type": "chan_perm", "channel_id": ch.id, "channel_name": fix["channel_name"], "prev": prev}
+    if t == "verification":
+        old = guild.verification_level
+        await guild.edit(verification_level=discord.VerificationLevel(fix["to"]), reason=reason)
+        return {"type": "verification", "to": int(getattr(old, "value", old))}
+    return None
+
+
+async def permcheck_undo(guild, rec):
+    reason = "Template Engine permission check (undo)"
+    t = rec["type"]
+    if t == "role_perm":
+        role = guild.get_role(rec["role_id"])
+        if role is None:
+            return
+        new = discord.Permissions(role.permissions.value)
+        for n in rec["restore"]:
+            setattr(new, n, True)
+        await role.edit(permissions=new, reason=reason)
+    elif t == "chan_perm":
+        ch = guild.get_channel(rec["channel_id"])
+        if ch is None:
+            return
+        everyone = guild.default_role
+        ow = ch.overwrites_for(everyone)
+        for k, v in rec["prev"].items():
+            setattr(ow, k, v)
+        await ch.set_permissions(everyone, overwrite=None if ow.is_empty() else ow, reason=reason)
+    elif t == "verification":
+        await guild.edit(verification_level=discord.VerificationLevel(rec["to"]), reason=reason)
+
+
+class PermCheckView(discord.ui.View):
+    def __init__(self, owner_id: int, guild, findings):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild = guild
+        self.findings = findings
+        self.undo_records = []
+        self.mode = "main"  # main | confirm | done
+        self.busy = False
+        self._build()
+
+    def _build(self):
+        import permcheck
+        self.clear_items()
+        if self.mode == "confirm":
+            apply_btn = discord.ui.Button(label="Apply fixes", style=discord.ButtonStyle.danger, emoji="✅")
+            apply_btn.callback = self.on_apply
+            cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+            cancel.callback = self.on_cancel
+            self.add_item(apply_btn)
+            self.add_item(cancel)
+            return
+        fix_btn = discord.ui.Button(label="Fix problems", style=discord.ButtonStyle.success, emoji="\U0001F527",
+                                    disabled=not permcheck.fixable(self.findings))
+        fix_btn.callback = self.on_fix
+        scan_btn = discord.ui.Button(label="Scan again", style=discord.ButtonStyle.secondary, emoji="\U0001F504")
+        scan_btn.callback = self.on_rescan
+        self.add_item(fix_btn)
+        self.add_item(scan_btn)
+        if self.undo_records:
+            undo = discord.ui.Button(label="Undo last fixes", style=discord.ButtonStyle.danger, emoji="↩")
+            undo.callback = self.on_undo
+            self.add_item(undo)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Only the person who ran this command can use these buttons.", ephemeral=True)
+            return False
+        return True
+
+    async def _show_main(self, interaction, note: Optional[str] = None):
+        self.mode = "main"
+        self._build()
+        embed = permcheck_embed(self.guild, self.findings)
+        if note:
+            embed.add_field(name="Result", value=note[:1000], inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_fix(self, interaction: discord.Interaction):
+        import permcheck
+        todo = permcheck.fixable(self.findings)
+        self.mode = "confirm"
+        self._build()
+        lines = [f"• {permcheck.describe_fix(f['fix'])}" for f in todo]
+        embed = discord.Embed(title="Check Before I Change Anything", color=0xF1C40F,
+                              description="I will make these changes:\n\n" + "\n".join(lines)[:3500])
+        embed.set_footer(text="You can undo all of this with the Undo button.")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_cancel(self, interaction: discord.Interaction):
+        await self._show_main(interaction, "Cancelled. Nothing was changed.")
+
+    async def on_apply(self, interaction: discord.Interaction):
+        import permcheck
+        if self.busy:
+            await interaction.response.defer()
+            return
+        self.busy = True
+        await interaction.response.defer()
+        ok, failed, records = [], [], []
+        for f in permcheck.fixable(self.findings):
+            try:
+                rec = await permcheck_apply(self.guild, f["fix"])
+                if rec:
+                    records.append(rec)
+                ok.append(permcheck.describe_fix(f["fix"]))
+            except discord.Forbidden:
+                failed.append(f"{permcheck.describe_fix(f['fix'])} (I do not have permission)")
+            except Exception as e:
+                failed.append(f"{permcheck.describe_fix(f['fix'])} ({str(e)[:60]})")
+        self.undo_records = records
+        self.findings = permcheck.scan(self.guild)
+        self.busy = False
+        text = f"Fixed `{len(ok)}`, failed `{len(failed)}`."
+        if failed:
+            text += "\n" + "\n".join(f"• {x}" for x in failed[:5])
+        self.mode = "main"
+        self._build()
+        embed = permcheck_embed(self.guild, self.findings)
+        embed.add_field(name="Result", value=text[:1000], inline=False)
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    async def on_undo(self, interaction: discord.Interaction):
+        import permcheck
+        await interaction.response.defer()
+        failed = 0
+        for rec in reversed(self.undo_records):
+            try:
+                await permcheck_undo(self.guild, rec)
+            except Exception as e:
+                failed += 1
+                print(f"[PermCheck Undo Error] {e!r}")
+        n = len(self.undo_records)
+        self.undo_records = []
+        self.findings = permcheck.scan(self.guild)
+        self.mode = "main"
+        self._build()
+        embed = permcheck_embed(self.guild, self.findings)
+        embed.add_field(name="Result", value=f"Undone `{n - failed}` change(s)." + (f" `{failed}` could not be undone." if failed else ""), inline=False)
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    async def on_rescan(self, interaction: discord.Interaction):
+        import permcheck
+        self.findings = permcheck.scan(self.guild)
+        await self._show_main(interaction, "Scanned again.")
+
+
 class BackupConfirmView(discord.ui.View):
     """Confirm step for Restore (clears the server) and Delete."""
 
@@ -3781,6 +3985,24 @@ class CommandsCog(commands.Cog):
         for n, page in enumerate(pages, start=1):
             page.set_footer(text=f"Page {n}/{len(pages)} | AI advice can be wrong. Check it before you change things.")
         await send_pages(interaction, pages, ephemeral=True)
+
+
+    # =============================================================
+    # PERMISSION CHECKER
+    # =============================================================
+    @app_commands.command(name="permcheck", description="Scan this server for risky permissions, get a safety score and fix them with one click.")
+    @app_commands.guild_only()
+    @app_commands.checks.cooldown(1, 15.0, key=lambda i: i.guild_id)
+    async def permcheck_cmd(self, interaction: discord.Interaction):
+        perms = interaction.user.guild_permissions
+        if not (perms.administrator or perms.manage_guild):
+            await interaction.response.send_message("You need the **Manage Server** permission to use this.", ephemeral=True)
+            return
+        import permcheck
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        findings = permcheck.scan(interaction.guild)
+        view = PermCheckView(interaction.user.id, interaction.guild, findings)
+        await interaction.followup.send(embed=permcheck_embed(interaction.guild, findings), view=view, ephemeral=True)
 
 
     # =============================================================
