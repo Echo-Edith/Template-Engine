@@ -822,13 +822,17 @@ class SettingsView(discord.ui.View):
         self.user_id = user_id
 
     async def _name(self, uid: str) -> str:
+        cache = self.__dict__.setdefault("_names", {})
+        if uid in cache:
+            return cache[uid]
         user = self.bot.get_user(int(uid))
         if user is None:
             try:
                 user = await self.bot.fetch_user(int(uid))
             except Exception:
                 user = None
-        return f"{user.name}" if user else f"User {uid[-4:]}"
+        cache[uid] = f"{user.name}" if user else f"User {uid[-4:]}"
+        return cache[uid]
 
     async def build_embed(self, s: dict) -> discord.Embed:
         embed = discord.Embed(title="Your Settings", description="Change how the bot and the website treat you. Only you can see this.", color=COLOR_GOLD)
@@ -894,7 +898,7 @@ class SettingsView(discord.ui.View):
         self.add_item(block)
 
         if s["blocked"]:
-            names = [await self._name(b) for b in s["blocked"][:25]]
+            names = await asyncio.gather(*[self._name(b) for b in s["blocked"][:25]])      # all names at the same time
             unblock = discord.ui.Select(placeholder="Unblock someone", row=4, options=[
                 discord.SelectOption(label=names[i][:100], value=b) for i, b in enumerate(s["blocked"][:25])
             ])
@@ -904,10 +908,19 @@ class SettingsView(discord.ui.View):
             clear.callback = self.unblock_all
             self.add_item(clear)
 
-    async def refresh(self, interaction: discord.Interaction):
-        s = get_user_settings(self.user_id)
+    async def show(self, interaction: discord.Interaction, s: dict):
+        """Draws the window again. The first answer to Discord goes out at once (Discord waits only 3 seconds)."""
         await self.build_items(s)
-        await interaction.response.edit_message(embed=await self.build_embed(s), view=self)
+        await interaction.edit_original_response(embed=await self.build_embed(s), view=self)
+
+    async def change(self, interaction: discord.Interaction, work):
+        """Runs the database work (in a thread, so the bot does not freeze) and then shows the new settings."""
+        await interaction.response.defer()
+        s = await asyncio.to_thread(work)
+        await self.show(interaction, s)
+
+    async def refresh(self, interaction: discord.Interaction):
+        await self.change(interaction, lambda: get_user_settings(self.user_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -915,53 +928,53 @@ class SettingsView(discord.ui.View):
             return False
         return True
 
+    def _save(self, **fields) -> dict:
+        set_user_settings(self.user_id, **fields)
+        return get_user_settings(self.user_id)
+
+    def _flip(self, key: str) -> dict:
+        set_user_settings(self.user_id, **{key: not get_user_settings(self.user_id)[key]})
+        return get_user_settings(self.user_id)
+
     async def toggle_dms(self, interaction: discord.Interaction):
-        set_user_settings(self.user_id, bot_dms=not get_user_settings(self.user_id)["bot_dms"])
-        await self.refresh(interaction)
+        await self.change(interaction, lambda: self._flip("bot_dms"))
 
     async def toggle_notify(self, interaction: discord.Interaction):
-        set_user_settings(self.user_id, inbox_notify=not get_user_settings(self.user_id)["inbox_notify"])
-        await self.refresh(interaction)
+        await self.change(interaction, lambda: self._flip("inbox_notify"))
 
     async def toggle_profile(self, interaction: discord.Interaction):
-        set_user_settings(self.user_id, profile_public=not get_user_settings(self.user_id)["profile_public"])
-        await self.refresh(interaction)
+        await self.change(interaction, lambda: self._flip("profile_public"))
 
     async def pick_theme(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
-        if value in THEME_LABELS:
-            set_user_settings(self.user_id, theme_mode=value)
-        await self.refresh(interaction)
+        await self.change(interaction, (lambda: self._save(theme_mode=value)) if value in THEME_LABELS else (lambda: get_user_settings(self.user_id)))
 
     async def pick_design(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
-        if value in DESIGN_LABELS:
-            set_user_settings(self.user_id, design=value)
-        await self.refresh(interaction)
+        await self.change(interaction, (lambda: self._save(design=value)) if value in DESIGN_LABELS else (lambda: get_user_settings(self.user_id)))
 
     async def block_users(self, interaction: discord.Interaction):
-        s = get_user_settings(self.user_id)
-        blocked = list(s["blocked"])
-        added = []
-        for user in interaction.data.get("values", []):
-            uid = str(user)
-            if uid != str(self.user_id) and uid not in blocked and len(blocked) < 200:
-                blocked.append(uid)
-                added.append(uid)
-        if added:
-            set_user_settings(self.user_id, blocked=blocked)
-            remove_inbox_from(self.user_id, added)
-        await self.refresh(interaction)
+        picked = [str(u) for u in interaction.data.get("values", [])]
+
+        def work():
+            blocked = list(get_user_settings(self.user_id)["blocked"])
+            added = []
+            for uid in picked:
+                if uid != str(self.user_id) and uid not in blocked and len(blocked) < 200:
+                    blocked.append(uid)
+                    added.append(uid)
+            if added:
+                set_user_settings(self.user_id, blocked=blocked)
+                remove_inbox_from(self.user_id, added)
+            return get_user_settings(self.user_id)
+        await self.change(interaction, work)
 
     async def unblock_user(self, interaction: discord.Interaction):
         target = interaction.data["values"][0]
-        s = get_user_settings(self.user_id)
-        set_user_settings(self.user_id, blocked=[b for b in s["blocked"] if b != target])
-        await self.refresh(interaction)
+        await self.change(interaction, lambda: self._save(blocked=[b for b in get_user_settings(self.user_id)["blocked"] if b != target]))
 
     async def unblock_all(self, interaction: discord.Interaction):
-        set_user_settings(self.user_id, blocked=[])
-        await self.refresh(interaction)
+        await self.change(interaction, lambda: self._save(blocked=[]))
 
 
 class BackupConfirmView(discord.ui.View):
@@ -2528,10 +2541,11 @@ class CommandsCog(commands.Cog):
 
     @app_commands.command(name="settings", description="Your personal settings: bot messages, inbox notifications, blocked users and website theme.")
     async def settings_cmd(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         view = SettingsView(self.bot, interaction.user.id)
-        s = get_user_settings(interaction.user.id)
+        s = await asyncio.to_thread(get_user_settings, interaction.user.id)
         await view.build_items(s)
-        await interaction.response.send_message(embed=await view.build_embed(s), view=view, ephemeral=True)
+        await interaction.followup.send(embed=await view.build_embed(s), view=view, ephemeral=True)
 
     # =============================================================
     # MERGED COMMANDS: one command, many actions
