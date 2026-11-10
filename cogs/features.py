@@ -13,6 +13,7 @@ import discord
 from discord.ext import commands, tasks
 from pymongo import MongoClient, ReturnDocument
 import brand
+import designs
 
 # -------------------------------------------------------------
 # GLOBAL CONSTANTS & LOGGING CHANNELS
@@ -1655,7 +1656,7 @@ async def sync_boost_rewards(bot: commands.Bot) -> int:
 # =====================================================================
 # PERSONAL SETTINGS (/settings): saved in the same "web_users" collection the website uses
 # =====================================================================
-DEFAULT_USER_SETTINGS = {"bot_dms": True, "inbox_notify": True, "profile_public": False, "theme_mode": "default", "blocked": []}
+DEFAULT_USER_SETTINGS = {"bot_dms": True, "inbox_notify": True, "profile_public": False, "theme_mode": "default", "design": "default", "blocked": []}
 LOCAL_USER_SETTINGS: Dict[str, dict] = {}
 THEME_MODES = ("default", "dark", "light")
 
@@ -1674,12 +1675,15 @@ def get_user_settings(user_id) -> dict:
             result[key] = doc[key]
     if doc.get("theme_mode") in THEME_MODES:
         result["theme_mode"] = doc["theme_mode"]
+    result["design"] = doc["design"] if designs.valid(doc.get("design")) else "default"     # "default" = the owner's design
     result["blocked"] = [str(b) for b in (doc.get("blocked") or [])]
     return result
 
 
 def set_user_settings(user_id, **fields) -> bool:
     uid = str(user_id)
+    if fields.get("design") == "default":
+        fields["design"] = ""             # the website treats an empty design as "use the owner's design"
     LOCAL_USER_SETTINGS.setdefault(uid, {}).update(fields)
     if db_web_users is not None:
         try:

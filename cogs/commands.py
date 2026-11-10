@@ -10,6 +10,7 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
+import designs as _designs
 
 from cogs.features import (
     build_ticket_panel_embed,
@@ -809,6 +810,7 @@ def backup_embed(backup: dict, title: str, description: str, color: int = COLOR_
 
 
 THEME_LABELS = {"default": "Server default (seasonal)", "dark": "Dark", "light": "Light"}
+DESIGN_LABELS = {"default": "Server default", **{k: v["name"] for k, v in _designs.DESIGNS.items()}}
 
 
 class SettingsView(discord.ui.View):
@@ -845,7 +847,8 @@ class SettingsView(discord.ui.View):
             value=f"`{'On' if s['profile_public'] else 'Off'}`\nA web page with the designs you choose to show. No Discord ID is shown.",
             inline=False
         )
-        embed.add_field(name="Website Theme", value=f"`{THEME_LABELS[s['theme_mode']]}`\nOnly changes the website for you.", inline=False)
+        embed.add_field(name="Website Theme", value=f"`{THEME_LABELS[s['theme_mode']]}`\nOnly changes the colors of the website for you.", inline=True)
+        embed.add_field(name="Website Design", value=f"`{DESIGN_LABELS[s['design']]}`\nChanges the whole layout and look for you.", inline=True)
         if s["blocked"]:
             shown = ", ".join(f"<@{b}>" for b in s["blocked"][:15])
             more = f" and `{len(s['blocked']) - 15}` more" if len(s["blocked"]) > 15 else ""
@@ -878,18 +881,26 @@ class SettingsView(discord.ui.View):
         theme.callback = self.pick_theme
         self.add_item(theme)
 
-        block = discord.ui.UserSelect(placeholder="Block someone on the website", min_values=1, max_values=5, row=2)
+        design = discord.ui.Select(placeholder="Website design (the whole look, only for you)", row=2, options=[
+            discord.SelectOption(label=label, value=key, default=(key == s["design"]),
+                                 description="The design the owner chose" if key == "default" else _designs.DESIGNS[key]["desc"][:100])
+            for key, label in DESIGN_LABELS.items()
+        ])
+        design.callback = self.pick_design
+        self.add_item(design)
+
+        block = discord.ui.UserSelect(placeholder="Block someone on the website", min_values=1, max_values=5, row=3)
         block.callback = self.block_users
         self.add_item(block)
 
         if s["blocked"]:
             names = [await self._name(b) for b in s["blocked"][:25]]
-            unblock = discord.ui.Select(placeholder="Unblock someone", row=3, options=[
+            unblock = discord.ui.Select(placeholder="Unblock someone", row=4, options=[
                 discord.SelectOption(label=names[i][:100], value=b) for i, b in enumerate(s["blocked"][:25])
             ])
             unblock.callback = self.unblock_user
             self.add_item(unblock)
-            clear = discord.ui.Button(label="Unblock everyone", style=discord.ButtonStyle.danger, row=4)
+            clear = discord.ui.Button(label="Unblock everyone", style=discord.ButtonStyle.danger, row=0)
             clear.callback = self.unblock_all
             self.add_item(clear)
 
@@ -920,6 +931,12 @@ class SettingsView(discord.ui.View):
         value = interaction.data["values"][0]
         if value in THEME_LABELS:
             set_user_settings(self.user_id, theme_mode=value)
+        await self.refresh(interaction)
+
+    async def pick_design(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        if value in DESIGN_LABELS:
+            set_user_settings(self.user_id, design=value)
         await self.refresh(interaction)
 
     async def block_users(self, interaction: discord.Interaction):

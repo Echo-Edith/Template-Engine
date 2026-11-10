@@ -11,6 +11,7 @@ from pymongo import MongoClient
 import ai_brain
 import shop_items
 import brand
+import designs
 import uuid
 from typing import Optional
 
@@ -1906,6 +1907,69 @@ def brand_after(resp):
     return resp
 
 
+# ----- Website designs -----
+def get_default_design() -> str:
+    """The design everybody gets until they pick their own (set by the owner)."""
+    if db_settings is not None:
+        try:
+            doc = db_settings.find_one({"_id": "site_design"}) or {}
+            return designs.pick(doc.get("design"))
+        except Exception as e:
+            print(f"[Design Read Error] {e}")
+    return designs.DEFAULT_DESIGN
+
+
+def design_of(user_id) -> str:
+    """One person's design: their own choice, else the owner's default."""
+    mine = ""
+    if user_id:
+        try:
+            mine = (_web_user(str(user_id)) or {}).get("design") or ""
+        except Exception as e:
+            print(f"[Design Read Error] {e}")
+    return designs.pick(mine, get_default_design())
+
+
+@app.route("/api/design")
+def api_design():
+    user = session.get("user") or {}
+    uid = str(user.get("id", ""))
+    mine = ((_web_user(uid) or {}).get("design") if uid else "") or ""
+    return jsonify({"designs": designs.catalog(), "current": design_of(uid), "mine": mine if designs.valid(mine) else "", "default": get_default_design()})
+
+
+@app.route("/api/design", methods=["POST"])
+def api_design_set():
+    user = session.get("user")
+    if not user or not user.get("id"):
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    key = str((request.get_json(silent=True) or {}).get("design", ""))
+    if key != "default" and not designs.valid(key):
+        return jsonify({"success": False, "error": "Unknown design."}), 400
+    try:
+        _web_user_update(str(user["id"]), {"design": "" if key == "default" else key})
+    except Exception as e:
+        print(f"[Design Save Error] {e}")
+        return jsonify({"success": False, "error": "Could not save. Please try again."}), 500
+    return jsonify({"success": True, "design": design_of(user["id"])})
+
+
+@app.route("/api/owner/design", methods=["POST"])
+@owner_only
+def api_owner_design():
+    key = str((request.get_json(silent=True) or {}).get("design", ""))
+    if not designs.valid(key):
+        return jsonify({"success": False, "error": "Unknown design."}), 400
+    if db_settings is None:
+        return jsonify({"success": False, "error": "The database is not connected."}), 503
+    try:
+        db_settings.update_one({"_id": "site_design"}, {"$set": {"design": key}}, upsert=True)
+    except Exception as e:
+        print(f"[Design Save Error] {e}")
+        return jsonify({"success": False, "error": "Could not save. Please try again."}), 500
+    return jsonify({"success": True, "design": key})
+
+
 # ----- Owner Panel: heist times (the bot reads them from the database) -----
 HEIST_DEFAULTS = {"wait": 90, "run": 60, "cooldown": 1800}
 HEIST_RANGE = {"wait": (15, 600), "run": (10, 600), "cooldown": (0, 86400)}
@@ -2162,6 +2226,7 @@ def api_live():
         "theme": personal if personal in ("dark", "light") else get_site_theme(),
         "free_mode": get_free_mode(),
         "skin": _equipped(uid)["skin"] if uid else "",
+        "design": design_of(uid),
         "premium": bool(uid) and is_user_premium(uid),
         "maintenance": {"on": bool(m["on"]) and not is_owner(), "message": m["message"] or DEFAULT_MAINTENANCE_TEXT},
     })
@@ -2202,6 +2267,11 @@ def index():
         discord_client_id=DISCORD_CLIENT_ID,
         subscription_price=get_subscription_price(),
         site_theme=(personal_theme if personal_theme in ("dark", "light") else get_site_theme()),
+        design=(user_design := design_of(user["id"] if user and user.get("id") else "")),
+        design_css=designs.css(user_design),
+        designs=designs.catalog(),
+        default_design=get_default_design(),
+        brand_short=brand.get()["short"],
         skin=(_equipped(str(user["id"]))["skin"] if user and user.get("id") else ""),
         skin_css=shop_items.skin_css() + "\n" + shop_items.name_color_css(),
         free_mode=get_free_mode(),

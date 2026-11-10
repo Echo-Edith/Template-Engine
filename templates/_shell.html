@@ -1,0 +1,67 @@
+{# Shared parts for the website designs: the menu bar (shown only by designs that use it) and the design picker. #}
+<style>
+/* the menu is hidden in the classic design; the other designs show it and style it */
+#shell-nav { display: none; }
+.dp-overlay { position: fixed; inset: 0; z-index: 9000; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, 0.62); }
+.dp-overlay.open { display: flex; }
+.dp-box { width: 100%; max-width: 640px; max-height: 92vh; overflow: auto; background: var(--panel-bg); color: var(--text-title); border: 2px solid var(--panel-border); border-radius: 6px; padding: 20px; box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.45); }
+.dp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+.dp-head h2 { font-size: 1.05rem; }
+.dp-x { background: none; border: 0; color: var(--text-sub); font-size: 1.1rem; cursor: pointer; padding: 6px 10px; }
+.dp-sub { color: var(--text-sub); font-size: 0.8rem; margin-bottom: 14px; }
+.dp-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.dp-card { text-align: left; cursor: pointer; background: var(--glass-inner-bg); color: var(--text-title); border: 2px solid var(--glass-inner-border); border-radius: 4px; padding: 10px; font: inherit; display: flex; flex-direction: column; gap: 6px; }
+.dp-card:hover:not(:disabled) { border-color: var(--accent-purple); }
+.dp-card.on { border-color: var(--accent-purple); box-shadow: 0 0 0 2px var(--accent-soft); }
+.dp-card:disabled { cursor: wait; opacity: 0.6; }
+.dp-card b { font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.dp-card small { color: var(--text-sub); font-size: 0.72rem; line-height: 1.35; }
+.dp-tag { font-size: 0.62rem; font-weight: 700; padding: 2px 6px; border-radius: 99px; background: var(--accent-soft); color: var(--accent-violet); }
+.dp-reset { margin-top: 12px; width: 100%; padding: 10px; cursor: pointer; background: none; color: var(--text-sub); border: 1px dashed var(--glass-inner-border); border-radius: 4px; font: inherit; font-size: 0.8rem; }
+.dp-msg { margin-top: 10px; font-size: 0.8rem; color: var(--accent-red); min-height: 1em; }
+/* small pictures that show the idea of each design */
+.dp-prev { height: 78px; border-radius: 4px; position: relative; overflow: hidden; background: var(--bg-base); border: 1px solid var(--glass-inner-border); }
+.dp-prev i { position: absolute; display: block; }
+.dp-blueprint i:nth-child(1) { left: 22%; right: 22%; top: 12%; bottom: 12%; background: var(--panel-bg); border: 2px solid var(--panel-border); box-shadow: 3px 3px 0 rgba(0, 0, 0, .5); }
+.dp-blueprint i:nth-child(2) { left: 30%; right: 30%; top: 62%; height: 12px; background: var(--accent-purple); }
+.dp-studio i:nth-child(1) { left: 0; top: 0; bottom: 0; width: 24%; background: var(--discord-sidebar); border-right: 1px solid var(--glass-inner-border); }
+.dp-studio i:nth-child(2) { left: 32%; right: 6%; top: 14%; height: 32%; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--card-border); }
+.dp-studio i:nth-child(3) { left: 32%; width: 34%; top: 58%; height: 14px; background: var(--accent-purple); border-radius: 7px; }
+.dp-terminal { background: #050805; }
+.dp-terminal i:nth-child(1) { left: 0; right: 0; top: 0; height: 14px; background: #0c130c; border-bottom: 1px dashed #3d7a3d; }
+.dp-terminal i:nth-child(2) { left: 8%; top: 28%; width: 46%; height: 5px; background: #4cff6a; }
+.dp-terminal i:nth-child(3) { left: 8%; top: 46%; width: 70%; height: 5px; background: #2f8f43; box-shadow: 0 14px 0 #2f8f43; }
+.dp-aurora { background: radial-gradient(circle at 20% 30%, #7c3aed 0, transparent 55%), radial-gradient(circle at 80% 70%, #06b6d4 0, transparent 55%), #0b1020; }
+.dp-aurora i:nth-child(1) { left: 24%; right: 24%; top: 22%; bottom: 14%; background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .3); border-radius: 14px; }
+.dp-aurora i:nth-child(2) { left: 36%; right: 36%; top: 62%; height: 12px; background: #fff; border-radius: 99px; opacity: .85; }
+.dp-prev .dp-fb { inset: 0; background: var(--glass-inner-bg); }
+@media (max-width: 460px) { .dp-grid { grid-template-columns: 1fr; } }
+</style>
+
+{% if user %}
+<nav id="shell-nav" aria-label="Main menu">
+<div class="shell-brand"><span class="shell-logo">{{ brand_short }}</span><span class="shell-name">Template Engine</span></div>
+<div class="shell-links">
+<button type="button" data-go="page-landing" onclick="shellGo('page-landing')"><i class="fa-solid fa-house"></i><span>Home</span></button>
+<button type="button" data-go="page-templates" onclick="shellGo('page-templates')"><i class="fa-solid fa-table-cells-large"></i><span>Templates</span></button>
+<button type="button" data-go="page-history" onclick="shellGo('page-history')"><i class="fa-solid fa-clock-rotate-left"></i><span>My Designs</span></button>
+<button type="button" data-go="page-points" onclick="shellGo('page-points')"><i class="fa-solid fa-coins"></i><span>My Points</span></button>
+<button type="button" data-go="page-inbox" onclick="shellGo('page-inbox')"><i class="fa-solid fa-inbox"></i><span>Inbox</span><b class="inbox-badge" style="display:none;"></b></button>
+{% if is_owner %}<button type="button" data-go="page-owner" onclick="shellGo('page-owner')"><i class="fa-solid fa-crown"></i><span>Owner</span></button>{% endif %}
+</div>
+<div class="shell-foot">
+<button type="button" onclick="openDesignPicker()"><i class="fa-solid fa-palette"></i><span>Design</span></button>
+<a href="/logout"><i class="fa-solid fa-right-from-bracket"></i><span>Logout</span></a>
+</div>
+</nav>
+
+<div class="dp-overlay" id="dp-overlay" onclick="if(event.target===this)closeDesignPicker()">
+<div class="dp-box" role="dialog" aria-modal="true" aria-labelledby="dp-title">
+<div class="dp-head"><h2 id="dp-title">Choose your website design</h2><button type="button" class="dp-x" onclick="closeDesignPicker()" aria-label="Close"><i class="fa-solid fa-xmark"></i></button></div>
+<p class="dp-sub">A design changes the whole layout and look, only for you. You can also change it with <b>/settings</b> in Discord.</p>
+<div class="dp-grid" id="dp-grid"></div>
+<button type="button" class="dp-reset" id="dp-reset" onclick="pickDesign('default')">Use the design the owner chose</button>
+<div class="dp-msg" id="dp-msg"></div>
+</div>
+</div>
+{% endif %}

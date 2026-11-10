@@ -1,0 +1,81 @@
+/* TERMINAL: a console. Monospace text, a tab bar on top, scan lines, a blinking cursor. Colors come from the season theme and the skin. */
+html[data-design="terminal"] body, html[data-design="terminal"] input, html[data-design="terminal"] select, html[data-design="terminal"] textarea, html[data-design="terminal"] button { font-family: var(--mono); }
+html[data-design="terminal"] body { background-image: none; background-color: var(--bg-base); align-items: flex-start; padding: 24px 16px 40px; font-size: 14px; }
+html[data-design="terminal"] body.has-shell { padding-top: 68px; }
+/* scan lines over everything */
+html[data-design="terminal"] body::after { content: ""; position: fixed; inset: 0; z-index: 9990; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.16) 0 1px, transparent 1px 3px), radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.35) 100%); }
+
+/* tab bar */
+html[data-design="terminal"] #shell-nav { display: flex; align-items: center; gap: 6px; position: fixed; z-index: 60; top: 0; left: 0; right: 0; height: 46px; padding: 0 12px;
+  background: var(--bg-base); border-bottom: 1px dashed var(--accent-purple); overflow-x: auto; white-space: nowrap; }
+html[data-design="terminal"] .shell-brand { display: flex; gap: 8px; align-items: center; margin-right: 8px; color: var(--accent-violet); font-weight: 800; }
+html[data-design="terminal"] .shell-logo::after { content: "@engine:~$"; margin-left: 2px; color: var(--text-muted); font-weight: 400; }
+html[data-design="terminal"] .shell-name { display: none; }
+html[data-design="terminal"] .shell-links { display: flex; gap: 2px; flex: 1; }
+html[data-design="terminal"] .shell-foot { display: flex; gap: 2px; }
+html[data-design="terminal"] #shell-nav button, html[data-design="terminal"] #shell-nav a { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; background: none; border: 1px solid transparent; border-radius: 0;
+  color: var(--text-sub); font: inherit; font-size: 0.78rem; text-decoration: none; cursor: pointer; text-transform: lowercase; }
+html[data-design="terminal"] #shell-nav button span::before, html[data-design="terminal"] #shell-nav a span::before { content: "[ "; opacity: .55; }
+html[data-design="terminal"] #shell-nav button span::after, html[data-design="terminal"] #shell-nav a span::after { content: " ]"; opacity: .55; }
+html[data-design="terminal"] #shell-nav i { display: none; }
+html[data-design="terminal"] #shell-nav button:hover, html[data-design="terminal"] #shell-nav a:hover { color: var(--accent-violet); border-color: var(--accent-purple); }
+html[data-design="terminal"] #shell-nav button.on { background: var(--accent-purple); color: var(--on-accent); border-color: var(--accent-purple); font-weight: 800; }
+html[data-design="terminal"] #shell-nav .inbox-badge { border-radius: 0; height: 16px; line-height: 16px; margin-left: 0; }
+
+/* the window */
+html[data-design="terminal"] #panel-wrapper { max-width: 900px; margin: 0 auto; padding: 22px 24px 28px; background: color-mix(in srgb, var(--bg-base) 90%, #000); border: 1px solid var(--accent-purple); border-radius: 0; box-shadow: 0 0 0 1px var(--accent-soft), 0 0 40px -12px var(--accent-purple-glow); }
+html[data-design="terminal"] #panel-wrapper.layout-mode { max-width: 1060px; }
+html[data-design="terminal"] #panel-wrapper.gold-theme { border-color: var(--gold-glass-border); }
+html[data-design="terminal"] #panel-wrapper::after { display: none; }
+/* title line of the window: it shows where you are */
+html[data-design="terminal"] #panel-wrapper::before { content: "~/template-engine $ ls"; position: static; display: block; width: auto; height: auto; border: 0; margin: 0 0 16px; padding: 0 0 8px;
+  border-bottom: 1px dashed var(--glass-inner-border); color: var(--text-muted); font-size: 0.72rem; letter-spacing: .02em; }
+html[data-design="terminal"] body[data-page="page-templates"] #panel-wrapper::before { content: "~/template-engine/templates $ ls"; }
+html[data-design="terminal"] body[data-page="page-history"] #panel-wrapper::before { content: "~/template-engine/designs $ ls -la"; }
+html[data-design="terminal"] body[data-page="page-points"] #panel-wrapper::before { content: "~/template-engine/points $ balance"; }
+html[data-design="terminal"] body[data-page="page-inbox"] #panel-wrapper::before { content: "~/template-engine/inbox $ cat messages"; }
+html[data-design="terminal"] body[data-page="page-owner"] #panel-wrapper::before { content: "root@engine:/owner # ./panel"; color: var(--accent-red); }
+html[data-design="terminal"] body[data-page="page-generator"] #panel-wrapper::before { content: "~/template-engine/generate $ ./build --ai"; }
+html[data-design="terminal"] body[data-page="page-layout"] #panel-wrapper::before { content: "~/template-engine/layout $ vim layout.json"; }
+html[data-design="terminal"] body[data-page="page-permissions"] #panel-wrapper::before { content: "~/template-engine/permissions $ chmod"; }
+html[data-design="terminal"] body[data-page="page-roles-editor"] #panel-wrapper::before { content: "~/template-engine/roles $ vim roles.json"; }
+html[data-design="terminal"] body[data-page="page-final"] #panel-wrapper::before { content: "~/template-engine $ ./build --done"; }
+html[data-design="terminal"] .page.active { animation: term-in .25s steps(6); }
+@keyframes term-in { from { opacity: 0; clip-path: inset(0 0 100% 0); } to { opacity: 1; clip-path: inset(0); } }
+
+/* text */
+html[data-design="terminal"] .brand-header { text-align: left; border-bottom: 0; margin-bottom: 18px; padding-bottom: 0; }
+html[data-design="terminal"] .brand-header h1 { font-size: 1.35rem; letter-spacing: 0; text-transform: none; color: var(--accent-violet); }
+html[data-design="terminal"] .brand-header h1::before { content: "> "; color: var(--text-muted); }
+html[data-design="terminal"] .brand-header h1::after { content: "_"; margin-left: 2px; animation: term-blink 1s steps(2, start) infinite; }
+@keyframes term-blink { to { visibility: hidden; } }
+html[data-design="terminal"] .brand-header p::before { content: "# "; color: var(--text-muted); }
+
+/* buttons and inputs */
+html[data-design="terminal"] .btn-glass { background: transparent; color: var(--accent-violet); border: 1px solid var(--accent-purple); border-radius: 0; box-shadow: none; text-transform: lowercase; font-weight: 700; letter-spacing: 0; font-size: 0.85rem; }
+html[data-design="terminal"] .btn-glass:not(.is-loading)::before { content: "["; opacity: .6; }
+html[data-design="terminal"] .btn-glass:not(.is-loading)::after { content: "]"; opacity: .6; }
+html[data-design="terminal"] .btn-glass:hover:not(:disabled) { background: var(--accent-purple); color: var(--on-accent); transform: none; box-shadow: 0 0 18px -2px var(--accent-purple-glow); }
+html[data-design="terminal"] .btn-glass:active:not(:disabled) { transform: none; box-shadow: none; }
+html[data-design="terminal"] .btn-glass.btn-premium { color: var(--accent-gold); border-color: var(--accent-gold); }
+html[data-design="terminal"] .btn-glass.btn-premium:hover:not(:disabled) { background: var(--accent-gold); color: #120d00; }
+html[data-design="terminal"] .btn-glass:disabled { background: transparent; border-style: dashed; border-color: var(--glass-inner-border); color: var(--text-muted); opacity: .7; }
+html[data-design="terminal"] .btn-secondary-link { color: var(--text-sub); border-color: var(--glass-inner-border); }
+html[data-design="terminal"] .form-control { border: 1px solid var(--input-border); border-radius: 0; background: var(--input-bg); }
+html[data-design="terminal"] .form-control:focus { border-color: var(--accent-purple); box-shadow: 0 0 0 1px var(--accent-purple), 0 0 16px -4px var(--accent-purple-glow); }
+html[data-design="terminal"] .user-auth-card, html[data-design="terminal"] .tpl-card, html[data-design="terminal"] .editor-card, html[data-design="terminal"] .own-stat div { border-radius: 0; border-style: dashed; }
+html[data-design="terminal"] .tpl-card:hover { border-color: var(--accent-purple); }
+html[data-design="terminal"] body.has-shell .landing-links { display: none; }
+
+@media (max-width: 700px) {
+  html[data-design="terminal"] body.has-shell { padding-top: 62px; }
+  html[data-design="terminal"] .shell-logo::after { content: "~$"; }
+  html[data-design="terminal"] #panel-wrapper { padding: 16px 14px 22px; }
+}
+@media (prefers-reduced-motion: reduce) { html[data-design="terminal"] .brand-header h1::after { animation: none; } html[data-design="terminal"] .page.active { animation: none; } }
+
+html[data-design="terminal"] .own-tabs button { width: auto; }
+html[data-theme="light"][data-design="terminal"] body::after { background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.045) 0 1px, transparent 1px 3px); }
+html[data-theme="light"][data-design="terminal"] #panel-wrapper { background: color-mix(in srgb, var(--bg-base) 94%, #fff); box-shadow: 0 0 0 1px var(--accent-soft); }
+html[data-theme="light"][data-design="terminal"] .btn-glass:hover:not(:disabled) { color: #fff; }

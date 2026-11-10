@@ -1,0 +1,87 @@
+/* AURORA: glass cards over a slow moving light show, a floating pill menu, round shapes. Colors come from the season theme and the skin. */
+html[data-design="aurora"] body { font-family: "Segoe UI Variable", Inter, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; background-image: none; background-color: var(--bg-base); align-items: flex-start; padding: 28px 16px 56px; position: relative; overflow-x: hidden; }
+html[data-design="aurora"] body.has-shell { padding-top: 92px; }
+html[data-design="aurora"] body::before { content: ""; position: fixed; inset: -25%; z-index: 0; pointer-events: none; opacity: .5; filter: blur(46px);
+  background: radial-gradient(38% 38% at 18% 24%, var(--accent-purple), transparent 70%), radial-gradient(34% 34% at 82% 18%, var(--accent-violet), transparent 70%),
+              radial-gradient(40% 40% at 62% 86%, var(--accent-green), transparent 72%), radial-gradient(30% 30% at 8% 80%, var(--accent-gold), transparent 70%);
+  animation: aurora-drift 26s ease-in-out infinite alternate; }
+html[data-theme="light"][data-design="aurora"] body::before { opacity: .32; }
+@keyframes aurora-drift { 0% { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); } 50% { transform: translate3d(4%, -3%, 0) rotate(8deg) scale(1.08); } 100% { transform: translate3d(-4%, 3%, 0) rotate(-6deg) scale(1.02); } }
+
+/* floating pill menu */
+html[data-design="aurora"] #shell-nav { display: flex; align-items: center; gap: 4px; position: fixed; z-index: 60; top: 14px; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 20px); padding: 6px;
+  border-radius: 999px; background: color-mix(in srgb, var(--panel-bg) 58%, transparent); border: 1px solid rgba(255, 255, 255, .16); backdrop-filter: blur(20px) saturate(150%); -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow: 0 14px 40px -14px rgba(0, 0, 0, .6), inset 0 1px 0 rgba(255, 255, 255, .14); overflow-x: auto; scrollbar-width: none; }
+html[data-design="aurora"] #shell-nav::-webkit-scrollbar { display: none; }
+html[data-design="aurora"] .shell-brand { display: flex; padding: 0 6px 0 2px; }
+html[data-design="aurora"] .shell-logo { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; font-weight: 800; font-size: 0.72rem; color: var(--on-accent); background: linear-gradient(135deg, var(--accent-violet), var(--accent-purple)); box-shadow: 0 0 18px var(--accent-purple-glow); }
+html[data-design="aurora"] .shell-name { display: none; }
+html[data-design="aurora"] .shell-links, html[data-design="aurora"] .shell-foot { display: flex; gap: 2px; }
+html[data-design="aurora"] .shell-foot { margin-left: 4px; padding-left: 6px; border-left: 1px solid rgba(255, 255, 255, .16); }
+html[data-design="aurora"] #shell-nav button, html[data-design="aurora"] #shell-nav a { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; background: none; border: 0; border-radius: 999px; color: var(--text-sub); font: inherit; font-size: 0.84rem; font-weight: 600; text-decoration: none; cursor: pointer; white-space: nowrap; transition: background .2s, color .2s, transform .2s; }
+html[data-design="aurora"] #shell-nav button:hover, html[data-design="aurora"] #shell-nav a:hover { background: rgba(255, 255, 255, .1); color: var(--text-title); }
+html[data-design="aurora"] #shell-nav button.on { background: linear-gradient(135deg, var(--accent-purple), var(--accent-violet)); color: var(--on-accent); box-shadow: 0 6px 18px -6px var(--accent-purple-glow); }
+html[data-design="aurora"] #shell-nav .inbox-badge { margin-left: 2px; }
+html[data-design="aurora"] .shell-foot span { display: none; }
+html[data-design="aurora"] .shell-foot button, html[data-design="aurora"] .shell-foot a { padding: 9px 12px; }
+
+/* the glass card */
+html[data-design="aurora"] #panel-wrapper { position: relative; z-index: 1; max-width: 800px; margin: 0 auto; padding: 42px 38px; border-radius: 30px;
+  background: color-mix(in srgb, var(--panel-bg) 52%, transparent); backdrop-filter: blur(24px) saturate(150%); -webkit-backdrop-filter: blur(24px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, .16); box-shadow: 0 30px 80px -24px rgba(0, 0, 0, .6), inset 0 1px 0 rgba(255, 255, 255, .16); }
+html[data-design="aurora"] #panel-wrapper.layout-mode { max-width: 1040px; }
+html[data-design="aurora"] #panel-wrapper::before, html[data-design="aurora"] #panel-wrapper::after { display: none; }
+html[data-design="aurora"] #panel-wrapper.gold-theme { border-color: var(--gold-glass-border); background: color-mix(in srgb, var(--panel-bg) 52%, transparent); }
+html[data-design="aurora"] .season-deco { z-index: 1; }
+html[data-design="aurora"] .page.active { animation: aurora-in .55s cubic-bezier(.2, .8, .2, 1); }
+@keyframes aurora-in { from { opacity: 0; transform: translateY(18px) scale(.985); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+
+/* text */
+html[data-design="aurora"] .brand-header { border-bottom: 0; margin-bottom: 26px; }
+html[data-design="aurora"] .brand-header h1 { font-family: inherit; text-transform: none; letter-spacing: -0.03em; font-size: 2.4rem; font-weight: 800; background: linear-gradient(100deg, var(--accent-violet), var(--accent-purple) 55%, var(--accent-green)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
+html[data-design="aurora"] .gold-theme .brand-header h1 { background: linear-gradient(100deg, var(--accent-gold), var(--accent-violet)); -webkit-background-clip: text; background-clip: text; }
+html[data-design="aurora"] .brand-header p { font-family: inherit; font-size: 0.98rem; }
+
+/* buttons and inputs */
+html[data-design="aurora"] .btn-glass { font-family: inherit; text-transform: none; letter-spacing: 0; font-weight: 650; font-size: 0.93rem; border: 0; border-radius: 999px; padding: 15px 22px;
+  background: linear-gradient(135deg, var(--accent-purple), var(--accent-violet)); box-shadow: 0 12px 30px -10px var(--accent-purple-glow), inset 0 1px 0 rgba(255, 255, 255, .3); }
+html[data-design="aurora"] .btn-glass:hover:not(:disabled) { transform: translateY(-3px) scale(1.015); box-shadow: 0 18px 38px -10px var(--accent-purple-glow), inset 0 1px 0 rgba(255, 255, 255, .35); }
+html[data-design="aurora"] .btn-glass:active:not(:disabled) { transform: translateY(0) scale(.99); box-shadow: 0 6px 14px -8px var(--accent-purple-glow); }
+html[data-design="aurora"] .btn-glass.btn-premium { background: linear-gradient(135deg, var(--accent-gold), var(--accent-violet)); }
+html[data-design="aurora"] .btn-glass:disabled { background: rgba(255, 255, 255, .08); box-shadow: none; color: var(--text-muted); }
+html[data-design="aurora"] .btn-secondary-link { background: rgba(255, 255, 255, .08); color: var(--text-title); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); }
+html[data-design="aurora"] .btn-secondary-link:hover:not(:disabled) { background: rgba(255, 255, 255, .16); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .3); }
+html[data-design="aurora"] .form-control { background: rgba(0, 0, 0, .22); border: 1px solid rgba(255, 255, 255, .16); border-radius: 16px; padding: 14px 18px; }
+html[data-design="aurora"] .form-control:focus { border-color: var(--accent-violet); box-shadow: 0 0 0 4px var(--accent-soft), 0 0 24px -6px var(--accent-purple-glow); }
+html[data-theme="light"][data-design="aurora"] .form-control { background: rgba(255, 255, 255, .6); }
+
+/* cards */
+html[data-design="aurora"] .user-auth-card, html[data-design="aurora"] .tpl-card, html[data-design="aurora"] .editor-card, html[data-design="aurora"] .own-stat div, html[data-design="aurora"] .own-list-item, html[data-design="aurora"] .discord-sidebar-wrapper {
+  border-radius: 20px; background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .13); }
+html[data-design="aurora"] .user-auth-card { border-left-width: 1px; border-left-color: rgba(255, 255, 255, .13); }
+html[data-design="aurora"] .tpl-card { transition: transform .25s, background .25s, border-color .25s; }
+html[data-design="aurora"] .tpl-card:hover { transform: translateY(-5px); background: rgba(255, 255, 255, .1); border-color: var(--accent-violet); }
+html[data-design="aurora"] .page-nav { gap: 12px; }
+html[data-design="aurora"] body.has-shell .landing-links { display: none; }
+
+@media (max-width: 640px) {
+  html[data-design="aurora"] body { padding: 14px 10px 40px; }
+  html[data-design="aurora"] body.has-shell { padding-top: 84px; }
+  html[data-design="aurora"] #panel-wrapper { padding: 28px 18px; border-radius: 24px; }
+  html[data-design="aurora"] .brand-header h1 { font-size: 1.8rem; }
+  html[data-design="aurora"] #shell-nav button { flex-direction: column; gap: 3px; padding: 7px 10px; font-size: 0.6rem; border-radius: 18px; }
+  html[data-design="aurora"] #shell-nav .shell-foot span { display: inline; }
+  html[data-design="aurora"] #shell-nav .shell-foot a { display: none; }
+  html[data-design="aurora"] #shell-nav .shell-brand { display: none; }
+  html[data-design="aurora"] body.has-shell { padding-top: 92px; }
+}
+@media (prefers-reduced-motion: reduce) { html[data-design="aurora"] body::before { animation: none; } html[data-design="aurora"] .page.active { animation: none; } }
+
+html[data-design="aurora"] .own-tabs button { width: auto; }
+html[data-theme="light"][data-design="aurora"] .btn-secondary-link { background: rgba(255, 255, 255, .6); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); }
+html[data-theme="light"][data-design="aurora"] .btn-secondary-link:hover:not(:disabled) { background: rgba(255, 255, 255, .85); box-shadow: inset 0 0 0 1px var(--accent-purple); }
+html[data-theme="light"][data-design="aurora"] .own-tabs button:not(.on) { background: rgba(255, 255, 255, .6) !important; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); color: var(--text-title) !important; }
+html[data-theme="light"][data-design="aurora"] .user-auth-card, html[data-theme="light"][data-design="aurora"] .tpl-card, html[data-theme="light"][data-design="aurora"] .editor-card,
+html[data-theme="light"][data-design="aurora"] .own-stat div, html[data-theme="light"][data-design="aurora"] .own-list-item { background: rgba(255, 255, 255, .55); border-color: rgba(0, 0, 0, .1); }
+html[data-theme="light"][data-design="aurora"] #panel-wrapper, html[data-theme="light"][data-design="aurora"] #shell-nav { border-color: rgba(255, 255, 255, .8); background: color-mix(in srgb, var(--panel-bg) 60%, transparent); }
+html[data-theme="light"][data-design="aurora"] #shell-nav button:hover, html[data-theme="light"][data-design="aurora"] #shell-nav a:hover { background: rgba(0, 0, 0, .06); }
