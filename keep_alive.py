@@ -2,6 +2,7 @@ import os
 import secrets
 from datetime import datetime, timezone, timedelta
 import json
+import re
 import asyncio
 import requests
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort, render_template_string, g
@@ -327,6 +328,149 @@ def _template_by_id(template_id: str):
 def _count_layout(layout: dict) -> tuple:
     cats = layout.get("categories", []) or []
     return len(cats), sum(len(c.get("channels", []) or []) for c in cats), len(layout.get("roles", []) or [])
+
+# -------------------------------------------------------------
+# SETUP WIZARD: a short quiz builds a layout with fixed rules (no AI, no cost)
+# -------------------------------------------------------------
+WIZARD_KINDS = {
+    # id: (label, template id to borrow topic categories + roles from, or None)
+    "gaming": "gaming", "anime": "anime", "study": "study", "business": "business",
+    "creator": "creator", "roleplay": "roleplay", "minecraft": "minecraft", "music": "music",
+    "community": None,
+}
+WIZARD_FEATURES = ("tickets", "levels", "giveaways", "verification", "events", "voice", "staff", "suggestions", "media")
+WIZARD_SIZES = {"small": 1, "medium": 2, "large": 3}
+
+
+def _staff_perms(staff_names):
+    perms = {"@everyone": {"view": False}}
+    for n in staff_names:
+        perms[n] = {"view": True, "send": True, "history": True, "embed": True, "attach": True}
+    return perms
+
+
+def build_wizard_layout(answers: dict) -> dict:
+    """answers: kind, name, size, features(list), emoji(bool), safe(bool). Always returns a valid layout."""
+    kind = answers.get("kind") if answers.get("kind") in WIZARD_KINDS else "community"
+    size = WIZARD_SIZES.get(answers.get("size"), 2)
+    feats = {f for f in (answers.get("features") or []) if f in WIZARD_FEATURES}
+    use_emoji = bool(answers.get("emoji", True))
+    safe = bool(answers.get("safe", True))
+    name = re.sub(r"\s+", " ", str(answers.get("name") or "").strip())[:40] or "My Server"
+
+    base = _template_by_id(WIZARD_KINDS[kind]) if WIZARD_KINDS[kind] else None
+    base_layout = json.loads(json.dumps(base["layout"])) if base else None
+
+    # Topic categories come from the matching template (the part that is not info, voice or staff)
+    skip = {"INFORMATION", "VOICE", "STAFF", "MEETINGS", "FOCUS ROOMS"}
+    topic = [c for c in (base_layout["categories"] if base_layout else []) if c["name"] not in skip and not c["name"].startswith("VOICE")]
+    if not topic:
+        topic = [_category("COMMUNITY", "\U0001F4AC", [
+            ("general", "text", "\U0001F4AC", "Talk about anything"), ("introductions", "text", "\U0001F44B", "Say hello"),
+            ("memes", "text", "\U0001F602", "Funny pictures"), ("bot-commands", "text", "\U0001F916", "Use bots here")])]
+    keep = {1: 1, 2: 3, 3: 99}[size]
+    topic = topic[:keep]
+    if size == 3:
+        topic.append(_category("OFF TOPIC", "\U0001F389", [("off-topic", "text", "\U0001F389", "Anything else"), ("pets", "text", "\U0001F43E", "Show your pets"), ("music-and-media", "text", "\U0001F3B5", "Share what you like")]))
+
+    # Roles
+    roles = [("Owner", "#f1c40f"), ("Admin", "#e74c3c"), ("Moderator", "#3498db")]
+    if size == 3:
+        roles.append(("Helper", "#1abc9c"))
+    if base_layout:
+        extra = [(r["name"], r["color"]) for r in base_layout["roles"] if r["name"] not in ("Owner", "Admin", "Moderator", "Member")]
+        roles += extra[: (1 if size == 1 else 3)]
+    if "levels" in feats:
+        roles += [("Level 5", "#7f8c8d"), ("Level 10", "#16a085")] + ([("Level 25", "#8e44ad")] if size >= 2 else [])
+    if "giveaways" in feats:
+        roles.append(("Giveaway Ping", "#e91e63"))
+    if "events" in feats:
+        roles.append(("Event Ping", "#ff9800"))
+    roles.append(("Member", "#95a5a6"))
+    seen, role_list = set(), []
+    for n, c in roles:
+        if n not in seen:
+            seen.add(n)
+            role_list.append({"name": n, "color": c})
+    staff_names = [r["name"] for r in role_list if r["name"] in ("Owner", "Admin", "Moderator", "Helper")]
+
+    cats = []
+    info = [("welcome", "text", "\U0001F44B", "Welcome to the server", True), ("rules", "text", "\U0001F4DC", "Read the rules first", True),
+            ("announcements", "announcement", "\U0001F4E3", "News and updates", True)]
+    if "verification" in feats:
+        info.insert(2, ("verify-here", "text", "✅", "Follow the steps to get access", True))
+    if size >= 2:
+        info.append(("roles-and-info", "text", "\U0001F3F7", "Pick roles and learn about the server", True))
+    cats.append(_category("INFORMATION", "\U0001F4E2", info))
+    cats += topic
+
+    if "levels" in feats:
+        cats.append(_category("LEVELS", "\U0001F4C8", [("level-ups", "text", "\U0001F389", "Level up messages", True), ("leaderboard", "text", "\U0001F3C6", "See the top members", True), ("bot-commands", "text", "\U0001F916", "Check your level here")]))
+    if "giveaways" in feats:
+        cats.append(_category("GIVEAWAYS", "\U0001F381", [("giveaways", "text", "\U0001F381", "Join and win prizes", True), ("winners", "text", "\U0001F3C6", "Past winners", True)]))
+    if "events" in feats:
+        ev = [("events", "announcement", "\U0001F4C5", "What is coming up", True), ("event-chat", "text", "\U0001F4AC", "Talk about events")]
+        if "voice" in feats or size >= 2:
+            ev.append(("Event Stage", "voice", "\U0001F3A4", ""))
+        cats.append(_category("EVENTS", "\U0001F4C5", ev))
+    if "suggestions" in feats:
+        cats.append(_category("FEEDBACK", "\U0001F4A1", [("suggestions", "text", "\U0001F4A1", "Tell us your ideas"), ("bug-reports", "text", "\U0001F41B", "Report a problem")]))
+    if "media" in feats:
+        cats.append(_category("MEDIA", "\U0001F5BC", [("pictures", "text", "\U0001F4F7", "Share your pictures"), ("videos-and-clips", "text", "\U0001F3AC", "Share videos"), ("showcase", "text", "⭐", "Your best work")]))
+    if "tickets" in feats:
+        cats.append(_category("SUPPORT", "\U0001F3AB", [("open-a-ticket", "text", "\U0001F3AB", "Need help? Open a ticket here", True), ("faq", "text", "❓", "Common questions", True), ("help", "text", "\U0001F64B", "Ask the community")]))
+
+    if "voice" in feats:
+        n_voice = {1: 2, 2: 3, 3: 5}[size]
+        names = [("Lounge", "\U0001F6CB"), ("Hangout", "\U0001F3A7"), ("Chill Room", "\U0001F3B5"), ("Room 1", "\U0001F3A7"), ("Room 2", "\U0001F3A7"), ("Music", "\U0001F3B6")]
+        v = [(n, "voice", e, "") for n, e in names[:n_voice]]
+        if size >= 2:
+            v.append(("AFK", "voice", "\U0001F4A4", ""))
+        cats.append(_category("VOICE", "\U0001F50A", v))
+
+    if "staff" in feats:
+        st = [("staff-chat", "text", "\U0001F6E1", "Private staff talk"), ("mod-log", "text", "\U0001F4CB", "Moderation records", True)]
+        if size >= 2:
+            st.append(("reports", "text", "\U0001F6A8", "Member reports"))
+        if size == 3:
+            st += [("staff-commands", "text", "\U0001F916", "Use bots here"), ("Staff Room", "voice", "\U0001F5E3", "")]
+        sc = _category("STAFF", "\U0001F6E1", st)
+        sc["permissions"] = _staff_perms(staff_names)
+        cats.append(sc)
+
+    # Safe mode: every category with a read-only look keeps @everyone from sending (channel flag already does it)
+    if safe:
+        for c in cats:
+            for ch in c["channels"]:
+                if ch["name"] in ("mod-log",):
+                    ch["read_only"] = True
+
+    if not use_emoji:
+        for c in cats:
+            c["emoji"] = ""
+            for ch in c["channels"]:
+                ch["emoji"] = ""
+                ch["formatted_name"] = ch["name"]
+
+    desc = {"gaming": "Play together.", "anime": "For anime and manga fans.", "study": "Study together and stay focused.",
+            "business": "Work together in one place.", "creator": "Where fans and the creator meet.", "roleplay": "Tell stories together.",
+            "minecraft": "Survive and build together.", "music": "Create and share.", "community": "A friendly place to hang out."}[kind]
+    return {"server_name": name, "description": desc, "roles": role_list, "categories": cats}
+
+
+@app.route("/api/wizard", methods=["POST"])
+def api_wizard():
+    user = session.get("user")
+    if not user:
+        return jsonify({"success": False, "error": "Please log in with Discord first."}), 401
+    answers = request.get_json(silent=True) or {}
+    layout = build_wizard_layout(answers)
+    n_cat, n_chan, n_role = _count_layout(layout)
+    if n_chan > 120 or n_cat > 45:  # Discord limits are far higher; this is a safety net
+        return jsonify({"success": False, "error": "That setup is too big. Pick fewer features."}), 400
+    save_design(str(user.get("id", "0")), "template", f"Wizard: {layout['server_name']}", layout)
+    return jsonify({"success": True, "blueprint": layout, "counts": {"categories": n_cat, "channels": n_chan, "roles": n_role}})
+
 
 
 @app.route("/api/templates")

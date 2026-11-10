@@ -746,6 +746,17 @@ gap: 6px;
 .btn-secondary-link { background: transparent; color: var(--text-main, inherit); border: 2px solid var(--card-border); }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .tpl-card { background: var(--card-bg); border: 2px solid var(--card-border); border-radius: 2px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+.wz-progress { height: 6px; background: var(--card-border); margin-bottom: 14px; }
+#wz-bar { height: 100%; width: 0; background: var(--accent, #8b5cf6); transition: width .25s; }
+.wz-q { font-weight: 700; font-size: 1.05rem; margin-bottom: 4px; }
+.wz-hint { font-size: 0.8rem; color: var(--text-sub); margin-bottom: 12px; line-height: 1.5; }
+.wz-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+.wz-opt { background: var(--card-bg); color: inherit; border: 2px solid var(--card-border); padding: 12px 8px; text-align: center; cursor: pointer; font: inherit; border-radius: 2px; }
+.wz-opt .wz-ic { display: block; font-size: 1.5rem; margin-bottom: 4px; }
+.wz-opt small { display: block; color: var(--text-sub); font-size: 0.72rem; margin-top: 2px; }
+.wz-opt.on { border-color: var(--accent, #8b5cf6); box-shadow: 0 0 0 1px var(--accent, #8b5cf6) inset; }
+.wz-nav { display: flex; gap: 10px; margin-top: 14px; }
+.wz-nav .btn-glass { margin-top: 0; flex: 1; }
 .tpl-card .tpl-emoji { font-size: 1.8rem; }
 .tpl-card .tpl-name { font-weight: 700; }
 .tpl-card .tpl-desc, .tpl-card .tpl-meta, .hist-meta { font-size: 0.78rem; color: var(--text-sub); }
@@ -1057,6 +1068,7 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 </button>
 {% if user %}
 <div class="landing-links">
+<button class="btn-glass btn-secondary-link" onclick="openWizard()" style="grid-column:1 / -1;"><i class="fa-solid fa-wand-magic-sparkles"></i> Setup Wizard</button>
 <button class="btn-glass btn-secondary-link" onclick="openTemplates()"><i class="fa-solid fa-table-cells-large"></i> Templates</button>
 <button class="btn-glass btn-secondary-link" onclick="openHistory()"><i class="fa-solid fa-clock-rotate-left"></i> My Designs</button>
 <button class="btn-glass btn-secondary-link" onclick="openPoints()"><i class="fa-solid fa-coins"></i> My Points</button>
@@ -1081,8 +1093,23 @@ html[data-free="1"] [data-fm="off"], html[data-free="0"] [data-fm="on"] { displa
 <button class="btn-glass" id="import-btn" style="margin-top:10px;" onclick="importServer()"><i class="fa-solid fa-file-import"></i> Import server</button>
 <div id="import-msg" style="margin-top:8px; font-size:0.82rem;"></div>
 </div>
+<button class="btn-glass" style="margin-bottom:14px;" onclick="openWizard()"><i class="fa-solid fa-wand-magic-sparkles"></i> Not sure? Answer 5 questions and build one</button>
 <div id="template-grid" class="card-grid"></div>
 <button class="btn-glass btn-secondary-link" style="margin-top:16px;" onclick="navigateTo('page-landing')"><i class="fa-solid fa-arrow-left"></i> Back</button>
+</div>
+
+<div id="page-wizard" class="page">
+<div class="brand-header">
+<h1>Setup Wizard</h1>
+<p>Answer a few questions. I build the design for you. No AI wait, no cost.</p>
+</div>
+<div class="wz-progress"><div id="wz-bar"></div></div>
+<div class="editor-card" id="wz-card"></div>
+<div class="wz-nav">
+<button class="btn-glass btn-secondary-link" id="wz-back" onclick="wzStep(-1)"><i class="fa-solid fa-arrow-left"></i> Back</button>
+<button class="btn-glass" id="wz-next" onclick="wzStep(1)">Next <i class="fa-solid fa-arrow-right"></i></button>
+</div>
+<div id="wz-msg" style="margin-top:8px; font-size:0.82rem;"></div>
 </div>
 
 <!-- PAGE: MY POINTS -->
@@ -2031,6 +2058,82 @@ function loadLayoutIntoEditor(blueprint) {
     if (undoBtn) undoBtn.style.display = 'none';
     renderDashboard();
     navigateTo('page-layout');
+}
+
+// ---------- SETUP WIZARD ----------
+const WZ_STEPS = [
+    {key: 'kind', q: 'What is your server about?', hint: 'This picks the main channels and roles.', multi: false, opts: [
+        ['gaming','\u{1F3AE}','Gaming',''],['anime','\u{1F338}','Anime',''],['study','\u{1F4DA}','Study',''],['business','\u{1F4BC}','Team / Work',''],
+        ['creator','\u{1F3A5}','Creator',''],['roleplay','\u{1F3F0}','Roleplay',''],['minecraft','\u26CF','Minecraft',''],['music','\u{1F3B5}','Music & Art',''],['community','\u{1F4AC}','Just friends','General chat']]},
+    {key: 'size', q: 'How big will it be?', hint: 'Bigger servers get more channels and staff roles.', multi: false, opts: [
+        ['small','\u{1F331}','Small','Under 50 people'],['medium','\u{1F333}','Medium','50 to 500'],['large','\u{1F3D4}','Large','500 or more']]},
+    {key: 'features', q: 'What do you want?', hint: 'Pick as many as you like.', multi: true, opts: [
+        ['tickets','\u{1F3AB}','Tickets','Support help'],['levels','\u{1F4C8}','Levels','Level roles'],['giveaways','\u{1F381}','Giveaways',''],
+        ['verification','\u2705','Verification','Check new members'],['events','\u{1F4C5}','Events',''],['voice','\u{1F50A}','Voice rooms',''],
+        ['staff','\u{1F6E1}','Private staff area',''],['suggestions','\u{1F4A1}','Suggestions',''],['media','\u{1F5BC}','Media','Pictures and clips']]},
+    {key: 'emoji', q: 'What style do you like?', hint: 'You can change names later in the editor.', multi: false, opts: [
+        ['1','\u{1F604}','With emojis','\u{1F4AC} \u2502 general'],['0','\u25AB','Clean','general']]},
+    {key: 'name', q: 'What is the server name?', hint: 'Up to 40 letters. You can change it later.', text: true},
+];
+let wzI = 0;
+let wzA = {kind: '', size: 'medium', features: ['staff', 'voice'], emoji: '1', name: ''};
+
+function openWizard() {
+    wzI = 0;
+    document.getElementById('wz-msg').textContent = '';
+    navigateTo('page-wizard');
+    wzRender();
+}
+
+function wzRender() {
+    const st = WZ_STEPS[wzI];
+    const card = document.getElementById('wz-card');
+    let h = `<div class="wz-q">${wzI + 1}. ${st.q}</div><div class="wz-hint">${st.hint}</div>`;
+    if (st.text) {
+        h += `<input class="form-control" id="wz-name" maxlength="40" placeholder="My Server" value="${escapeHtml(wzA.name)}" oninput="wzA.name = this.value">`;
+    } else {
+        h += '<div class="wz-opts">' + st.opts.map(o => {
+            const on = st.multi ? wzA.features.includes(o[0]) : String(wzA[st.key]) === o[0];
+            return `<button type="button" class="wz-opt ${on ? 'on' : ''}" onclick="wzPick('${o[0]}')"><span class="wz-ic">${o[1]}</span>${o[2]}${o[3] ? `<small>${o[3]}</small>` : ''}</button>`;
+        }).join('') + '</div>';
+    }
+    card.innerHTML = h;
+    document.getElementById('wz-bar').style.width = ((wzI + 1) / WZ_STEPS.length * 100) + '%';
+    document.getElementById('wz-back').style.visibility = wzI === 0 ? 'hidden' : 'visible';
+    const last = wzI === WZ_STEPS.length - 1;
+    document.getElementById('wz-next').innerHTML = last ? '<i class="fa-solid fa-wand-magic-sparkles"></i> Build my design' : 'Next <i class="fa-solid fa-arrow-right"></i>';
+}
+
+function wzPick(v) {
+    const st = WZ_STEPS[wzI];
+    if (st.multi) {
+        const i = wzA.features.indexOf(v);
+        if (i >= 0) wzA.features.splice(i, 1); else wzA.features.push(v);
+    } else {
+        wzA[st.key] = v;
+    }
+    wzRender();
+}
+
+async function wzStep(d) {
+    const msg = document.getElementById('wz-msg');
+    msg.textContent = '';
+    if (d < 0) { wzI = Math.max(0, wzI - 1); wzRender(); return; }
+    if (WZ_STEPS[wzI].key === 'kind' && !wzA.kind) { msg.textContent = 'Please pick one.'; return; }
+    if (wzI < WZ_STEPS.length - 1) { wzI++; wzRender(); return; }
+    const btn = document.getElementById('wz-next');
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/wizard', {method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({kind: wzA.kind, size: wzA.size, features: wzA.features, emoji: wzA.emoji === '1', name: wzA.name, safe: true})});
+        const data = await res.json();
+        if (res.ok && data.success) loadLayoutIntoEditor(data.blueprint);
+        else msg.textContent = data.error || 'Could not build the design.';
+    } catch (e) {
+        msg.textContent = 'Could not reach the server. Please try again.';
+    } finally {
+        btn.disabled = false;
+    }
 }
 
 async function openTemplates() {
