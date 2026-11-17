@@ -70,7 +70,7 @@ LOCAL_DESIGNS = []  # used only when there is no database
 
 if MONGO_URI:
     try:
-        mongo_client = MongoClient(MONGO_URI)
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000, socketTimeoutMS=20000)
         try:
             db = mongo_client.get_default_database()
         except Exception:

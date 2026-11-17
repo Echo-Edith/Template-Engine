@@ -87,15 +87,39 @@ async def runner():
     async with bot:
         await bot.start(token.strip())
 
+def keep_awake():
+    """Render free web services sleep after about 15 minutes without a visit. This visits our own public address."""
+    import time
+    import urllib.request
+    url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if not url:
+        return
+    time.sleep(60)
+    while True:
+        try:
+            urllib.request.urlopen(url.rstrip("/") + "/health", timeout=15).read()
+        except Exception as e:
+            print(f"[Keep Awake] {e!r}")
+        time.sleep(600)
+
 def main():
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
+    threading.Thread(target=keep_awake, daemon=True).start()
     print("Background web server started on port 10000.")
 
     try:
         asyncio.run(runner())
+        print("[Main] The bot stopped without an error.")
     except KeyboardInterrupt:
         print("Bot runner shutdown gracefully.")
+    except BaseException as e:
+        # Print the reason in the logs, wait a little (so Discord does not block fast restarts), then exit so the host restarts us.
+        import traceback, time
+        print(f"[Main] The bot crashed: {e!r}")
+        traceback.print_exc()
+        time.sleep(15)
+        raise
 
 if __name__ == "__main__":
     main()

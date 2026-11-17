@@ -54,7 +54,7 @@ db_sec_log = None
 
 if MONGO_URI:
     try:
-        mongo_client = MongoClient(MONGO_URI)
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000, socketTimeoutMS=20000)
         try:
             db = mongo_client.get_default_database()
         except Exception:
@@ -3689,8 +3689,8 @@ async def process_import_requests(bot):
         return
     try:
         for _ in range(5):
-            req = db_import_requests.find_one_and_update({"status": "pending"}, {"$set": {"status": "running"}},
-                                                         sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+            req = await asyncio.to_thread(lambda: db_import_requests.find_one_and_update({"status": "pending"}, {"$set": {"status": "running"}},
+                                                         sort=[("created_at", 1)], return_document=ReturnDocument.AFTER))
             if not req:
                 break
             result = {"status": "error", "error": "Something went wrong."}
@@ -4187,11 +4187,11 @@ async def process_shop_requests(bot):
     if db_shop_requests is None or db_web_users is None:
         return
     import shop_items
-    refresh_cosmetic_prices()
+    await asyncio.to_thread(refresh_cosmetic_prices)
     try:
         for _ in range(10):
-            req = db_shop_requests.find_one_and_update({"status": "pending"}, {"$set": {"status": "running"}},
-                                                       sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+            req = await asyncio.to_thread(lambda: db_shop_requests.find_one_and_update({"status": "pending"}, {"$set": {"status": "running"}},
+                                                       sort=[("created_at", 1)], return_document=ReturnDocument.AFTER))
             if not req:
                 break
             result = {"status": "error", "error": "Something went wrong."}
@@ -4233,9 +4233,9 @@ async def process_owner_jobs(bot):
                                       {"$set": {"status": "error", "result": "The bot stopped while running this.", "finished_at": now}})
             db_owner_jobs.delete_many({"finished_at": {"$lt": now - 14 * 86400}})
         for _ in range(10):
-            job = db_owner_jobs.find_one_and_update(
+            job = await asyncio.to_thread(lambda: db_owner_jobs.find_one_and_update(
                 {"status": "pending"}, {"$set": {"status": "running", "started_at": now}},
-                sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
+                sort=[("created_at", 1)], return_document=ReturnDocument.AFTER))
             if not job:
                 break
             try:
@@ -4302,11 +4302,14 @@ class FeaturesCog(commands.Cog):
     # even while the slower scheduler is busy with giveaways.
     @tasks.loop(seconds=1)
     async def owner_jobs_loop(self):
-        await process_brand_change(self.bot)
-        await process_owner_jobs(self.bot)
-        await process_import_requests(self.bot)
-        await process_security_alerts(self.bot)
-        await process_shop_requests(self.bot)
+        # Every step is guarded: one error or one slow database call must never stop the loop (a stopped loop does not restart by itself).
+        for step in (process_brand_change, process_owner_jobs, process_import_requests, process_security_alerts, process_shop_requests):
+            try:
+                await asyncio.wait_for(step(self.bot), timeout=45)
+            except asyncio.TimeoutError:
+                print(f"[Owner Jobs Loop] {step.__name__} timed out after 45s")
+            except Exception as e:
+                print(f"[Owner Jobs Loop] {step.__name__} failed: {e!r}")
 
     @owner_jobs_loop.before_loop
     async def before_owner_jobs_loop(self):
